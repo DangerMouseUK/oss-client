@@ -27,6 +27,7 @@ pub struct SandboxOptions {
     pub screenshot: Option<PathBuf>,
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
+    pub mute: bool,
 }
 
 struct Running {
@@ -113,12 +114,18 @@ impl ApplicationHandler for App {
             .options
             .scale
             .unwrap_or_else(|| window.scale_factor().round().max(1.0) as u32);
+        let audio = if self.options.mute {
+            None
+        } else {
+            crate::audio::Audio::new(&self.dir)
+        };
         match Sandbox::new(
             &mut renderer,
             &self.dir,
             &self.level,
             self.options.ship,
             scale,
+            audio,
         ) {
             Ok(sandbox) => {
                 window.request_redraw();

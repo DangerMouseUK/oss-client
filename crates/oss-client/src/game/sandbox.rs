@@ -14,6 +14,7 @@ use winit::keyboard::KeyCode;
 
 use super::art::{self, Art, anim_frame, once_frame};
 use super::input::InputState;
+use crate::audio::Audio;
 use crate::gfx::{Region, Renderer, StarParams, TextureId};
 
 const TICK: Duration = Duration::from_millis(10);
@@ -80,7 +81,18 @@ pub struct Sandbox {
     /// Integer pixel scale (game pixel → physical pixels).
     pub scale: u32,
     pending_multifire: bool,
+    audio: Option<Audio>,
 }
+
+/// Sounds the sandbox uses, loaded up front.
+const SOUNDS: &[&str] = &[
+    "gun1", "gun2", "gun3", "gun4", "bomb1", "bomb2", "bomb3", "bomb4", "mine1", "mine2", "mine3",
+    "mine4", "explode0", "explode1", "explode2", "bounce", "warp", "multion", "multioff", "thrust",
+    "rev",
+];
+
+/// Distance (pixels) at which positional sounds fade out completely.
+const HEARING_RANGE: f32 = 1200.0;
 
 impl Sandbox {
     pub fn new(
@@ -89,7 +101,11 @@ impl Sandbox {
         level_bytes: &[u8],
         ship: u8,
         scale: u32,
+        mut audio: Option<Audio>,
     ) -> Result<Self, String> {
+        if let Some(a) = audio.as_mut() {
+            a.preload(SOUNDS);
+        }
         let level = oss_formats::Level::parse(level_bytes).map_err(|e| format!("map: {e}"))?;
         let (map, objects) = TileMap::from_entries(level.tiles.iter().map(|t| (t.x, t.y, t.tile)));
         let (art, atlas_size, atlas_pixels) =
@@ -119,6 +135,7 @@ impl Sandbox {
             quit: false,
             scale: scale.max(1),
             pending_multifire: false,
+            audio,
         };
         s.spawn_warp_effect();
         Ok(s)
@@ -130,12 +147,32 @@ impl Sandbox {
 
     fn spawn_warp_effect(&mut self) {
         let (x, y) = self.me().pos.to_f32();
+        self.effect(EffectKind::Warp, x, y);
+        self.sound("warp", 1.0, None);
+    }
+
+    fn effect(&mut self, kind: EffectKind, x: f32, y: f32) {
         self.effects.push(Effect {
-            kind: EffectKind::Warp,
+            kind,
             x,
             y,
             start: self.clock,
         });
+    }
+
+    /// Plays a sound; with a position it is attenuated and panned relative to you.
+    fn sound(&mut self, name: &str, gain: f32, at: Option<Pos>) {
+        let (mut gain, mut pan) = (gain, 0.0);
+        if let Some(p) = at {
+            let (x, y) = p.to_f32();
+            let (mx, my) = self.me().pos.to_f32();
+            let (dx, dy) = (x - mx, y - my);
+            gain *= (1.0 - (dx * dx + dy * dy).sqrt() / HEARING_RANGE).max(0.0);
+            pan = (dx / 600.0).clamp(-0.8, 0.8);
+        }
+        if let Some(a) = self.audio.as_mut() {
+            a.play(name, gain, pan);
+        }
     }
 
     /// Handles menu keys and advances the simulation to the current time.
@@ -203,6 +240,21 @@ impl Sandbox {
         }
         let clock = self.clock;
         self.effects.retain(|e| clock - e.start < e.kind.params().2);
+        self.update_engine_sound();
+    }
+
+    fn update_engine_sound(&mut self) {
+        let ship = &self.world.ships[self.me];
+        let (fwd, rev) = match (ship.is_alive(), ship.thrusting) {
+            (true, 1) => (Some("thrust"), None),
+            (true, -1) => (None, Some("rev")),
+            _ => (None, None),
+        };
+        let gain = if ship.afterburning { 0.55 } else { 0.4 };
+        if let Some(a) = self.audio.as_mut() {
+            a.set_loop(0, fwd, gain);
+            a.set_loop(1, rev, gain);
+        }
     }
 
     fn change_ship(&mut self, kind: u8) {
@@ -214,29 +266,41 @@ impl Sandbox {
     }
 
     fn handle_events(&mut self, events: &[Event]) {
+        let ship_pos = |w: &World, id: u16| w.ships.iter().find(|s| s.id == id).map(|s| s.pos);
         for e in events {
             match e {
+                Event::FiredGun { ship, level, .. } => {
+                    let at = ship_pos(&self.world, *ship);
+                    self.sound(&format!("gun{}", (*level).min(3) + 1), 0.8, at);
+                }
+                Event::FiredBomb { ship, level } => {
+                    let at = ship_pos(&self.world, *ship);
+                    self.sound(&format!("bomb{}", (*level).min(3) + 1), 0.9, at);
+                }
+                Event::LaidMine { ship, level } => {
+                    let at = ship_pos(&self.world, *ship);
+                    self.sound(&format!("mine{}", (*level).min(3) + 1), 0.9, at);
+                }
+                Event::MultifireToggled { on, .. } => {
+                    self.sound(if *on { "multion" } else { "multioff" }, 0.8, None);
+                }
+                // Continuum only plays the bounce sound for hard hits (>= 3 tiles/s).
+                Event::WallBounce { ship, speed } if *ship == self.me().id && *speed >= 480 => {
+                    self.sound("bounce", 0.7, None);
+                }
                 Event::Explosion { pos, kind, .. } => {
                     let (x, y) = pos.to_f32();
-                    let kind = match kind {
-                        ProjectileKind::Bullet { .. } => EffectKind::BulletExplosion,
-                        _ => EffectKind::BombExplosion,
+                    let (kind, name) = match kind {
+                        ProjectileKind::Bullet { .. } => (EffectKind::BulletExplosion, "explode0"),
+                        _ => (EffectKind::BombExplosion, "explode2"),
                     };
-                    self.effects.push(Effect {
-                        kind,
-                        x,
-                        y,
-                        start: self.clock,
-                    });
+                    self.effect(kind, x, y);
+                    self.sound(name, 0.9, Some(*pos));
                 }
                 Event::ShipKilled { pos, .. } => {
                     let (x, y) = pos.to_f32();
-                    self.effects.push(Effect {
-                        kind: EffectKind::ShipExplosion,
-                        x,
-                        y,
-                        start: self.clock,
-                    });
+                    self.effect(EffectKind::ShipExplosion, x, y);
+                    self.sound("explode1", 1.0, Some(*pos));
                 }
                 Event::Respawned { ship } if *ship == self.me().id => self.spawn_warp_effect(),
                 _ => {}

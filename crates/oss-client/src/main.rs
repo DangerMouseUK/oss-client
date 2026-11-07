@@ -1,6 +1,7 @@
 //! Open SubSpace game client.
 
 mod app;
+mod audio;
 mod game;
 mod gfx;
 
@@ -17,6 +18,7 @@ Options:
   --scale <n>               Integer pixel scale (default: from display DPI)
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
+  --mute                    No sound
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
   --autopilot               Fly and shoot automatically (testing)
   -h, --help                Show this help";
@@ -55,6 +57,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut fullscreen = false;
     let mut screenshot = None;
     let mut autopilot = false;
+    let mut mute = false;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -82,6 +85,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Command, String> {
             "--fullscreen" => fullscreen = true,
             "--screenshot" => screenshot = Some(PathBuf::from(value("--screenshot")?)),
             "--autopilot" => autopilot = true,
+            "--mute" => mute = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -96,6 +100,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Command, String> {
         fullscreen,
         screenshot,
         autopilot,
+        mute,
     }))
 }
 
