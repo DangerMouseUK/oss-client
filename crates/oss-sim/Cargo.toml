@@ -1,0 +1,13 @@
+[package]
+name = "oss-sim"
+description = "Deterministic SubSpace ship, weapon and collision simulation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

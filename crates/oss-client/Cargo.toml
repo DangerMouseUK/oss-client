@@ -1,0 +1,18 @@
+[package]
+name = "oss-client"
+description = "Open SubSpace game client, compatible with SubSpace/Continuum zones"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-2.0-or-later"
+repository.workspace = true
+
+[dependencies]
+oss-proto.workspace = true
+oss-net.workspace = true
+oss-formats.workspace = true
+oss-sim.workspace = true
+oss-assets.workspace = true
+
+[lints]
+workspace = true

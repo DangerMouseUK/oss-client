@@ -1,0 +1,13 @@
+[package]
+name = "oss-assets"
+description = "Loaders for SubSpace/Continuum graphics (.bm2/.bmp) and sounds (.wa2/.wav)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
