@@ -13,6 +13,8 @@ pub struct ServerOptions {
     pub arena: Option<String>,
     /// 0..=7, or 8 for spectator.
     pub ship: u8,
+    /// Team to join after entering, if not the server's choice.
+    pub freq: Option<i16>,
 }
 
 pub struct Online {
@@ -26,6 +28,8 @@ pub struct Online {
     pub status: String,
     /// Set when the session failed or closed.
     pub error: Option<String>,
+    /// Team requested on the command line.
+    pub freq: Option<i16>,
 }
 
 impl Online {
@@ -53,6 +57,7 @@ impl Online {
             green_seed: 0,
             status: format!("Connecting to {}...", opts.server),
             error: None,
+            freq: opts.freq,
         })
     }
 

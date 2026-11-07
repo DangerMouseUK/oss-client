@@ -19,6 +19,7 @@ Play online:
   --password <pw>           Password (default empty)
   --arena <name>            Arena to enter (default: any public arena)
   --ship <1-8|spec>         Ship to enter in (default spec online, 1 offline)
+  --freq <n>                Team to join (in game: type =n)
 
 Play offline:
   --sandbox <map.lvl>       Fly around a map with stock settings
@@ -62,6 +63,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut password = String::new();
     let mut arena = None;
     let mut ship: Option<u8> = None;
+    let mut freq: Option<i16> = None;
     let mut continuum_dir = None;
     let mut scale = None;
     let mut vsync = false;
@@ -80,6 +82,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--name" => name = Some(value("--name")?),
             "--password" => password = value("--password")?,
             "--arena" => arena = Some(value("--arena")?),
+            "--freq" => {
+                freq = Some(value("--freq")?.parse::<i16>().ok().filter(|f| *f >= 0).ok_or("--freq must be 0 or more")?)
+            }
             "--continuum-dir" => continuum_dir = Some(PathBuf::from(value("--continuum-dir")?)),
             "--ship" => {
                 let v = value("--ship")?;
@@ -132,6 +137,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             password,
             arena,
             ship: ship.unwrap_or(oss_session::SPECTATOR),
+            freq,
         }),
         (None, None) => {
             return Err("nothing to do: pass --server <host:port> or --sandbox <map.lvl>".into());

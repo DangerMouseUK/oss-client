@@ -15,8 +15,9 @@ Status: early development. The offline sandbox works, and the client can join a 
 cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --ship 1
 ```
 
-Enter opens the chat box (`'text` team chat, `:name:text` private, `?command` goes to
-the server). Esc opens the menu: 1-8 change ship, S spectate, Q quit.
+Enter opens the chat box (`'text` team chat, `:name:text` private, `=N` change team,
+`?command` goes to the server). Esc opens the menu: 1-8 change ship, S spectate, Q quit.
+Maps you download are cached per server.
 
 ## Try the sandbox
 

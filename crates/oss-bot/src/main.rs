@@ -163,16 +163,26 @@ impl Bot {
                 SessionEvent::Playing => {
                     let n = self.session.players().count();
                     self.log(format_args!("in the arena with {n} player(s)"));
-                    if opts.fly && opts.ship != SPECTATOR {
+                    // Servers start you as a spectator; ask for the ship.
+                    let current = self.session.me().map(|p| p.ship).unwrap_or(SPECTATOR);
+                    if opts.ship != SPECTATOR && current != opts.ship {
+                        self.session.set_ship(opts.ship);
+                    } else if opts.fly && opts.ship != SPECTATOR {
                         self.start_flying(opts.ship);
                     }
                 }
                 SessionEvent::PlayerEntered(pid) => {
                     if let Some(p) = self.session.player(pid) {
-                        self.log(format_args!("{} entered", p.name));
+                        self.log(format_args!("{} entered (ship {}, freq {})", p.name, p.ship + 1, p.freq));
                     }
                 }
                 SessionEvent::PlayerLeft(pid) => self.log(format_args!("pid {pid} left")),
+                SessionEvent::ShipChanged { pid, ship, freq } if Some(pid) == self.session.pid() => {
+                    self.log(format_args!("now in ship {} on freq {freq}", ship + 1));
+                    if opts.fly && ship != SPECTATOR && self.world.is_none() {
+                        self.start_flying(ship);
+                    }
+                }
                 SessionEvent::Chat {
                     kind, name, text, ..
                 } => {

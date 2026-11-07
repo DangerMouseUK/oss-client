@@ -195,6 +195,16 @@ impl Sandbox {
             .and_then(|l| l.tileset.as_ref())
             .map(|t| t.bytes.as_slice());
         let spectating = me.ship == SPECTATOR;
+        // ASSS-style servers start everyone as a spectator and ignore the ship in the
+        // arena request; ask for the one we want. The ship appears when the server
+        // confirms with a ship change.
+        let wanted = net.session.config().ship;
+        if wanted != SPECTATOR && me.ship != wanted {
+            net.session.set_ship(wanted);
+        }
+        if let Some(freq) = net.freq.filter(|&f| f != me.freq) {
+            net.session.set_freq(freq);
+        }
         let arena = net
             .session
             .config()
@@ -309,10 +319,9 @@ impl Sandbox {
     }
 
     pub fn message(&mut self, text: impl Into<String>, color: u32) {
-        self.messages.push(Message {
-            text: text.into(),
-            color,
-        });
+        let text = text.into();
+        log::debug!("message: {text}");
+        self.messages.push(Message { text, color });
         if self.messages.len() > MAX_MESSAGES {
             self.messages.remove(0);
         }
@@ -545,6 +554,12 @@ impl Sandbox {
             self.local_command(line);
             return;
         };
+        // "=N" changes team, as in Continuum.
+        if let Some(freq) = line.strip_prefix('=').and_then(|f| f.trim().parse::<i16>().ok()) {
+            net.session.set_freq(freq);
+            net.flush();
+            return;
+        }
         let me_name = net.session.me().map(|p| p.name.clone()).unwrap_or_default();
         let (kind, target, text, shown, colour) = if let Some(t) = line.strip_prefix('\'') {
             (
