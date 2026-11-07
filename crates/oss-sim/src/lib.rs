@@ -11,7 +11,7 @@ pub mod settings;
 pub mod world;
 
 pub use fixed::{POS_SCALE, Pos, TICKS_PER_SECOND, VEL_SCALE, Vec2, Vel};
-pub use map::{MAP_TILES, TileMap, is_solid_id, tile};
+pub use map::{MAP_TILES, MapObject, TileMap, is_animated_object, is_solid_id, object_size, tile};
 pub use settings::{ArenaSettings, STOCK_SHIP, ShipSettings};
 pub use world::{Event, Projectile, ProjectileKind, Ship, ShipInput, ShipState, ShipStats, World};
 

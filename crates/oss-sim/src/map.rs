@@ -38,6 +38,39 @@ pub const fn is_solid_id(id: u8) -> bool {
     }
 }
 
+/// Size in tiles of map objects that occupy more than one tile. The `.lvl` file stores
+/// only the top-left tile; the rest of the square is filled with the same id.
+pub const fn object_size(id: u8) -> u8 {
+    match id {
+        tile::ASTEROID_LARGE => 2,
+        tile::SPACE_STATION => 6,
+        tile::WORMHOLE => 5,
+        _ => 1,
+    }
+}
+
+/// Whether a tile id is drawn as an animated object rather than from the tileset.
+pub const fn is_animated_object(id: u8) -> bool {
+    matches!(
+        id,
+        tile::FLAG
+            | tile::GOAL
+            | tile::ASTEROID_SMALL_1
+            | tile::ASTEROID_LARGE
+            | tile::ASTEROID_SMALL_2
+            | tile::SPACE_STATION
+            | tile::WORMHOLE
+    )
+}
+
+/// An animated map object's top-left tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapObject {
+    pub x: u16,
+    pub y: u16,
+    pub id: u8,
+}
+
 /// A 1024×1024 tile grid.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TileMap {
@@ -71,6 +104,30 @@ impl TileMap {
         let n = cells.len().min(MAP_TILES * MAP_TILES);
         m.tiles[..n].copy_from_slice(&cells[..n]);
         m
+    }
+
+    /// Builds a map from `.lvl` tile entries `(x, y, id)`, expanding multi-tile objects
+    /// and collecting animated objects (asteroids, stations, wormholes, goals, flags).
+    pub fn from_entries(
+        entries: impl IntoIterator<Item = (u16, u16, u8)>,
+    ) -> (Self, Vec<MapObject>) {
+        let mut m = Self::empty();
+        let mut objects = Vec::new();
+        for (x, y, id) in entries {
+            if x as usize >= MAP_TILES || y as usize >= MAP_TILES {
+                continue;
+            }
+            if is_animated_object(id) {
+                objects.push(MapObject { x, y, id });
+            }
+            let size = object_size(id) as i32;
+            for dy in 0..size {
+                for dx in 0..size {
+                    m.set(x as i32 + dx, y as i32 + dy, id);
+                }
+            }
+        }
+        (m, objects)
     }
 
     pub fn cells(&self) -> &[u8] {
@@ -158,6 +215,23 @@ mod tests {
         assert!(!is_solid_id(241));
         assert!(is_solid_id(tile::BRICK));
         assert!(!is_solid_id(255));
+    }
+
+    #[test]
+    fn objects_expand() {
+        let (m, objs) =
+            TileMap::from_entries([(10, 10, tile::SPACE_STATION), (1, 1, 5), (2000, 0, 1)]);
+        assert_eq!(
+            objs,
+            vec![MapObject {
+                x: 10,
+                y: 10,
+                id: tile::SPACE_STATION
+            }]
+        );
+        assert_eq!(m.get(15, 15), tile::SPACE_STATION);
+        assert_eq!(m.get(16, 15), 0);
+        assert_eq!(m.get(1, 1), 5);
     }
 
     #[test]
