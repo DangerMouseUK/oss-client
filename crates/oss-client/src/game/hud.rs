@@ -23,14 +23,16 @@ pub struct RadarCache {
 }
 
 pub fn draw(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
-    draw_energy(s, c, r);
-    draw_items(s, c, r);
+    if !s.spectating {
+        draw_energy(s, c, r);
+        draw_items(s, c, r);
+    }
     draw_radar(s, c, r);
     draw_messages(s, c, r);
 }
 
 fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
-    let me = &s.world.ships[s.me];
+    let me = s.me();
     let a = &s.art;
     let settings = &s.world.settings.ships[me.kind as usize];
     let white = [1.0; 4];
@@ -136,7 +138,7 @@ fn bomb_icon(me: &Ship) -> Option<u32> {
 
 fn draw_items(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
     let a: &Art = &s.art;
-    let me = &s.world.ships[s.me];
+    let me = s.me();
     let white = [1.0; 4];
     if a.icons.w == 0 || !me.is_alive() {
         return;
@@ -294,7 +296,7 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
         return;
     };
     let full = radar.full_dim as f32;
-    let me = &s.world.ships[s.me];
+    let me = s.me();
     let to_radar = |px: f32| px * full / 16384.0;
     let (dim, min_x, min_y, x0, y0) = if s.big_radar {
         // Whole map, as large as fits, centred.
@@ -309,7 +311,8 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
     } else {
         // About a sixth of the screen width, centred on you, as in Continuum.
         let dim = ((((c.view_w as u32 / 6) / 4) * 8) / 2) as f32;
-        let p = me.pos.pixels();
+        // Centred on the camera (your ship, or the spectator view).
+        let p = oss_sim::Vec2::new(c.cam.0 as i32, c.cam.1 as i32);
         let min_x = (to_radar(p.x as f32) - dim / 2.0)
             .floor()
             .clamp(0.0, (full - dim).max(0.0));
@@ -390,8 +393,8 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
 }
 
 fn draw_messages(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
-    let me = &s.world.ships[s.me];
-    if !me.is_alive() {
+    let me = s.me();
+    if !me.is_alive() && !s.spectating {
         let msg = "You have been destroyed";
         c.text(
             r,

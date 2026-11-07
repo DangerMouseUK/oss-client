@@ -13,6 +13,7 @@ oss-net.workspace = true
 oss-formats.workspace = true
 oss-sim.workspace = true
 oss-assets.workspace = true
+oss-session.workspace = true
 winit = "0.30"
 wgpu = "30"
 gilrs = "0.11"

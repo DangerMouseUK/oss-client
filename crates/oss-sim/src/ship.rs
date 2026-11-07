@@ -151,6 +151,9 @@ pub struct Ship {
     /// Whether this world applies damage to this ship (true for the local ship; remote
     /// ships report their own damage over the network).
     pub takes_damage: bool,
+    /// Driven by network updates rather than local input: never respawns, warps or
+    /// picks up prizes on its own.
+    pub remote: bool,
     /// Afterburners were burning energy on the last tick.
     pub afterburning: bool,
     /// -1 reverse, 0 none, 1 forward thrust on the last tick (for exhaust effects).
@@ -196,6 +199,7 @@ impl Ship {
             multifire: false,
             bounty: 0,
             takes_damage: true,
+            remote: false,
             afterburning: false,
             thrusting: 0,
             next_gun_tick: 0,

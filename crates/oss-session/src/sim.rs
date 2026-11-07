@@ -3,9 +3,49 @@
 
 use oss_proto::position::weapon_type;
 use oss_proto::{ClientSettings, WeaponInfo};
-use oss_sim::{ArenaSettings, Event, MapObject, Ship, TileMap, World, cap};
+use oss_sim::{
+    ArenaSettings, Event, MapObject, RemoteState, RemoteWeapon, RemoteWeaponKind, Ship, TileMap,
+    World, cap,
+};
 
-use crate::OwnPosition;
+use crate::{OwnPosition, RemotePosition};
+
+/// A remote player's reported position, for [`World::set_remote_state`].
+pub fn remote_state(p: &RemotePosition) -> RemoteState {
+    RemoteState {
+        x: p.x as i32,
+        y: p.y as i32,
+        x_speed: p.x_speed as i32,
+        y_speed: p.y_speed as i32,
+        direction: p.rotation % 40,
+        toggles: p.status,
+        bounty: p.bounty as u32,
+        energy: p.energy.map(u32::from),
+    }
+}
+
+/// The weapon in a weapon packet, for [`World::fire_remote`].
+pub fn remote_weapon(w: WeaponInfo) -> Option<RemoteWeapon> {
+    let kind = match w.kind() {
+        weapon_type::BULLET => RemoteWeaponKind::Bullet,
+        weapon_type::BOUNCE_BULLET => RemoteWeaponKind::BouncingBullet,
+        weapon_type::BOMB => RemoteWeaponKind::Bomb,
+        weapon_type::PROX_BOMB => RemoteWeaponKind::ProximityBomb,
+        weapon_type::REPEL => RemoteWeaponKind::Repel,
+        weapon_type::DECOY => RemoteWeaponKind::Decoy,
+        weapon_type::BURST => RemoteWeaponKind::Burst,
+        weapon_type::THOR => RemoteWeaponKind::Thor,
+        _ => return None,
+    };
+    Some(RemoteWeapon {
+        kind,
+        level: w.level(),
+        alternate: w.alternate(),
+        shrap: w.shrap(),
+        shrap_level: w.shrap_level(),
+        shrap_bouncing: w.shrap_bouncing(),
+    })
+}
 
 /// Your ship as a position packet. `weapon` is set when a weapon was fired.
 pub fn own_position(ship: &Ship, weapon: Option<WeaponInfo>) -> OwnPosition {
@@ -139,5 +179,8 @@ mod tests {
         );
         let w = weapon_for(&Event::LaidMine { ship: 3, level: 0 }, &ship).unwrap();
         assert_eq!((w.kind(), w.alternate()), (weapon_type::BOMB, true));
+        let r = remote_weapon(w).unwrap();
+        assert_eq!((r.kind, r.alternate), (RemoteWeaponKind::Bomb, true));
+        assert!(remote_weapon(WeaponInfo::default()).is_none());
     }
 }

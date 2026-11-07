@@ -15,7 +15,7 @@ use oss_net::{Config, Event, Server, VieAcceptor};
 use oss_proto::c2s::GoArena;
 use oss_proto::common::PlayerData;
 use oss_proto::s2c::{
-    ChatBody, EnteringArena, LoginResponse, MapData, MapFilename, PlayerEntering, PlayerId,
+    ChatBody, EnteringArena, Kill, LoginResponse, MapData, MapFilename, PlayerEntering, PlayerId,
     PlayerLeaving, S2CChat, Security, ShipChange,
 };
 use oss_proto::{
@@ -178,13 +178,15 @@ impl TestZone {
                 self.next_pid += 1;
                 let name = l.name.to_str().unwrap_or("player").trim().to_string();
                 log::info!("test zone: {name} logged in from {from} as pid {pid}");
+                // Two public teams, alternating, so players can fight.
+                let freq = pid % 2;
                 self.players.insert(
                     from,
                     ZonePlayer {
                         pid,
                         name,
                         ship: SPECTATOR,
-                        freq: 0,
+                        freq,
                         in_arena: false,
                     },
                 );
@@ -217,6 +219,33 @@ impl TestZone {
                     text: c.0.text,
                 });
                 for to in self.others(from) {
+                    self.send(to, &out, true);
+                }
+            }
+            C2SPacket::Death(d) => {
+                let Some(me) = self.players.get(&from) else {
+                    return;
+                };
+                log::info!(
+                    "test zone: {} (pid {}) killed by pid {}",
+                    me.name,
+                    me.pid,
+                    d.killer
+                );
+                let out = Kill {
+                    green: 0,
+                    killer: d.killer,
+                    killed: me.pid,
+                    bounty: d.bounty,
+                    flags: 0,
+                };
+                let all: Vec<SocketAddr> = self
+                    .players
+                    .iter()
+                    .filter(|(_, p)| p.in_arena)
+                    .map(|(a, _)| *a)
+                    .collect();
+                for to in all {
                     self.send(to, &out, true);
                 }
             }

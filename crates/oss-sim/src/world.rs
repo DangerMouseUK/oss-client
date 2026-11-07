@@ -440,7 +440,7 @@ impl World {
         ship.toggles &= !toggle::FLASH;
 
         if let ShipState::Dead { respawn_tick } = ship.state {
-            if tick_reached(tick, respawn_tick) {
+            if !ship.remote && tick_reached(tick, respawn_tick) {
                 self.respawn(index);
                 events.push(Event::Respawned {
                     ship: self.ships[index].id,
@@ -604,7 +604,7 @@ impl World {
 
         // Wormholes send you back to spawn with 20% energy left (Continuum behaviour).
         let p = ship.pos.pixels();
-        if self.map.tile_at_pixel(p.x, p.y) == tile::WORMHOLE {
+        if !ship.remote && self.map.tile_at_pixel(p.x, p.y) == tile::WORMHOLE {
             let energy = (ship.energy - ship.energy * 4 / 5).max(ENERGY_SCALE);
             let from = ship.pos;
             let mut moved = ship.clone();

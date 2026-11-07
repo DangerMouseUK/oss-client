@@ -1653,6 +1653,7 @@ dependencies = [
  "oss-formats",
  "oss-net",
  "oss-proto",
+ "oss-session",
  "oss-sim",
  "png",
  "pollster",

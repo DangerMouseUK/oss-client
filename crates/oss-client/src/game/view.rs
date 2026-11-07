@@ -66,6 +66,12 @@ impl Canvas {
         )
     }
 
+    /// UI position (game pixels from the top-left of the screen) of world pixel (x, y).
+    pub fn world_to_ui(&self, x: f32, y: f32) -> (f32, f32) {
+        let (px, py) = self.to_screen(x, y);
+        (px / self.scale, py / self.scale)
+    }
+
     /// Draws `region` with its top-left at world pixel (x, y).
     pub fn world(&self, r: &mut Renderer, region: Region, x: f32, y: f32) {
         self.world_tint(r, region, x, y, [1.0; 4]);
@@ -196,7 +202,7 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
     let a = &s.art;
     let t = s.clock;
     let world = &s.world;
-    let me = &world.ships[s.me];
+    let me = s.me();
 
     // --- Tiles -------------------------------------------------------------------------
     let tx0 = ((c.cam.0 - c.view_w / 2.0) / 16.0).floor() as i32 - 1;
@@ -371,6 +377,7 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
 
     // --- Ships ---------------------------------------------------------------------------
     let xradar = me.is_on(toggle::XRADAR);
+    let mut labels = Vec::new();
     for ship in &world.ships {
         if !ship.is_alive() {
             continue;
@@ -384,6 +391,17 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         let dir = lerp_direction(ship.prev_rotation, ship.rotation, alpha);
         let alpha_tint = if cloaked { 0.35 } else { 1.0 };
         let region = a.ship(ship.kind, dir);
+        if !is_me && let Some(label) = s.player_label(ship.id) {
+            // Continuum puts the name and bounty at the ship's lower right, in team
+            // colour (yellow for your team, blue for enemies).
+            let (ux, uy) = c.world_to_ui(x + 14.0, y + 10.0);
+            let col = if ship.freq == me.freq {
+                color::YELLOW
+            } else {
+                color::BLUE
+            };
+            labels.push((ux, uy, col, label));
+        }
         c.world_tint(
             r,
             region,
@@ -391,6 +409,10 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
             (y - 18.0).round(),
             [1.0, 1.0, 1.0, alpha_tint],
         );
+    }
+
+    for (ux, uy, col, label) in labels {
+        c.text(r, ux.round(), uy.round(), col, &label);
     }
 
     // --- Fly-under tiles (drawn over ships) ------------------------------------------------

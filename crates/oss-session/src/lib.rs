@@ -806,6 +806,22 @@ impl Session {
         self.send(&c2s::C2SChat(body), true);
     }
 
+    /// Asks the server to place a brick at tile (x, y) (C2S `0x1C`).
+    pub fn send_brick(&mut self, x: i16, y: i16) {
+        self.send(&c2s::DropBrick { x, y }, true);
+    }
+
+    /// Reports your death (C2S `0x05`).
+    pub fn send_death(&mut self, killer: i16, bounty: u16) {
+        self.send(
+            &c2s::Death {
+                killer,
+                bounty: bounty.min(i16::MAX as u16) as i16,
+            },
+            true,
+        );
+    }
+
     pub fn set_ship(&mut self, ship: u8) {
         self.send(
             &SetShip {

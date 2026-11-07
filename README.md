@@ -6,7 +6,17 @@ An open-source, cross-platform game client for SubSpace/Continuum, written in Ru
 - Plays on existing zones; feels like Continuum to veterans.
 - Reads graphics and sounds from your own Continuum install; ships none.
 
-Status: early development. The offline sandbox works; networked play is in progress.
+Status: early development. The offline sandbox works, and the client can join a zone
+(tested against the local test zone below; `oss-server` networking is in progress).
+
+## Play online
+
+```
+cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --ship 1
+```
+
+Enter opens the chat box (`'text` team chat, `:name:text` private, `?command` goes to
+the server). Esc opens the menu: 1-8 change ship, S spectate, Q quit.
 
 ## Try the sandbox
 

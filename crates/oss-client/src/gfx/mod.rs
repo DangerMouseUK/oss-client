@@ -464,10 +464,12 @@ impl Renderer {
                 f
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                log::debug!("frame skipped (timeout/occluded)");
                 self.clear_queue();
                 return Err(FrameError::Skip);
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                log::debug!("frame skipped (surface outdated/lost)");
                 self.surface.configure(&self.device, &self.config);
                 self.clear_queue();
                 return Err(FrameError::Skip);
@@ -580,7 +582,12 @@ impl Renderer {
     fn save_capture(&self, path: &std::path::Path, buffer: &wgpu::Buffer, row: u32) {
         let (w, h) = (self.config.width, self.config.height);
         buffer.map_async(wgpu::MapMode::Read, .., |_| {});
-        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+        // Never hang the game on a capture (e.g. if the display is asleep).
+        let wait = wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(2)),
+        };
+        if let Err(e) = self.device.poll(wait) {
             log::warn!("capture failed: {e}");
             return;
         }

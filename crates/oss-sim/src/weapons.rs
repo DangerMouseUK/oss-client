@@ -511,7 +511,7 @@ impl World {
     }
 
     /// Pushes enemy weapons and ships away from ship `index`.
-    fn repel(&mut self, index: usize, _events: &mut [Event]) {
+    pub(crate) fn repel(&mut self, index: usize, _events: &mut [Event]) {
         let tick = self.tick;
         let me = &self.ships[index];
         let (center, freq) = (me.pos.pixels(), me.freq);
@@ -959,13 +959,13 @@ impl World {
     }
 }
 
-fn vel(v: Vec2<i64>) -> Vel {
+pub(crate) fn vel(v: Vec2<i64>) -> Vel {
     Vel::new(v.x as i32, v.y as i32)
 }
 
 /// Seed for a bomb's shrapnel spread, from its launch state (so every client that saw
 /// the same weapon packet sprays the same shrapnel).
-fn shrap_seed(pr: &Projectile) -> u32 {
+pub(crate) fn shrap_seed(pr: &Projectile) -> u32 {
     let p = pr.pos.pixels();
     let v = pr.vel.to_wire();
     (pr.shrap as u32)
