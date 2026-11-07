@@ -8,6 +8,9 @@ multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
+# Vulnerabilities fail at any depth; "unmaintained" only for crates we depend on
+# directly (transitive ones are tracked in the decisions notes instead).
+unmaintained = "workspace"
 
 [sources]
 unknown-registry = "deny"

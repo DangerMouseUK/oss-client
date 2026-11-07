@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oss_assets::ContinuumDir;
+use oss_assets::{AssetDirs, AssetSearch};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -22,14 +22,17 @@ use crate::gfx::{FrameError, Renderer, TextureId};
 
 /// What to play.
 pub enum Mode {
-    /// Offline, on a local map.
-    Sandbox { map: PathBuf, ship: u8 },
+    /// Offline, on a local map (or the built-in one).
+    Sandbox { map: Option<PathBuf>, ship: u8 },
     /// Online, in a zone.
     Zone(ServerOptions),
 }
 
 pub struct Options {
     pub mode: Mode,
+    /// Asset folder overriding the bundled assets (`--assets-dir`).
+    pub assets_dir: Option<PathBuf>,
+    /// A Continuum install to take assets from (`--continuum-dir`).
     pub continuum_dir: Option<PathBuf>,
     /// Integer pixel scale; `None` picks one from the display's DPI.
     pub scale: Option<u32>,
@@ -72,7 +75,7 @@ struct Running {
 
 struct App {
     options: Options,
-    dir: ContinuumDir,
+    dir: AssetDirs,
     level: Vec<u8>,
     running: Option<Running>,
     input: InputState,
@@ -81,17 +84,32 @@ struct App {
 }
 
 pub fn run(options: Options) -> Result<(), String> {
-    let dir = ContinuumDir::locate(options.continuum_dir.as_deref()).map_err(|e| {
+    let search = AssetSearch {
+        assets_dir: options.assets_dir.clone(),
+        continuum_dir: options.continuum_dir.clone(),
+        // Development builds also find the repository's bundled folder.
+        dev_dir: cfg!(debug_assertions)
+            .then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/classic")),
+        discover_install: true,
+    };
+    let dir = AssetDirs::locate(&search).map_err(|e| {
         format!(
-            "{e}\nPoint --continuum-dir (or {}) at your Continuum folder.",
-            oss_assets::ENV_VAR
+            "{e}
+Put the game graphics in assets/classic beside the program, or point              --assets-dir ({}) or --continuum-dir at a folder that has them.",
+            oss_assets::ASSETS_ENV_VAR
         )
     })?;
-    log::info!("Continuum assets: {}", dir.root().display());
+    let shown: Vec<String> = dir
+        .roots()
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect();
+    log::info!("assets: {}", shown.join(", "));
     let level = match &options.mode {
-        Mode::Sandbox { map, .. } => {
+        Mode::Sandbox { map: Some(map), .. } => {
             oss_assets::locate::read_file(map).map_err(|e| e.to_string())?
         }
+        Mode::Sandbox { map: None, .. } => crate::game::default_map::default_map(),
         Mode::Zone(_) => Vec::new(),
     };
 

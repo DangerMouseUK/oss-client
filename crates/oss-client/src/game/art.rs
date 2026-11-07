@@ -1,6 +1,6 @@
 //! Loads the Continuum graphics the game draws into one texture atlas.
 
-use oss_assets::{ContinuumDir, Image, decode_image};
+use oss_assets::{AssetDirs, Image, decode_image};
 
 use crate::gfx::{AtlasBuilder, Region};
 
@@ -111,10 +111,7 @@ pub fn prepare_tileset(mut img: Image) -> Image {
 
 /// Builds the atlas. `level_tileset` is the `.lvl`'s embedded BMP, if any; otherwise
 /// the install's `tiles.bm2` is used.
-pub fn load(
-    dir: &ContinuumDir,
-    level_tileset: Option<&[u8]>,
-) -> Result<(Art, u32, Vec<u8>), String> {
+pub fn load(dir: &AssetDirs, level_tileset: Option<&[u8]>) -> Result<(Art, u32, Vec<u8>), String> {
     let mut atlas = AtlasBuilder::new(ATLAS_SIZE);
     let mut add = |img: &Image| {
         atlas

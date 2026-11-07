@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
-use oss_assets::{ContinuumDir, Sound};
+use oss_assets::{AssetDirs, Sound};
 
 /// Most simultaneous one-shot voices; the oldest is dropped beyond this.
 const MAX_VOICES: usize = 48;
@@ -132,14 +132,14 @@ pub struct Audio {
     _stream: cpal::Stream,
     tx: Sender<Command>,
     rate: u32,
-    dir: ContinuumDir,
+    dir: AssetDirs,
     cache: HashMap<String, Option<Samples>>,
 }
 
 impl Audio {
     /// Opens the default output device. Returns `None` (with a log line) when there is
     /// no usable audio device, so the game runs silently.
-    pub fn new(dir: &ContinuumDir) -> Option<Self> {
+    pub fn new(dir: &AssetDirs) -> Option<Self> {
         let host = cpal::default_host();
         let device = host.default_output_device().or_else(|| {
             log::warn!("no audio output device; sound disabled");

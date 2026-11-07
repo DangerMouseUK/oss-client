@@ -19,10 +19,12 @@ const MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum AssetError {
-    #[error("no Continuum install found (tried: {})", display_paths(.0))]
+    #[error("no game graphics found (tried: {})", display_paths(.0))]
     NotFound(Vec<PathBuf>),
-    #[error("{0} is not a Continuum folder (no graphics/ships.bm2)")]
+    #[error("{0} is not a complete asset folder (no graphics/ships.bm2)")]
     NotAnInstall(PathBuf),
+    #[error("{0} is not a folder")]
+    NotADirectory(PathBuf),
     #[error("asset {0} not found")]
     Missing(String),
     #[error("{path}: {source}")]
@@ -132,7 +134,7 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>, AssetError> {
 }
 
 /// Case-insensitive lookup of one directory entry.
-fn find_entry(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn find_entry(dir: &Path, name: &str) -> Option<PathBuf> {
     let exact = dir.join(name);
     if exact.exists() {
         return Some(exact);
@@ -144,7 +146,7 @@ fn find_entry(dir: &Path, name: &str) -> Option<PathBuf> {
     })
 }
 
-fn is_install(dir: &Path) -> bool {
+pub(crate) fn is_install(dir: &Path) -> bool {
     find_entry(dir, "graphics")
         .and_then(|g| find_entry(&g, "ships.bm2"))
         .is_some()

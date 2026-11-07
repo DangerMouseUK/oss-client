@@ -4,7 +4,7 @@ An open-source, cross-platform game client for SubSpace/Continuum, written in Ru
 
 - Windows, macOS and Linux (browser later), any resolution, high refresh rates, gamepads.
 - Plays on existing zones; feels like Continuum to veterans.
-- Reads graphics and sounds from your own Continuum install; ships none.
+- Graphics and sounds come from an asset folder, which your own folder can override.
 
 Status: early development. The offline sandbox works, and the client can join a zone
 (tested against the local test zone below; `oss-server` networking is in progress).
@@ -21,11 +21,18 @@ Maps you download are cached per server.
 
 ## Try the sandbox
 
-You need a Continuum install for graphics and sounds (the client finds Steam and
-standard installs automatically, or set `OSS_CONTINUUM_DIR` / pass `--continuum-dir`).
-Any `.lvl` map works, e.g. one from a zone you've visited (`Continuum/zones/<zone>/`):
+Graphics and sounds are looked up, file by file, in this order:
+
+1. `--assets-dir <dir>` / `OSS_ASSETS_DIR` (your own folder; it may hold only some files)
+2. `--continuum-dir <dir>` / `OSS_CONTINUUM_DIR` (a Continuum install)
+3. `assets/classic` next to the program (and the repository's `assets/classic` in
+   development builds)
+4. a Continuum install found automatically (Steam or standard paths)
+
+Run the sandbox on the built-in arena, or on any `.lvl` map:
 
 ```
+cargo run --release -p oss-client -- --sandbox
 cargo run --release -p oss-client -- --sandbox path/to/map.lvl
 ```
 

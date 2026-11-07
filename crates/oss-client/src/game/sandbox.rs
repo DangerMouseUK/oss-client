@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use oss_assets::ContinuumDir;
+use oss_assets::AssetDirs;
 use oss_session::sim::{arena_world, own_position, remote_state, remote_weapon, weapon_for};
 use oss_session::{SPECTATOR, SessionEvent, chat_type};
 use oss_sim::{
@@ -138,7 +138,7 @@ impl Sandbox {
     /// Offline: fly `ship` around `level_bytes` with stock settings.
     pub fn new(
         renderer: &mut Renderer,
-        dir: &ContinuumDir,
+        dir: &AssetDirs,
         level_bytes: &[u8],
         ship: u8,
         scale: u32,
@@ -162,7 +162,7 @@ impl Sandbox {
     /// Online: the arena `net` has finished entering.
     pub fn new_online(
         renderer: &mut Renderer,
-        dir: &ContinuumDir,
+        dir: &AssetDirs,
         mut net: Online,
         scale: u32,
         audio: Option<Audio>,
@@ -235,7 +235,7 @@ impl Sandbox {
     #[allow(clippy::too_many_arguments)]
     fn build(
         renderer: &mut Renderer,
-        dir: &ContinuumDir,
+        dir: &AssetDirs,
         tileset: Option<&[u8]>,
         world: World,
         objects: Vec<MapObject>,

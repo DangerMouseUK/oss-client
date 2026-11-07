@@ -11,7 +11,7 @@ use game::online::ServerOptions;
 
 const USAGE: &str = "\
 Usage: oss-client --server <host:port> --name <name> [options]
-       oss-client --sandbox <map.lvl> [options]
+       oss-client --sandbox [map.lvl] [options]
 
 Play online:
   --server <host:port>      Zone to join
@@ -22,11 +22,14 @@ Play online:
   --freq <n>                Team to join (in game: type =n)
 
 Play offline:
-  --sandbox <map.lvl>       Fly around a map with stock settings
+  --sandbox [map.lvl]       Fly around a map (default: a built-in arena) with stock
+                            settings
 
 Options:
-  --continuum-dir <dir>     Continuum install to read graphics/sounds from
-                            (default: OSS_CONTINUUM_DIR, then Steam/standard paths)
+  --assets-dir <dir>        Graphics/sounds that override the bundled ones
+                            (also OSS_ASSETS_DIR); may hold only some files
+  --continuum-dir <dir>     Take graphics/sounds from a Continuum install
+                            (also OSS_CONTINUUM_DIR)
   --scale <n>               Integer pixel scale (default: from display DPI)
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
@@ -65,6 +68,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut ship: Option<u8> = None;
     let mut freq: Option<i16> = None;
     let mut continuum_dir = None;
+    let mut assets_dir = None;
+    let mut sandbox = false;
     let mut scale = None;
     let mut vsync = false;
     let mut fullscreen = false;
@@ -77,7 +82,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
-            "--sandbox" => map = Some(PathBuf::from(value("--sandbox")?)),
+            "--sandbox" => {
+                sandbox = true;
+                if args.peek().is_some_and(|a| !a.starts_with("--")) {
+                    map = args.next().map(PathBuf::from);
+                }
+            }
+            "--assets-dir" => assets_dir = Some(PathBuf::from(value("--assets-dir")?)),
             "--server" => server = Some(value("--server")?),
             "--name" => name = Some(value("--name")?),
             "--password" => password = value("--password")?,
@@ -128,16 +139,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    let mode = match (map, server) {
-        (Some(_), Some(_)) => return Err("use either --sandbox or --server, not both".into()),
-        (Some(map), None) => {
+    let mode = match (sandbox, server) {
+        (true, Some(_)) => return Err("use either --sandbox or --server, not both".into()),
+        (true, None) => {
             let ship = ship.unwrap_or(0);
             if ship == oss_session::SPECTATOR {
                 return Err("the sandbox needs a ship (1-8)".into());
             }
             app::Mode::Sandbox { map, ship }
         }
-        (None, Some(server)) => app::Mode::Zone(ServerOptions {
+        (false, Some(server)) => app::Mode::Zone(ServerOptions {
             server,
             name: name.ok_or("--name is required online")?,
             password,
@@ -145,12 +156,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             ship: ship.unwrap_or(oss_session::SPECTATOR),
             freq,
         }),
-        (None, None) => {
+        (false, None) => {
             return Err("nothing to do: pass --server <host:port> or --sandbox <map.lvl>".into());
         }
     };
     Ok(Some(app::Options {
         mode,
+        assets_dir,
         continuum_dir,
         scale,
         vsync,
@@ -175,10 +187,13 @@ mod tests {
         let o = parse("--sandbox m.lvl --ship 3 --scale 2 --vsync")
             .unwrap()
             .unwrap();
-        assert!(
-            matches!(&o.mode, app::Mode::Sandbox { map, ship: 2 } if map == &PathBuf::from("m.lvl"))
-        );
+        assert!(matches!(
+            &o.mode,
+            app::Mode::Sandbox { map: Some(map), ship: 2 } if map == &PathBuf::from("m.lvl")
+        ));
         assert_eq!((o.scale, o.vsync), (Some(2), true));
+        let o = parse("--sandbox --ship 2").unwrap().unwrap();
+        assert!(matches!(&o.mode, app::Mode::Sandbox { map: None, ship: 1 }));
         let o = parse("--server 127.0.0.1:5000 --name Bob --ship 4")
             .unwrap()
             .unwrap();
