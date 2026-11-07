@@ -8,6 +8,7 @@ license = "MIT"
 repository.workspace = true
 
 [dependencies]
+oss-proto.workspace = true
 
 [lints]
 workspace = true

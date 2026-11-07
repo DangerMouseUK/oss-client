@@ -1668,6 +1668,9 @@ version = "0.1.0"
 [[package]]
 name = "oss-sim"
 version = "0.1.0"
+dependencies = [
+ "oss-proto",
+]
 
 [[package]]
 name = "owned_ttf_parser"
