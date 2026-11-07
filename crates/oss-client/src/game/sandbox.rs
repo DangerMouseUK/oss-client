@@ -555,7 +555,10 @@ impl Sandbox {
             return;
         };
         // "=N" changes team, as in Continuum.
-        if let Some(freq) = line.strip_prefix('=').and_then(|f| f.trim().parse::<i16>().ok()) {
+        if let Some(freq) = line
+            .strip_prefix('=')
+            .and_then(|f| f.trim().parse::<i16>().ok())
+        {
             net.session.set_freq(freq);
             net.flush();
             return;

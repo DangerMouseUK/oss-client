@@ -83,7 +83,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--password" => password = value("--password")?,
             "--arena" => arena = Some(value("--arena")?),
             "--freq" => {
-                freq = Some(value("--freq")?.parse::<i16>().ok().filter(|f| *f >= 0).ok_or("--freq must be 0 or more")?)
+                freq = Some(
+                    value("--freq")?
+                        .parse::<i16>()
+                        .ok()
+                        .filter(|f| *f >= 0)
+                        .ok_or("--freq must be 0 or more")?,
+                )
             }
             "--continuum-dir" => continuum_dir = Some(PathBuf::from(value("--continuum-dir")?)),
             "--ship" => {

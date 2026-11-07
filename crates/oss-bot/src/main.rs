@@ -173,11 +173,18 @@ impl Bot {
                 }
                 SessionEvent::PlayerEntered(pid) => {
                     if let Some(p) = self.session.player(pid) {
-                        self.log(format_args!("{} entered (ship {}, freq {})", p.name, p.ship + 1, p.freq));
+                        self.log(format_args!(
+                            "{} entered (ship {}, freq {})",
+                            p.name,
+                            p.ship + 1,
+                            p.freq
+                        ));
                     }
                 }
                 SessionEvent::PlayerLeft(pid) => self.log(format_args!("pid {pid} left")),
-                SessionEvent::ShipChanged { pid, ship, freq } if Some(pid) == self.session.pid() => {
+                SessionEvent::ShipChanged { pid, ship, freq }
+                    if Some(pid) == self.session.pid() =>
+                {
                     self.log(format_args!("now in ship {} on freq {freq}", ship + 1));
                     if opts.fly && ship != SPECTATOR && self.world.is_none() {
                         self.start_flying(ship);
