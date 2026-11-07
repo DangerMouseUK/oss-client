@@ -467,6 +467,150 @@ impl ArenaSettings {
     }
 }
 
+impl ShipSettings {
+    /// Writes this block into a settings-packet ship block (fields the simulation
+    /// doesn't use are left as they are).
+    pub fn write_proto(&self, s: &mut oss_proto::settings::ShipSettings) {
+        let u16_ = |v: u32| v.min(u16::MAX as u32) as u16;
+        s.set_radius(self.radius.min(255) as u8);
+        s.set_initial_rotation(u16_(self.initial_rotation));
+        s.set_initial_thrust(u16_(self.initial_thrust));
+        s.set_initial_speed(u16_(self.initial_speed));
+        s.set_initial_recharge(u16_(self.initial_recharge));
+        s.set_initial_energy(u16_(self.initial_energy));
+        s.set_maximum_rotation(u16_(self.maximum_rotation));
+        s.set_maximum_thrust(u16_(self.maximum_thrust));
+        s.set_maximum_speed(u16_(self.maximum_speed));
+        s.set_maximum_recharge(u16_(self.maximum_recharge));
+        s.set_maximum_energy(u16_(self.maximum_energy));
+        s.set_upgrade_rotation(u16_(self.upgrade_rotation));
+        s.set_upgrade_thrust(u16_(self.upgrade_thrust));
+        s.set_upgrade_speed(u16_(self.upgrade_speed));
+        s.set_upgrade_recharge(u16_(self.upgrade_recharge));
+        s.set_upgrade_energy(u16_(self.upgrade_energy));
+        s.set_afterburner_energy(u16_(self.afterburner_energy));
+        s.set_bomb_thrust(u16_(self.bomb_thrust));
+        s.set_bullet_speed(u16_(self.bullet_speed));
+        s.set_bomb_speed(u16_(self.bomb_speed));
+        s.set_burst_speed(u16_(self.burst_speed));
+        s.set_bullet_fire_energy(u16_(self.bullet_fire_energy));
+        s.set_multi_fire_energy(u16_(self.multi_fire_energy));
+        s.set_bomb_fire_energy(u16_(self.bomb_fire_energy));
+        s.set_bomb_fire_energy_upgrade(u16_(self.bomb_fire_energy_upgrade));
+        s.set_landmine_fire_energy(u16_(self.landmine_fire_energy));
+        s.set_landmine_fire_energy_upgrade(u16_(self.landmine_fire_energy_upgrade));
+        s.set_bullet_fire_delay(u16_(self.bullet_fire_delay));
+        s.set_multi_fire_delay(u16_(self.multi_fire_delay));
+        s.set_bomb_fire_delay(u16_(self.bomb_fire_delay));
+        s.set_landmine_fire_delay(u16_(self.landmine_fire_delay));
+        s.set_multi_fire_angle(u16_(self.multi_fire_angle));
+        s.set_cloak_energy(u16_(self.cloak_energy));
+        s.set_stealth_energy(u16_(self.stealth_energy));
+        s.set_anti_warp_energy(u16_(self.anti_warp_energy));
+        s.set_xradar_energy(u16_(self.xradar_energy));
+        s.set_gravity(self.gravity.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
+        s.set_gravity_top_speed(self.gravity_top_speed.min(i16::MAX as u32) as i16);
+        s.set_super_time(self.super_time.min(i32::MAX as u32) as i32);
+        s.set_shields_time(self.shields_time.min(i32::MAX as u32) as i32);
+        s.set_rocket_time(u16_(self.rocket_time));
+        s.set_initial_bounty(u16_(self.initial_bounty));
+        s.set_bomb_bounce_count(self.bomb_bounce_count);
+        s.set_burst_shrapnel(self.burst_shrapnel);
+        s.set_max_mines(self.max_mines);
+        s.set_repel_max(self.repel_max);
+        s.set_burst_max(self.burst_max);
+        s.set_decoy_max(self.decoy_max);
+        s.set_thor_max(self.thor_max);
+        s.set_brick_max(self.brick_max);
+        s.set_rocket_max(self.rocket_max);
+        s.set_portal_max(self.portal_max);
+        s.set_initial_repel(self.initial_repel);
+        s.set_initial_burst(self.initial_burst);
+        s.set_initial_brick(self.initial_brick);
+        s.set_initial_rocket(self.initial_rocket);
+        s.set_initial_thor(self.initial_thor);
+        s.set_initial_decoy(self.initial_decoy);
+        s.set_initial_portal(self.initial_portal);
+        s.set_shrapnel_max(self.shrapnel_max);
+        s.set_shrapnel_rate(self.shrapnel_rate);
+        s.set_cloak_status(self.cloak_status);
+        s.set_stealth_status(self.stealth_status);
+        s.set_xradar_status(self.xradar_status);
+        s.set_anti_warp_status(self.anti_warp_status);
+        s.set_initial_guns(self.initial_guns);
+        s.set_max_guns(self.max_guns);
+        s.set_initial_bombs(self.initial_bombs);
+        s.set_max_bombs(self.max_bombs);
+        s.set_double_barrel(self.double_barrel as u8);
+        s.set_emp_bomb(self.emp_bomb as u8);
+        s.set_disable_fast_shooting(self.disable_fast_shooting as u8);
+    }
+}
+
+impl ArenaSettings {
+    /// A settings packet carrying these settings (the inverse of
+    /// [`ArenaSettings::from_client_settings`]; other fields stay zero). Used by test
+    /// servers and tools.
+    pub fn to_client_settings(&self) -> oss_proto::ClientSettings {
+        let mut cs = oss_proto::ClientSettings::default();
+        for (i, ship) in self.ships.iter().enumerate() {
+            ship.write_proto(&mut cs.ships[i]);
+        }
+        let i32_ = |v: u32| v.min(i32::MAX as u32) as i32;
+        let i16_ = |v: u32| v.min(i16::MAX as u32) as i16;
+        cs.set_bounce_factor(i16_(self.bounce_factor));
+        cs.set_bullet_alive_time(i32_(self.bullet_alive_time));
+        cs.set_bomb_alive_time(i32_(self.bomb_alive_time));
+        cs.set_mine_alive_time(i32_(self.mine_alive_time));
+        cs.set_decoy_alive_time(i32_(self.decoy_alive_time));
+        cs.set_bullet_damage_level(i32_(self.bullet_damage_level.saturating_mul(1000)));
+        cs.set_bullet_damage_upgrade(i32_(self.bullet_damage_upgrade.saturating_mul(1000)));
+        cs.set_bomb_damage_level(i32_(self.bomb_damage_level.saturating_mul(1000)));
+        cs.set_burst_damage_level(i32_(self.burst_damage_level.saturating_mul(1000)));
+        cs.set_inactive_shrap_damage(i32_(self.inactive_shrap_damage.saturating_mul(1000)));
+        cs.set_shrapnel_damage_percent(i16_(self.shrapnel_damage_percent));
+        cs.set_ebomb_damage_percent(i16_(self.ebomb_damage_percent));
+        cs.set_bbomb_damage_percent(i16_(self.bbomb_damage_percent));
+        cs.set_exact_damage(self.exact_damage as u8);
+        cs.set_ebomb_shutdown_time(i16_(self.ebomb_shutdown_time));
+        cs.set_bomb_explode_pixels(i16_(self.bomb_explode_pixels));
+        cs.set_bomb_explode_delay(i16_(self.bomb_explode_delay));
+        cs.set_proximity_distance(i16_(self.proximity_distance));
+        cs.set_bomb_safety(self.bomb_safety as u8);
+        cs.set_shrapnel_speed(i32_(self.shrapnel_speed));
+        cs.set_shrapnel_random(self.shrapnel_random as u8);
+        cs.set_team_max_mines(self.team_max_mines.min(255) as u8);
+        cs.set_repel_speed(i32_(self.repel_speed));
+        cs.set_repel_time(i16_(self.repel_time));
+        cs.set_repel_distance(i16_(self.repel_distance));
+        cs.set_rocket_thrust(i32_(self.rocket_thrust));
+        cs.set_rocket_speed(i32_(self.rocket_speed));
+        cs.set_brick_time(i16_(self.brick_time));
+        cs.set_warp_point_delay(i16_(self.warp_point_delay));
+        cs.set_anti_warp_pixels(i16_(self.anti_warp_pixels));
+        cs.set_anti_warp_settle_delay(self.anti_warp_settle_delay.min(255) as u8);
+        cs.set_engine_shutdown_time(i16_(self.engine_shutdown_time));
+        cs.set_enter_delay(i16_(self.enter_delay));
+        cs.set_bounty_increase_for_kill(i16_(self.bounty_increase_for_kill));
+        cs.set_door_mode(self.door_mode.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
+        cs.set_door_delay(i16_(self.door_delay));
+        cs.prize_weights = self.prize_weights;
+        cs.set_prize_factor(i16_(self.prize_factor));
+        cs.set_prize_delay(i16_(self.prize_delay));
+        cs.set_prize_hide_count(self.prize_hide_count.min(255) as u8);
+        cs.set_minimum_virtual(i16_(self.minimum_virtual));
+        cs.set_upgrade_virtual(i16_(self.upgrade_virtual));
+        cs.set_prize_max_exist(i16_(self.prize_max_exist));
+        cs.set_prize_min_exist(i16_(self.prize_min_exist));
+        cs.set_prize_negative_factor(i16_(self.prize_negative_factor));
+        cs.set_multi_prize_count(i16_(self.multi_prize_count));
+        cs.set_warp_radius_limit(i16_(self.warp_radius_limit));
+        cs.set_send_position_delay(20);
+        cs.set_map_zoom_factor(10);
+        cs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +637,12 @@ mod tests {
         assert_eq!(a.ships[2].radius_pixels(), 16);
         assert_eq!(a.ships[2].initial_guns, 2);
         assert_eq!(a.ships[2].shrapnel_max, 8);
+        // Stock settings survive a round trip through the packet.
+        let stock = ArenaSettings::default();
+        assert_eq!(
+            ArenaSettings::from_client_settings(&stock.to_client_settings()),
+            stock
+        );
         // A zero bounce factor must not divide by zero.
         cs.set_bounce_factor(0);
         assert_eq!(ArenaSettings::from_client_settings(&cs).bounce_factor, 1);

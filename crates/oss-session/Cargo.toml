@@ -1,0 +1,22 @@
+[package]
+name = "oss-session"
+description = "Client-side SubSpace game session over oss-net: login, arena entry, settings, map download, players, positions, chat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-2.0-or-later"
+repository.workspace = true
+
+[dependencies]
+oss-proto.workspace = true
+oss-net.workspace = true
+oss-formats.workspace = true
+oss-sim.workspace = true
+flate2 = "1"
+log = "0.4"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+flate2 = "1"

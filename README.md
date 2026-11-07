@@ -24,11 +24,30 @@ the pixel scale, F12 shows the frame rate. Gamepads: left stick/D-pad steer, RT/
 thrust/reverse, bumpers afterburner, A guns, B bombs, X mines, Y multifire.
 Run with `--help` for more options.
 
+## Headless bot
+
+`oss-bot` connects to a zone without graphics, for testing and load:
+
+```
+cargo run --release -p oss-bot -- --server 127.0.0.1:5000 --ship 1 --count 20 --fly --chat "hi"
+```
+
+Until `oss-server` accepts network clients, a minimal relay zone (login, one arena, map
+download, position/chat relay; not a real server) is available for local testing:
+
+```
+cargo run -p oss-session --example test_zone -- --bind 127.0.0.1:5000 path/to/map.lvl
+```
+
 ## Crates
 
 - `oss-client` — the game (GPL-2.0-or-later).
 - `oss-sim` — deterministic 100 Hz ship/weapon/collision simulation (MIT).
 - `oss-assets` — `.bm2`/`.bmp`/`.png` and `.wa2`/`.wav` decoders, install discovery (MIT).
+- `oss-session` — the client side of a game session over `oss-net`: login, arena entry,
+  settings, map download/cache, security answers, players, positions, chat. Sans-IO,
+  with a UDP driver.
+- `oss-bot` — headless client / load swarm on `oss-session`.
 
 ## Building
 

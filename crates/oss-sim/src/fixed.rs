@@ -201,33 +201,9 @@ impl Rng {
 }
 
 /// The pseudo-random generator SubSpace uses for anything every client must agree on
-/// (prize and green positions, door seeds, shrapnel spread): a Park–Miller minimal
-/// standard generator (Schrage's method) with an added offset of 123.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VieRng {
-    pub seed: i32,
-}
-
-impl VieRng {
-    pub const fn new(seed: u32) -> Self {
-        Self { seed: seed as i32 }
-    }
-
-    /// Advances and returns the new seed (always 1..=0x7FFF_FFFF after the first call
-    /// from a positive seed).
-    pub fn next_u32(&mut self) -> u32 {
-        let s = self.seed;
-        let mut n = (s % 127_773)
-            .wrapping_mul(16_807)
-            .wrapping_sub((s / 127_773).wrapping_mul(2_836))
-            .wrapping_add(123);
-        if n < 1 {
-            n = n.wrapping_add(0x7FFF_FFFF);
-        }
-        self.seed = n;
-        n as u32
-    }
-}
+/// (prize and green positions, door seeds, shrapnel spread). Shared with the server
+/// through `oss-proto`.
+pub use oss_proto::VieRng;
 
 #[cfg(test)]
 mod tests {

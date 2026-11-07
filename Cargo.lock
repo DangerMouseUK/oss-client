@@ -1630,6 +1630,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oss-bot"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "oss-proto",
+ "oss-session",
+ "oss-sim",
+]
+
+[[package]]
 name = "oss-client"
 version = "0.1.0"
 dependencies = [
@@ -1664,6 +1675,18 @@ version = "0.1.0"
 [[package]]
 name = "oss-proto"
 version = "0.1.0"
+
+[[package]]
+name = "oss-session"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "log",
+ "oss-formats",
+ "oss-net",
+ "oss-proto",
+ "oss-sim",
+]
 
 [[package]]
 name = "oss-sim"
