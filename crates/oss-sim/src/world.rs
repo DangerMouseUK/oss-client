@@ -8,7 +8,7 @@ use crate::fixed::{
     DIRECTION_HEADINGS, ENERGY_SCALE, POS_SCALE, Pos, ROTATION_UNITS, Rng, VEL_SCALE, Vec2, Vel,
     heading, isqrt, scale_unit,
 };
-use crate::map::{TileMap, tile};
+use crate::map::{MAP_TILES, TileMap, tile};
 use crate::settings::{ArenaSettings, ShipSettings};
 
 /// One tick of player intent.
@@ -169,6 +169,10 @@ pub enum Event {
         ship: u16,
         on: bool,
     },
+    /// Doors changed state (new door seed applied).
+    DoorsChanged {
+        seed: u8,
+    },
 }
 
 /// Half-size in pixels of a weapon's hit box against ships.
@@ -188,6 +192,9 @@ pub struct World {
     pub spawn_radius: i32,
     rng: Rng,
     next_projectile_id: u32,
+    /// Every door tile: (x, y, original door id 162..=169).
+    doors: Vec<(i32, i32, u8)>,
+    next_door_tick: u32,
 }
 
 impl World {
@@ -202,7 +209,81 @@ impl World {
             spawn_radius: 20,
             rng: Rng::new(seed),
             next_projectile_id: 1,
+            doors: Vec::new(),
+            next_door_tick: 0,
         }
+        .with_doors()
+    }
+
+    fn with_doors(mut self) -> Self {
+        let cells = self.map.cells();
+        for (i, &id) in cells.iter().enumerate() {
+            if (tile::FIRST_DOOR..=tile::LAST_DOOR).contains(&id) {
+                self.doors
+                    .push(((i % MAP_TILES) as i32, (i / MAP_TILES) as i32, id));
+            }
+        }
+        self
+    }
+
+    /// Applies a door seed: door type `k` (tile `162 + k`) is closed when bit `k` is
+    /// set, open otherwise. A door closing on a ship sends that ship back to spawn.
+    pub fn apply_door_seed(&mut self, seed: u8) {
+        for i in 0..self.doors.len() {
+            let (x, y, id) = self.doors[i];
+            let closed = seed & (1 << (id - tile::FIRST_DOOR)) != 0;
+            let was = self.map.get(x, y);
+            let now = if closed { id } else { tile::FLAG };
+            self.map.set(x, y, now);
+            if closed && was == tile::FLAG {
+                for s in 0..self.ships.len() {
+                    let ship = &self.ships[s];
+                    let r = self.settings.ships[ship.kind as usize].radius_pixels();
+                    let p = ship.pos.pixels();
+                    let hit = ship.is_alive()
+                        && p.x + r >= x * 16
+                        && p.x - r < x * 16 + 16
+                        && p.y + r >= y * 16
+                        && p.y - r < y * 16 + 16;
+                    if hit {
+                        let mut moved = self.ships[s].clone();
+                        self.place_at_spawn(&mut moved);
+                        self.ships[s] = moved;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Picks the next door seed for the arena's `DoorMode`.
+    fn next_door_seed(&mut self) -> u8 {
+        match self.settings.door_mode {
+            -2 => self.rng.next_u32() as u8,
+            -1 => {
+                // Weighted: each door type stays closed with its own probability
+                // (types 0 and 4 most often open, 3 and 7 least).
+                let mut seed = 0u8;
+                let mut bit = |modulus: u32, bits: u8| {
+                    if !self.rng.next_u32().is_multiple_of(modulus) {
+                        seed |= bits;
+                    }
+                };
+                bit(2, 0x11);
+                bit(4, 0x02);
+                bit(8, 0x04);
+                bit(16, 0x08);
+                bit(4, 0x20);
+                bit(8, 0x40);
+                bit(16, 0x80);
+                seed
+            }
+            m => m.clamp(0, 255) as u8,
+        }
+    }
+
+    /// Door ids are 162..=169 when closed and [`tile::FLAG`] (170) when open.
+    pub fn doors(&self) -> &[(i32, i32, u8)] {
+        &self.doors
     }
 
     /// Adds a ship of type `kind` (0..=7) at a spawn point and returns its index.
@@ -287,6 +368,12 @@ impl World {
             self.step_ship(i, input, &mut events);
         }
         self.step_projectiles(&mut events);
+        if !self.doors.is_empty() && tick_reached(self.tick, self.next_door_tick) {
+            let seed = self.next_door_seed();
+            self.apply_door_seed(seed);
+            self.next_door_tick = self.tick.wrapping_add(self.settings.door_delay.max(1));
+            events.push(Event::DoorsChanged { seed });
+        }
         events
     }
 

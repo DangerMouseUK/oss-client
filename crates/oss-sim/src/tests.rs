@@ -322,3 +322,34 @@ fn deterministic_replay() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn doors_follow_seed_bits() {
+    let mut cells = vec![0u8; MAP_TILES * MAP_TILES];
+    cells[100 * MAP_TILES + 100] = 162;
+    cells[100 * MAP_TILES + 101] = 169;
+    let mut settings = ArenaSettings::sandbox();
+    settings.door_mode = 0b0000_0001;
+    let mut w = World::new(TileMap::from_cells(&cells), settings, 1);
+    assert_eq!(w.doors().len(), 2);
+    w.step(&[]);
+    assert_eq!(w.map.get(100, 100), 162); // closed (bit 0)
+    assert_eq!(w.map.get(101, 100), tile::FLAG); // open (bit 7 clear)
+    assert!(w.map.is_solid(100, 100) && !w.map.is_solid(101, 100));
+    w.apply_door_seed(0x80);
+    assert_eq!(w.map.get(100, 100), tile::FLAG);
+    assert_eq!(w.map.get(101, 100), 169);
+}
+
+#[test]
+fn closing_door_moves_ship_out() {
+    let mut cells = vec![0u8; MAP_TILES * MAP_TILES];
+    cells[100 * MAP_TILES + 100] = 162;
+    let mut w = World::new(TileMap::from_cells(&cells), ArenaSettings::sandbox(), 1);
+    w.add_ship(0, 0, 0);
+    w.apply_door_seed(0);
+    w.ships[0].pos = Pos::from_pixels(100 * 16 + 8, 100 * 16 + 8);
+    w.apply_door_seed(1);
+    let p = w.ships[0].pos.pixels();
+    assert!(!w.map.box_collides(p.x, p.y, 14));
+}

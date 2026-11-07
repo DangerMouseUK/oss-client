@@ -76,6 +76,10 @@ pub struct ArenaSettings {
     pub bomb_explode_pixels: u32,
     /// Ticks a dead ship waits before respawning.
     pub enter_delay: u32,
+    /// Door behaviour: -2 random, -1 weighted random, 0..=255 fixed door bits.
+    pub door_mode: i32,
+    /// Ticks between door changes.
+    pub door_delay: u32,
 }
 
 /// Stock ship block: every ship in a freshly installed zone uses these values.
@@ -130,6 +134,8 @@ impl Default for ArenaSettings {
             bomb_damage_level: 750,
             bomb_explode_pixels: 80,
             enter_delay: 200,
+            door_mode: -2,
+            door_delay: 600,
         }
     }
 }
@@ -211,6 +217,8 @@ impl ArenaSettings {
             bomb_damage_level: clamp_u32(cs.bomb_damage_level()) / 1000,
             bomb_explode_pixels: clamp_u32(cs.bomb_explode_pixels() as i32),
             enter_delay: clamp_u32(cs.enter_delay() as i32),
+            door_mode: cs.door_mode() as i32,
+            door_delay: (cs.door_delay() as i32).max(1) as u32,
         }
     }
 }

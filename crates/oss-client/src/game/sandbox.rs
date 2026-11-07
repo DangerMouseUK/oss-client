@@ -380,7 +380,15 @@ impl Sandbox {
             for tx in tx0.max(-1)..=tx1.min(1024) {
                 let id = tile_at(tx, ty);
                 if base_layer_tile(id) {
-                    sprite(r, self.art.tile(id), (tx * 16) as f32, (ty * 16) as f32);
+                    let shown = if (tile::FIRST_DOOR..=tile::LAST_DOOR).contains(&id) {
+                        // Closed doors cycle through their group of four tiles.
+                        let group = (id - tile::FIRST_DOOR) / 4;
+                        let frame = ((self.clock / 0.4).fract() * 4.0) as u8 % 4;
+                        tile::FIRST_DOOR + group * 4 + frame
+                    } else {
+                        id
+                    };
+                    sprite(r, self.art.tile(shown), (tx * 16) as f32, (ty * 16) as f32);
                 }
             }
         }
