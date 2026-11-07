@@ -36,6 +36,17 @@ pub struct Art {
     pub gradient: Region,
     pub engyfont: Region,
     pub tallfont: Region,
+    pub prizes: Region,
+    pub shrapnel: Region,
+    pub wall: Region,
+    pub warppnt: Region,
+    pub repel: Region,
+    pub shield: Region,
+    pub superpower: Region,
+    pub icons: Region,
+    pub icondoor: Region,
+    pub empburst: Region,
+    pub rocket: Region,
 }
 
 impl Art {
@@ -159,6 +170,17 @@ pub fn load(
     art.gradient = sheet("gradient", false)?;
     art.engyfont = sheet("engyfont", false)?;
     art.tallfont = sheet("tallfont", false)?;
+    art.prizes = sheet("prizes", false)?;
+    art.shrapnel = sheet("shrapnel", false)?;
+    art.wall = sheet("wall", false)?;
+    art.warppnt = sheet("warppnt", false)?;
+    art.repel = sheet("repel", false)?;
+    art.shield = sheet("shield", false)?;
+    art.superpower = sheet("super", false)?;
+    art.icons = sheet("Icons", false)?;
+    art.icondoor = sheet("icondoor", false)?;
+    art.empburst = sheet("empburst", false)?;
+    art.rocket = sheet("rocket", false)?;
 
     let size = atlas.size();
     Ok((art, size, atlas.into_pixels()))

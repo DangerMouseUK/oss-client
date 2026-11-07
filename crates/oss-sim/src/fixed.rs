@@ -200,6 +200,35 @@ impl Rng {
     }
 }
 
+/// The pseudo-random generator SubSpace uses for anything every client must agree on
+/// (prize and green positions, door seeds, shrapnel spread): a Park–Miller minimal
+/// standard generator (Schrage's method) with an added offset of 123.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VieRng {
+    pub seed: i32,
+}
+
+impl VieRng {
+    pub const fn new(seed: u32) -> Self {
+        Self { seed: seed as i32 }
+    }
+
+    /// Advances and returns the new seed (always 1..=0x7FFF_FFFF after the first call
+    /// from a positive seed).
+    pub fn next_u32(&mut self) -> u32 {
+        let s = self.seed;
+        let mut n = (s % 127_773)
+            .wrapping_mul(16_807)
+            .wrapping_sub((s / 127_773).wrapping_mul(2_836))
+            .wrapping_add(123);
+        if n < 1 {
+            n = n.wrapping_add(0x7FFF_FFFF);
+        }
+        self.seed = n;
+        n as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +263,19 @@ mod tests {
             let b = DIRECTION_HEADINGS[d + 20];
             assert_eq!((a.x, a.y), (-b.x, -b.y), "direction {d}");
         }
+    }
+
+    #[test]
+    fn vie_rng_sequence() {
+        // Reference values from the recurrence (16930 * 16807 + 123 = 284542633).
+        let mut r = VieRng::new(1);
+        assert_eq!(r.next_u32(), 16_807 + 123);
+        assert_eq!(r.next_u32(), 284_542_633);
+        let mut r = VieRng::new(0);
+        assert_eq!(r.next_u32(), 123);
+        let mut r = VieRng::new(-5i32 as u32);
+        let v = r.next_u32();
+        assert!((1..=0x7FFF_FFFF).contains(&v));
     }
 
     #[test]

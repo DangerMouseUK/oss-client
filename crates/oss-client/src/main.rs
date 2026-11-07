@@ -20,6 +20,7 @@ Options:
   --fullscreen              Borderless fullscreen
   --mute                    No sound
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
+  --screenshot-at <secs>    When to take that screenshot
   --autopilot               Fly and shoot automatically (testing)
   -h, --help                Show this help";
 
@@ -56,6 +57,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut vsync = false;
     let mut fullscreen = false;
     let mut screenshot = None;
+    let mut screenshot_at = 2.0f32;
     let mut autopilot = false;
     let mut mute = false;
     let mut args = args.peekable();
@@ -84,6 +86,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Command, String> {
             "--vsync" => vsync = true,
             "--fullscreen" => fullscreen = true,
             "--screenshot" => screenshot = Some(PathBuf::from(value("--screenshot")?)),
+            "--screenshot-at" => {
+                screenshot_at = value("--screenshot-at")?
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|s| (0.0..=600.0).contains(s))
+                    .ok_or("--screenshot-at must be 0-600 seconds")?
+            }
             "--autopilot" => autopilot = true,
             "--mute" => mute = true,
             other => return Err(format!("unknown argument {other}")),
@@ -99,6 +108,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Command, String> {
         vsync,
         fullscreen,
         screenshot,
+        screenshot_at,
         autopilot,
         mute,
     }))

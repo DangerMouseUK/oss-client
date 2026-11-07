@@ -25,6 +25,8 @@ pub struct SandboxOptions {
     pub fullscreen: bool,
     /// Save a frame to this file after a short warm-up, then exit.
     pub screenshot: Option<PathBuf>,
+    /// Seconds after start to take the screenshot.
+    pub screenshot_at: f32,
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
     pub mute: bool,
@@ -169,7 +171,7 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                         return;
                     }
-                    if run.started.elapsed().as_secs_f32() >= 2.0 {
+                    if run.started.elapsed().as_secs_f32() >= self.options.screenshot_at {
                         run.renderer.capture = Some(path.clone());
                         run.captured = true;
                     }
