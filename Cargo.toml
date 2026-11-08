@@ -14,7 +14,7 @@ repository = "https://github.com/DangerMouseUK/oss-client"
 oss-proto = { path = "../oss-core/crates/oss-proto" }
 oss-net = { path = "../oss-core/crates/oss-net" }
 oss-formats = { path = "../oss-core/crates/oss-formats" }
-oss-sim = { path = "crates/oss-sim" }
+oss-sim = { path = "../oss-core/crates/oss-sim" }
 oss-assets = { path = "crates/oss-assets" }
 oss-session = { path = "crates/oss-session" }
 
