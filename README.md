@@ -11,13 +11,24 @@ Status: early development. The offline sandbox works, and the client can join a 
 
 ## Play online
 
+Run `oss-client` with no arguments for the login screen (zone, name, password, arena,
+ship; F5 there starts the offline sandbox), or skip it:
+
 ```
 cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --ship 1
 ```
 
-Enter opens the chat box (`'text` team chat, `:name:text` private, `=N` change team,
-`?command` goes to the server). Esc opens the menu: 1-8 change ship, S spectate, Q quit.
-Maps you download are cached per server.
+Enter opens the chat box (`'text` team chat, `:name:text` private, `/text` private to
+the player selected in the stat box, `=N` change team, `?command` goes to the server).
+F2 cycles the stat box views, Page Up/Down select a player. Esc opens the menu: 1-8
+change ship, S spectate, Q quit. Maps you download are cached per server.
+
+## Settings
+
+`oss-client.ini` in your settings folder (`%APPDATA%\OpenSubSpace` on Windows,
+`~/.config/open-subspace` elsewhere, or `--config <file>`) holds video, audio, your
+player name and every key binding. It is written with the defaults on first run;
+command-line flags override it.
 
 ## Try the sandbox
 

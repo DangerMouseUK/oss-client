@@ -15,6 +15,7 @@ use winit::window::{Window, WindowId};
 use crate::audio::Audio;
 use crate::game::art::{self, Art};
 use crate::game::input::InputState;
+use crate::game::login::{Choice, Login};
 use crate::game::online::{Online, ServerOptions};
 use crate::game::sandbox::Sandbox;
 use crate::game::view::{Canvas, color};
@@ -26,6 +27,8 @@ pub enum Mode {
     Sandbox { map: Option<PathBuf>, ship: u8 },
     /// Online, in a zone.
     Zone(ServerOptions),
+    /// The login screen, optionally with the zone filled in.
+    Login { server: Option<String> },
 }
 
 pub struct Options {
@@ -50,6 +53,10 @@ pub struct Options {
     /// `--config`: the settings file, if not the default one.
     pub config: Option<PathBuf>,
     pub bindings: crate::game::input::Bindings,
+    /// Player name from the settings file (the login screen's default).
+    pub player_name: Option<String>,
+    /// Where the login screen remembers the last zone and name.
+    pub login_file: Option<PathBuf>,
 }
 
 /// Waiting for the zone: shows progress until the arena is ready.
@@ -57,9 +64,18 @@ struct Connecting {
     net: Online,
     art: Art,
     atlas: TextureId,
+    /// The form to go back to if the connection fails.
+    login: Option<Login>,
+}
+
+struct LoginScreen {
+    login: Login,
+    art: Art,
+    atlas: TextureId,
 }
 
 enum Screen {
+    Login(Box<LoginScreen>),
     Connecting(Box<Connecting>),
     Game(Box<Sandbox>),
     /// Placeholder while switching screens.
@@ -115,7 +131,7 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
             oss_assets::locate::read_file(map).map_err(|e| e.to_string())?
         }
         Mode::Sandbox { map: None, .. } => crate::game::default_map::default_map(),
-        Mode::Zone(_) => Vec::new(),
+        Mode::Zone(_) | Mode::Login { .. } => Vec::new(),
     };
 
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
@@ -168,6 +184,7 @@ impl ApplicationHandler for App {
         let title = match &self.options.mode {
             Mode::Sandbox { .. } => "Open SubSpace — sandbox".to_string(),
             Mode::Zone(z) => format!("Open SubSpace — {}", z.server),
+            Mode::Login { .. } => "Open SubSpace".to_string(),
         };
         let mut attrs = Window::default_attributes()
             .with_title(title)
@@ -211,12 +228,30 @@ impl ApplicationHandler for App {
                     Ok(n) => n,
                     Err(e) => return self.fail(event_loop, e),
                 };
-                let (art, atlas_size, pixels) = match art::load(&self.dir, None) {
+                let (art, atlas) = match load_art(&self.dir, &mut renderer) {
                     Ok(a) => a,
                     Err(e) => return self.fail(event_loop, e),
                 };
-                let atlas = renderer.create_texture(atlas_size, atlas_size, &pixels);
-                Screen::Connecting(Box::new(Connecting { net, art, atlas }))
+                Screen::Connecting(Box::new(Connecting {
+                    net,
+                    art,
+                    atlas,
+                    login: None,
+                }))
+            }
+            Mode::Login { server } => {
+                let (art, atlas) = match load_art(&self.dir, &mut renderer) {
+                    Ok(a) => a,
+                    Err(e) => return self.fail(event_loop, e),
+                };
+                let mut login = Login::load(
+                    self.options.login_file.as_deref(),
+                    self.options.player_name.as_deref(),
+                );
+                if let Some(s) = server {
+                    login.server = s.clone();
+                }
+                Screen::Login(Box::new(LoginScreen { login, art, atlas }))
             }
         };
         window.request_redraw();
@@ -297,36 +332,105 @@ impl App {
             self.input.autopilot(run.started.elapsed().as_secs_f32());
         }
 
+        // Login: wait for a choice.
+        if let Screen::Login(ls) = &mut run.screen {
+            let pressed = self.input.take_pressed();
+            let typed = std::mem::take(&mut self.input.typed);
+            self.input.take_edges();
+            match ls.login.input(&pressed, &typed, self.input.shift()) {
+                None => {}
+                Some(Choice::Quit) => {
+                    event_loop.exit();
+                    return;
+                }
+                Some(Choice::Sandbox) => {
+                    let level = crate::game::default_map::default_map();
+                    let audio = audio_wanted
+                        .then(|| Audio::new(&self.dir, self.options.volume))
+                        .flatten();
+                    match Sandbox::new(&mut run.renderer, &self.dir, &level, 0, run.scale, audio) {
+                        Ok(s) => run.screen = Screen::Game(Box::new(s)),
+                        Err(e) => return self.fail(event_loop, e),
+                    }
+                }
+                Some(Choice::Connect(opts)) => {
+                    if let Some(path) = &self.options.login_file {
+                        ls.login.save(path);
+                    }
+                    let size = run.window.inner_size();
+                    let res = (
+                        (size.width / run.scale) as u16,
+                        (size.height / run.scale) as u16,
+                    );
+                    match Online::connect(&opts, res) {
+                        Ok(net) => {
+                            run.window
+                                .set_title(&format!("Open SubSpace — {}", opts.server));
+                            let Screen::Login(ls) =
+                                std::mem::replace(&mut run.screen, Screen::Empty)
+                            else {
+                                unreachable!()
+                            };
+                            let LoginScreen { login, art, atlas } = *ls;
+                            run.screen = Screen::Connecting(Box::new(Connecting {
+                                net,
+                                art,
+                                atlas,
+                                login: Some(login),
+                            }));
+                        }
+                        Err(e) => ls.login.error = Some(e),
+                    }
+                }
+            }
+        }
+
         // Connecting: pump until the arena is ready, then switch to the game.
         if let Screen::Connecting(conn) = &mut run.screen {
             conn.net.pump();
-            if self.input.take_pressed().contains(&KeyCode::Escape) {
-                event_loop.exit();
-                return;
-            }
+            let give_up = self.input.take_pressed().contains(&KeyCode::Escape);
             self.input.take_edges();
             self.input.typed.clear();
-            if let Some(err) = conn.net.error.clone() {
-                return self.fail(event_loop, err);
-            }
-            if conn.net.ready() {
+            let failed = conn.net.error.clone();
+            if give_up || failed.is_some() {
+                // Back to the form if there was one; otherwise this was the whole run.
                 let Screen::Connecting(conn) = std::mem::replace(&mut run.screen, Screen::Empty)
                 else {
                     unreachable!()
                 };
-                let audio = if audio_wanted {
-                    Audio::new(&self.dir, self.options.volume)
-                } else {
-                    None
-                };
-                match Sandbox::new_online(&mut run.renderer, &self.dir, conn.net, run.scale, audio)
-                {
-                    Ok(mut s) => {
-                        s.aim_bot = self.options.autopilot;
-                        run.screen = Screen::Game(Box::new(s));
+                let Connecting {
+                    art, atlas, login, ..
+                } = *conn;
+                match (login, failed) {
+                    (Some(mut login), err) => {
+                        login.error = Some(err.unwrap_or_else(|| "Cancelled".into()));
+                        run.screen = Screen::Login(Box::new(LoginScreen { login, art, atlas }));
                     }
-                    Err(e) => return self.fail(event_loop, e),
+                    (None, Some(err)) => return self.fail(event_loop, err),
+                    (None, None) => {
+                        event_loop.exit();
+                        return;
+                    }
                 }
+            }
+        }
+        if let Screen::Connecting(conn) = &mut run.screen
+            && conn.net.ready()
+        {
+            let Screen::Connecting(conn) = std::mem::replace(&mut run.screen, Screen::Empty) else {
+                unreachable!()
+            };
+            let audio = if audio_wanted {
+                Audio::new(&self.dir, self.options.volume)
+            } else {
+                None
+            };
+            match Sandbox::new_online(&mut run.renderer, &self.dir, conn.net, run.scale, audio) {
+                Ok(mut s) => {
+                    s.aim_bot = self.options.autopilot;
+                    run.screen = Screen::Game(Box::new(s));
+                }
+                Err(e) => return self.fail(event_loop, e),
             }
         }
 
@@ -339,7 +443,11 @@ impl App {
                 }
                 draw.then(|| game.draw(&mut run.renderer))
             }
-            Screen::Connecting(_) if !draw => None,
+            Screen::Connecting(_) | Screen::Login(_) if !draw => None,
+            Screen::Login(ls) => {
+                draw_login(&ls.login, &ls.art, ls.atlas, &mut run.renderer, run.scale);
+                None
+            }
             Screen::Connecting(conn) => {
                 let c = Canvas::new(
                     &conn.art,
@@ -385,4 +493,64 @@ impl App {
         }
         run.window.request_redraw();
     }
+}
+
+fn load_art(dir: &AssetDirs, renderer: &mut Renderer) -> Result<(Art, TextureId), String> {
+    let (art, size, pixels) = art::load(dir, None)?;
+    let atlas = renderer.create_texture(size, size, &pixels);
+    Ok((art, atlas))
+}
+
+/// The login form, centred.
+fn draw_login(login: &Login, art: &Art, atlas: TextureId, r: &mut Renderer, scale: u32) {
+    let c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
+    let w = 52.0 * 8.0;
+    let rows = Login::fields().len() as f32;
+    let h = 30.0 + rows * 16.0 + 70.0;
+    let x = ((c.view_w - w) / 2.0).floor();
+    let mut y = ((c.view_h - h) / 2.0).floor();
+    c.rect(
+        r,
+        x - 10.0,
+        y - 10.0,
+        w + 20.0,
+        h + 20.0,
+        [0.0, 0.0, 0.0, 0.85],
+    );
+    c.text(r, x, y, color::YELLOW, "Open SubSpace");
+    y += 26.0;
+    for (i, &field) in Login::fields().iter().enumerate() {
+        let focused = i == login.focus % Login::fields().len();
+        let label = format!("{:>9}", field.label());
+        c.text(r, x, y, color::GREEN, &label);
+        let mut value = login.value(field);
+        if focused {
+            value = match field {
+                crate::game::login::Field::Ship => format!("< {value} >"),
+                _ => format!("{value}_"),
+            };
+            c.rect(r, x + 84.0, y - 2.0, w - 84.0, 14.0, [0.2, 0.25, 0.45, 0.8]);
+        }
+        let max = ((w - 92.0) / 8.0) as usize;
+        let shown: String = if value.chars().count() > max {
+            value.chars().skip(value.chars().count() - max).collect()
+        } else {
+            value
+        };
+        c.text(r, x + 88.0, y, color::WHITE, &shown);
+        y += 16.0;
+    }
+    y += 10.0;
+    if let Some(err) = &login.error {
+        c.text(r, x, y, color::RED, err);
+    }
+    y += 20.0;
+    c.text(
+        r,
+        x,
+        y,
+        color::WHITE,
+        "Enter connect   Tab/arrows move   F5 sandbox",
+    );
+    c.text(r, x, y + 14.0, color::WHITE, "Esc quit");
 }

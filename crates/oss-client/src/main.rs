@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use game::online::ServerOptions;
 
 const USAGE: &str = "\
-Usage: oss-client --server <host:port> --name <name> [options]
+Usage: oss-client [options]                (login screen)
+       oss-client --server <host:port> --name <name> [options]
        oss-client --sandbox [map.lvl] [options]
 
 Play online:
@@ -162,9 +163,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             ship: ship.unwrap_or(oss_session::SPECTATOR),
             freq,
         }),
-        (false, None) => {
-            return Err("nothing to do: pass --server <host:port> or --sandbox <map.lvl>".into());
-        }
+        // No --server or --sandbox: the login screen.
+        (false, None) => app::Mode::Login { server: None },
     };
     Ok(Some(app::Options {
         mode,
@@ -180,6 +180,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         volume: 60,
         config,
         bindings: Default::default(),
+        player_name: None,
+        login_file: None,
     }))
 }
 
@@ -195,6 +197,7 @@ fn apply_config(opts: &mut app::Options) -> Result<(), String> {
             }
         },
     };
+    opts.login_file = path.parent().map(|dir| dir.join(game::login::FILE_NAME));
     let (cfg, warnings) = config::Config::load(&path, opts.config.is_some())?;
     for w in warnings {
         log::warn!("{}: {w}", path.display());
@@ -210,12 +213,19 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     opts.mute |= cfg.mute;
     opts.volume = cfg.volume;
     opts.bindings = cfg.bindings;
+    opts.player_name = cfg.name.clone();
     if let app::Mode::Zone(z) = &mut opts.mode
         && z.name.is_empty()
     {
-        z.name = cfg
-            .name
-            .ok_or("--name is required online (or set name in the settings file)")?;
+        match cfg.name {
+            Some(name) => z.name = name,
+            // No name anywhere: ask on the login screen.
+            None => {
+                opts.mode = app::Mode::Login {
+                    server: Some(z.server.clone()),
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -245,9 +255,10 @@ mod tests {
             .unwrap();
         assert!(matches!(&o.mode, app::Mode::Zone(z) if z.name == "Bob" && z.ship == 3));
         let mut o = parse("--server x:1").unwrap().unwrap();
+        finish_options(&mut o, config::Config::default()).unwrap();
         assert!(
-            finish_options(&mut o, config::Config::default()).is_err(),
-            "name required"
+            matches!(&o.mode, app::Mode::Login { server: Some(s) } if s == "x:1"),
+            "no name: ask for one"
         );
         let cfg = config::Config {
             name: Some("Ace".into()),
@@ -261,7 +272,10 @@ mod tests {
         assert_eq!((o.scale, o.vsync), (Some(2), true), "flags win");
         assert!(parse("--ship 9 --sandbox m.lvl").is_err());
         assert!(parse("--sandbox m.lvl --ship spec").is_err());
-        assert!(parse("").is_err());
+        assert!(matches!(
+            parse("").unwrap().unwrap().mode,
+            app::Mode::Login { server: None }
+        ));
         assert!(parse("--help").unwrap().is_none());
     }
 }

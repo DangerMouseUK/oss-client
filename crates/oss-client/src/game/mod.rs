@@ -4,6 +4,7 @@ pub mod art;
 pub mod default_map;
 pub mod hud;
 pub mod input;
+pub mod login;
 pub mod online;
 pub mod sandbox;
 pub mod statbox;

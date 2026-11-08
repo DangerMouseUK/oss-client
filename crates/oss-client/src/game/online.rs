@@ -5,7 +5,7 @@ use oss_session::udp::UdpDriver;
 use oss_session::{Session, SessionConfig, SessionEvent, State};
 
 /// How to reach a zone and who to be.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerOptions {
     pub server: String,
     pub name: String,
