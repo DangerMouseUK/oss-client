@@ -217,6 +217,7 @@ impl Login {
             arena: Some(self.arena.trim().to_string()).filter(|a| !a.is_empty()),
             ship: self.ship,
             freq: None,
+            follow: None,
         }))
     }
 }

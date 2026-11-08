@@ -15,6 +15,8 @@ pub struct ServerOptions {
     pub ship: u8,
     /// Team to join after entering, if not the server's choice.
     pub freq: Option<i16>,
+    /// Spectate and follow this player (name) once they're in a ship.
+    pub follow: Option<String>,
 }
 
 pub struct Online {
@@ -31,6 +33,8 @@ pub struct Online {
     pub error: Option<String>,
     /// Team requested on the command line.
     pub freq: Option<i16>,
+    /// Player to follow (`--follow`), until found.
+    pub follow: Option<String>,
     /// LVZ files received and not yet loaded by the game: (name, bytes).
     pub files: Vec<(String, Vec<u8>)>,
 }
@@ -62,6 +66,7 @@ impl Online {
             status: format!("Connecting to {}...", opts.server),
             error: None,
             freq: opts.freq,
+            follow: opts.follow.clone(),
             files: Vec::new(),
         })
     }

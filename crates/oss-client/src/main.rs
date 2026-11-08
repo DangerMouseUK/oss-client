@@ -22,6 +22,7 @@ Play online:
   --arena <name>            Arena to enter (default: any public arena)
   --ship <1-8|spec>         Ship to enter in (default spec online, 1 offline)
   --freq <n>                Team to join (in game: type =n)
+  --follow <name>           Spectate, following this player
 
 Play offline:
   --sandbox [map.lvl]       Fly around a map (default: a built-in arena) with stock
@@ -84,6 +85,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut mute = false;
     let mut config = None;
     let mut lvz = Vec::new();
+    let mut follow = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -145,6 +147,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--mute" => mute = true,
             "--config" => config = Some(PathBuf::from(value("--config")?)),
             "--lvz" => lvz.push(PathBuf::from(value("--lvz")?)),
+            "--follow" => follow = Some(value("--follow")?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -165,6 +168,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             arena,
             ship: ship.unwrap_or(oss_session::SPECTATOR),
             freq,
+            follow,
         }),
         // No --server or --sandbox: the login screen.
         (false, None) => app::Mode::Login { server: None },

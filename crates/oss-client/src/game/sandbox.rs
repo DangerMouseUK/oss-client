@@ -123,6 +123,8 @@ pub struct Sandbox {
     /// Watching instead of flying (online spectator mode).
     pub(super) spectating: bool,
     spec_cam: (f32, f32),
+    /// Spectating: the player the camera follows.
+    spec_follow: Option<u16>,
     /// The chat line being typed, if the chat box is open.
     pub(super) typing: Option<String>,
     /// Testing aid: steer toward the nearest enemy and shoot (overrides the keys
@@ -306,6 +308,7 @@ impl Sandbox {
             net,
             spectating: false,
             spec_cam: (8192.0, 8192.0),
+            spec_follow: None,
             typing: None,
             aim_bot: false,
         };
@@ -345,10 +348,42 @@ impl Sandbox {
     /// Camera centre (game pixels) for the current frame.
     fn camera(&self, alpha: f32) -> (f32, f32) {
         if self.spectating {
+            if let Some(ship) = self.followed() {
+                return view::lerp_pos(ship.prev_pos, ship.pos, alpha);
+            }
             return self.spec_cam;
         }
         let me = self.me();
         view::lerp_pos(me.prev_pos, me.pos, alpha)
+    }
+
+    /// The ship being followed while spectating, if it's in play.
+    fn followed(&self) -> Option<&Ship> {
+        let id = self.spec_follow?;
+        self.world
+            .ships
+            .iter()
+            .find(|s| s.id == id && s.id != self.me_id)
+    }
+
+    /// Starts (or with `None`, stops) following a player while spectating. Only
+    /// players in a ship can be followed; the server is asked for their extra data.
+    fn follow(&mut self, pid: Option<u16>) {
+        let pid = pid.filter(|&p| p != self.me_id && self.world.ship_index(p).is_some());
+        if pid == self.spec_follow {
+            return;
+        }
+        if pid.is_none()
+            && let Some(ship) = self.followed()
+        {
+            // Carry on from where the followed ship was.
+            self.spec_cam = ship.pos.to_f32();
+        }
+        self.spec_follow = pid;
+        if let Some(net) = self.net.as_mut() {
+            net.session.spectate(pid.map_or(-1, |p| p as i16));
+            net.flush();
+        }
     }
 
     pub fn message(&mut self, text: impl Into<String>, color: u32) {
@@ -413,8 +448,44 @@ impl Sandbox {
                 input.action_held(Action::Backward) as i32 as f32
                     - input.action_held(Action::Forward) as i32 as f32,
             );
-            self.spec_cam.0 = (self.spec_cam.0 + dx * step).clamp(0.0, 16384.0);
-            self.spec_cam.1 = (self.spec_cam.1 + dy * step).clamp(0.0, 16384.0);
+            if dx != 0.0 || dy != 0.0 {
+                // Moving the camera stops following.
+                self.follow(None);
+                self.spec_cam.0 = (self.spec_cam.0 + dx * step).clamp(0.0, 16384.0);
+                self.spec_cam.1 = (self.spec_cam.1 + dy * step).clamp(0.0, 16384.0);
+            } else if input.action_held(Action::Gun) || input.action_held(Action::Bomb) {
+                // As in Continuum: fire follows the player selected in the stat box.
+                let target = self.statbox.selected().map(|p| p as u16);
+                if target.is_some() && target != self.spec_follow {
+                    self.follow(target);
+                }
+            }
+        }
+        if !self.spectating && self.spec_follow.is_some() {
+            self.spec_follow = None;
+        }
+        // --follow: once that player is in a ship.
+        let wanted = self.net.as_ref().and_then(|n| {
+            let name = n.follow.as_ref()?;
+            n.session
+                .players()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.ship != SPECTATOR)
+                .map(|p| p.pid as u16)
+        });
+        if self.spectating
+            && let Some(pid) = wanted
+        {
+            if let Some(n) = self.net.as_mut() {
+                n.follow = None;
+            }
+            self.follow(Some(pid));
+        }
+        match self.followed().map(|s| s.pos.to_f32()) {
+            // The server sends what's near your (camera) position, so keep it on them.
+            Some(at) => self.spec_cam = at,
+            // They left or went to spectator mode.
+            None if self.spec_follow.is_some() => self.spec_follow = None,
+            None => {}
         }
 
         self.pump_network();
@@ -1321,8 +1392,22 @@ impl Sandbox {
             c.text(r, 4.0, y, m.color, &m.text);
             y -= 12.0;
         }
-        if self.spectating {
-            let msg = "Spectating: arrows move, Esc then 1-8 to play";
+        if self.spectating
+            && let Some(ship) = self.followed()
+        {
+            let name = self
+                .net
+                .as_ref()
+                .and_then(|n| n.session.player(ship.id as i16))
+                .map_or_else(|| "?".to_string(), |p| p.name.clone());
+            let mut line = format!("Spectating {name}");
+            if ship.is_alive() {
+                line += &format!("  Engy:{}", ship.energy_points());
+            }
+            let x = ((c.view_w - line.len() as f32 * 8.0) / 2.0).floor();
+            c.text(r, x, 40.0, color::YELLOW, &line);
+        } else if self.spectating {
+            let msg = "Spectating: arrows move, Ctrl follows the stat box selection";
             c.text(
                 r,
                 ((c.view_w - msg.len() as f32 * 8.0) / 2.0).floor(),

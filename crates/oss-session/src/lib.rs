@@ -1025,6 +1025,12 @@ impl Session {
         );
     }
 
+    /// Asks for player `pid`'s extra data while spectating them (C2S `0x08`); -1
+    /// stops.
+    pub fn spectate(&mut self, pid: i16) {
+        self.send(&c2s::SpecRequest { pid }, true);
+    }
+
     /// Reports your death (C2S `0x05`).
     pub fn send_death(&mut self, killer: i16, bounty: u16) {
         self.send(
