@@ -52,6 +52,8 @@ pub struct Ball {
     timestamp: u32,
     last_fire: u32,
     last_touch: u32,
+    /// When the last report arrived (for `BallBlankDelay`).
+    last_report: u32,
 }
 
 impl Ball {
@@ -76,22 +78,33 @@ pub struct BallRules {
     pub mode: u8,
     pub allow_guns: bool,
     pub allow_bombs: bool,
+    /// `Soccer:BallBounce`: balls bounce off walls (otherwise they stop there).
+    pub bounce: bool,
+    /// `Soccer:BallBlankDelay`: ticks without a report before a ball can't be
+    /// picked up (0 = no limit).
+    pub blank_delay: u32,
+    /// `Misc:DisableBallThroughWalls`: no pickups with a wall in between.
+    pub no_wall_pass: bool,
 }
 
 impl BallRules {
-    pub fn from_settings(cs: &oss_proto::ClientSettings) -> Self {
+    /// The rules from the arena settings (`Soccer:*` and each ship's ball settings).
+    pub fn from_arena(a: &oss_sim::ArenaSettings) -> Self {
         let mut r = Self {
-            pass_delay: cs.pass_delay().max(0) as u32,
-            mode: cs.soccer_mode(),
-            allow_guns: cs.allow_guns() != 0,
-            allow_bombs: cs.allow_bombs() != 0,
+            pass_delay: a.soccer.pass_delay,
+            mode: a.soccer.mode,
+            allow_guns: a.soccer.allow_guns,
+            allow_bombs: a.soccer.allow_bombs,
+            bounce: a.soccer.ball_bounce,
+            blank_delay: a.soccer.ball_blank_delay,
+            no_wall_pass: a.soccer.no_wall_pass,
             ..Self::default()
         };
-        for (i, s) in cs.ships.iter().enumerate() {
-            r.friction[i] = s.soccer_ball_friction() as i32;
-            r.proximity[i] = s.soccer_ball_proximity() as i32;
-            r.speed[i] = s.soccer_ball_speed() as i32;
-            r.throw_time[i] = s.soccer_throw_time() as u32;
+        for (i, s) in a.ships.iter().enumerate() {
+            r.friction[i] = s.soccer_ball_friction as i32;
+            r.proximity[i] = s.soccer_ball_proximity as i32;
+            r.speed[i] = s.soccer_ball_speed as i32;
+            r.throw_time[i] = s.soccer_throw_time;
         }
         r
     }
@@ -198,7 +211,9 @@ impl Balls {
             timestamp: 0,
             last_fire: now,
             last_touch: now.wrapping_sub(TOUCH_DELAY as u32),
+            last_report: now,
         });
+        ball.last_report = now;
         if fresh {
             ball.x = p.x as i64 * 1000;
             ball.y = p.y as i64 * 1000;
@@ -233,7 +248,7 @@ impl Balls {
                 after(now, time).clamp(0, MAX_CATCH_UP)
             };
             for _ in 0..catch_up {
-                step_ball(ball, None, solid);
+                step_ball(ball, rules.bounce, solid);
             }
             ball.timestamp = time;
         } else if time == 0 {
@@ -278,7 +293,7 @@ impl Balls {
         let playing = me.ship < 8 && me.can_play;
         for ball in self.balls.iter_mut().flatten() {
             if ball.state == BallState::World {
-                step_ball(ball, None, solid);
+                step_ball(ball, rules.bounce, solid);
                 // A goal by a ball you last carried.
                 if ball.carrier == Some(me.pid) {
                     let (tx, ty) = (
@@ -296,7 +311,10 @@ impl Balls {
                 }
             }
             // Pickup.
+            let fresh =
+                rules.blank_delay == 0 || after(now, ball.last_report) < rules.blank_delay as i32;
             let ready = ball.state == BallState::World
+                && fresh
                 && after(now, ball.last_fire) >= rules.pass_delay as i32
                 && after(now, ball.last_touch) >= TOUCH_DELAY;
             if ready
@@ -306,7 +324,9 @@ impl Balls {
             {
                 let reach = rules.proximity[(me.ship % 8) as usize];
                 let (bx, by) = ball.pixels();
-                if (me.x - bx).abs() < reach && (me.y - by).abs() < reach {
+                let clear =
+                    !rules.no_wall_pass || clear_line((me.x, me.y), (bx, by), me.freq, solid);
+                if (me.x - bx).abs() < reach && (me.y - by).abs() < reach && clear {
                     out.push(BallAction::Pickup {
                         id: ball.id,
                         time: ball.timestamp,
@@ -404,8 +424,24 @@ impl Balls {
     }
 }
 
-/// One tick of a free ball: each axis moves, and reverses on a wall; then friction.
-fn step_ball(b: &mut Ball, _: Option<()>, solid: &impl Fn(i32, i32, u16) -> bool) {
+/// Whether no wall lies between two points (sampled every 4 pixels).
+fn clear_line(
+    a: (i32, i32),
+    b: (i32, i32),
+    freq: u16,
+    solid: &impl Fn(i32, i32, u16) -> bool,
+) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let steps = (dx.abs().max(dy.abs()) / 4).max(1);
+    (0..=steps).all(|i| {
+        let (x, y) = (a.0 + dx * i / steps, a.1 + dy * i / steps);
+        !solid(x.div_euclid(16), y.div_euclid(16), freq)
+    })
+}
+
+/// One tick of a free ball: each axis moves, and reverses on a wall (or stops, when
+/// balls don't bounce); then friction.
+fn step_ball(b: &mut Ball, bounce: bool, solid: &impl Fn(i32, i32, u16) -> bool) {
     if b.friction <= 0 {
         return;
     }
@@ -419,6 +455,10 @@ fn step_ball(b: &mut Ball, _: Option<()>, solid: &impl Fn(i32, i32, u16) -> bool
         let (tx, ty) = (b.x.div_euclid(16_000) as i32, b.y.div_euclid(16_000) as i32);
         if solid(tx, ty, b.freq) {
             (b.x, b.y) = previous;
+            if !bounce {
+                (b.vx, b.vy) = (0, 0);
+                break;
+            }
             if axis == 0 {
                 b.vx = -b.vx;
             } else {
@@ -478,6 +518,9 @@ mod tests {
             mode: 1,
             allow_guns: false,
             allow_bombs: true,
+            bounce: true,
+            blank_delay: 0,
+            no_wall_pass: false,
         }
     }
 
@@ -584,6 +627,83 @@ mod tests {
             }
         ));
         assert_eq!(balls.carrying(), None);
+    }
+
+    #[test]
+    fn no_bounce_stops_and_stale_balls_cant_be_taken() {
+        let wall = |x: i32, _: i32, _: u16| x == 101;
+        let mut r = rules();
+        r.bounce = false;
+        let mut balls = Balls::default();
+        balls.report(
+            &report(0, 1600, 800, 1000, 7, 100),
+            100,
+            &me(0, 0),
+            &r,
+            |_| Some((1, 2)),
+            &wall,
+        );
+        for t in 0..20 {
+            balls.step(101 + t, &me(0, 0), &r, &wall, &NO_GOAL);
+        }
+        let b = balls.balls[0].as_ref().unwrap();
+        assert_eq!((b.vx, b.vy), (0, 0), "stopped at the wall");
+
+        // BallBlankDelay: no news for too long, no pickup.
+        let mut r = rules();
+        r.blank_delay = 200;
+        let at = me(500, 500);
+        let mut balls = Balls::default();
+        balls.report(
+            &report(1, 505, 505, 0, -1, 1000),
+            1000,
+            &at,
+            &r,
+            |_| None,
+            &OPEN,
+        );
+        assert!(balls.step(1300, &at, &r, &OPEN, &NO_GOAL).is_empty());
+        balls.report(
+            &report(1, 505, 505, 0, -1, 1300),
+            1300,
+            &at,
+            &r,
+            |_| None,
+            &OPEN,
+        );
+        assert_eq!(balls.step(1360, &at, &r, &OPEN, &NO_GOAL).len(), 1);
+
+        // DisableBallThroughWalls: a wall tile between ship and ball blocks it.
+        let mut r = rules();
+        r.no_wall_pass = true;
+        let wall_between = |x: i32, _: i32, _: u16| x == 31; // pixels 496..512
+        let at = me(490, 500);
+        let mut balls = Balls::default();
+        balls.report(
+            &report(2, 505, 500, 0, -1, 1000),
+            1000,
+            &at,
+            &r,
+            |_| None,
+            &wall_between,
+        );
+        assert!(
+            balls
+                .step(1100, &at, &r, &wall_between, &NO_GOAL)
+                .is_empty()
+        );
+        r.no_wall_pass = false;
+        assert_eq!(balls.step(1300, &at, &r, &wall_between, &NO_GOAL).len(), 1);
+    }
+
+    #[test]
+    fn rules_come_from_the_arena_settings() {
+        let mut a = oss_sim::ArenaSettings::default();
+        a.soccer.pass_delay = 33;
+        a.soccer.ball_bounce = false;
+        a.ships[3].soccer_ball_speed = 1234;
+        let r = BallRules::from_arena(&a);
+        assert_eq!((r.pass_delay, r.bounce, r.speed[3]), (33, false, 1234));
     }
 
     #[test]

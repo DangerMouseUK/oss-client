@@ -154,6 +154,9 @@ pub struct Ship {
     /// Driven by network updates rather than local input: never respawns, warps or
     /// picks up prizes on its own.
     pub remote: bool,
+    /// Carrying flags (or a ball with `Soccer:UseFlagger`): the `Flag:Flagger*`
+    /// adjustments apply. Set by the client from what the server says.
+    pub flagger: bool,
     /// Remote ships: a correction blended in over the next `lerp_ticks` ticks (added to
     /// the position each tick) instead of jumping to the reported position.
     pub lerp: Vel,
@@ -206,6 +209,7 @@ impl Ship {
             remote: false,
             lerp: Vel::default(),
             lerp_ticks: 0,
+            flagger: false,
             afterburning: false,
             thrusting: 0,
             next_gun_tick: 0,

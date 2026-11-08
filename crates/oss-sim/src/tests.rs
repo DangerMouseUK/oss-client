@@ -813,3 +813,119 @@ fn remote_ship_is_carried_forward_off_walls() {
     assert!(ship.pos.pixels().x < 520 * 16, "{:?}", ship.pos.pixels());
     assert!(ship.vel.x < 0);
 }
+
+// --- Flaggers, bomb gravity, wormhole switching ------------------------------------------
+
+#[test]
+fn flaggers_get_upgrades_costs_and_damage_changes() {
+    let mut settings = bare();
+    settings.flagger.fire_cost_percent = 500;
+    settings.flagger.damage_percent = 2000;
+    settings.flagger.speed_adjustment = -500;
+    let mut w = world_with(None, settings);
+    w.add_ship(0, 0, 0);
+    w.add_ship(1, 0, 1);
+    place(&mut w, 8000, 8000, 0);
+    arm(&mut w, 0);
+    w.ships[0].energy = 1000 * ENERGY_SCALE;
+    let gun = key(|i| i.gun = true);
+
+    // Not a flagger: level 1 bullet at full cost.
+    let ev = hold(gun, 1, &mut w);
+    assert!(ev.contains(&Event::FiredGun {
+        ship: 0,
+        level: 0,
+        multifire: false
+    }));
+    let full = 1000 * ENERGY_SCALE - w.ships[0].energy;
+
+    // A flagger: one level up (FlaggerGunUpgrade), at half the cost of that level.
+    w.ships[0].flagger = true;
+    w.ships[0].energy = 1000 * ENERGY_SCALE;
+    let ev = hold(gun, 100, &mut w);
+    assert!(ev.contains(&Event::FiredGun {
+        ship: 0,
+        level: 1,
+        multifire: false
+    }));
+    let s = w.settings.ships[0];
+    let level2 = (s.bullet_fire_energy * 2) as i32 * ENERGY_SCALE;
+    assert_eq!(full, (s.bullet_fire_energy as i32) * ENERGY_SCALE);
+    assert_eq!(level2 / 2, level2 * 500 / 1000);
+
+    // Damage taken doubles (FlaggerDamagePercent 2000).
+    w.ships[0].energy = 1000 * ENERGY_SCALE;
+    let mut events = Vec::new();
+    w.damage(0, 1, 100, 0, &mut events);
+    assert_eq!(w.ships[0].energy, 800 * ENERGY_SCALE);
+
+    // Top speed drops by FlaggerSpeedAdjustment (clamped at zero).
+    w.ships[0].vel = Vel::from_wire(20_000, 0);
+    hold(ShipInput::default(), 1, &mut w);
+    let top = (s.initial_speed as i64 - 500).max(0) * VEL_SCALE as i64;
+    assert!(w.ships[0].vel.length() <= top + VEL_SCALE as i64);
+}
+
+#[test]
+fn wormholes_pull_bombs_only_with_gravity_bombs() {
+    let mut cells = vec![0u8; MAP_TILES * MAP_TILES];
+    cells[500 * MAP_TILES + 500] = tile::WORMHOLE;
+    let fire_bomb = |gravity_bombs: bool| {
+        let mut settings = bare();
+        settings.gravity_bombs = gravity_bombs;
+        let mut w = world_with(Some(&cells), settings);
+        w.add_ship(0, 0, 0);
+        // Ship above the wormhole, pointing right: the bomb flies right, past it.
+        place(&mut w, 498 * 16, 497 * 16, 10);
+        arm(&mut w, 0);
+        hold(key(|i| i.bomb = true), 1, &mut w);
+        let bomb = w
+            .projectiles
+            .iter()
+            .find(|p| p.kind == ProjectileKind::Bomb)
+            .expect("a bomb");
+        let before = bomb.vel;
+        hold(ShipInput::default(), 5, &mut w);
+        let after = w
+            .projectiles
+            .iter()
+            .find(|p| p.kind == ProjectileKind::Bomb)
+            .map(|p| p.vel)
+            .unwrap();
+        (before, after)
+    };
+    let (b, a) = fire_bomb(false);
+    assert_eq!(a.y, b.y, "no pull without GravityBombs");
+    let (b, a) = fire_bomb(true);
+    assert!(a.y > b.y, "pulled down toward the wormhole: {b:?} -> {a:?}");
+}
+
+#[test]
+fn wormhole_destination_holds_for_switch_time() {
+    let mut cells = vec![0u8; MAP_TILES * MAP_TILES];
+    cells[300 * MAP_TILES + 300] = tile::WORMHOLE;
+    let mut settings = bare();
+    settings.wormhole_switch_time = 500;
+    let mut w = world_with(Some(&cells), settings);
+    w.spawn_radius = 30;
+    w.add_ship(0, 0, 0);
+    let trip = |w: &mut World| {
+        place(w, 300 * 16 + 8, 300 * 16 + 8, 0);
+        hold(ShipInput::default(), 1, w);
+        w.ships[0].pos.pixels()
+    };
+    let first = trip(&mut w);
+    assert!(first.x.div_euclid(16) > 400, "warped to spawn: {first:?}");
+    let second = trip(&mut w);
+    assert_eq!(first, second, "same destination within SwitchTime");
+    hold(ShipInput::default(), 600, &mut w);
+    let mut changed = false;
+    for _ in 0..5 {
+        if trip(&mut w) != first {
+            changed = true;
+            break;
+        }
+        hold(ShipInput::default(), 600, &mut w);
+    }
+    assert!(changed, "a new destination after SwitchTime");
+}

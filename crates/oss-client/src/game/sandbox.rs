@@ -340,7 +340,7 @@ impl Sandbox {
             ball_rules: net
                 .as_ref()
                 .and_then(|n| n.session.settings())
-                .map(BallRules::from_settings)
+                .map(|cs| BallRules::from_arena(&ArenaSettings::from_client_settings(cs)))
                 .unwrap_or_default(),
             screen_refs: [(0.0, 0.0); 12],
             slew_tick: 0,
@@ -598,6 +598,13 @@ impl Sandbox {
             let me = self.me_index();
             if let Some(slot) = inputs.get_mut(me) {
                 *slot = ship_input;
+            }
+            // Flag carriers (and ball carriers under Soccer:UseFlagger) get the
+            // Flag:Flagger* adjustments.
+            let flagger = self.carried_flags() > 0
+                || (self.balls.carrying().is_some() && self.world.settings.soccer.use_flagger);
+            if let Some(i) = self.world.ship_index(self.me_id) {
+                self.world.ships[i].flagger = flagger;
             }
             let events = self.world.step(&inputs);
             self.turret_and_crown();
@@ -1105,8 +1112,8 @@ impl Sandbox {
                     }
                 }
                 SessionEvent::Settings(cs) => {
-                    self.ball_rules = BallRules::from_settings(&cs);
                     self.world.settings = ArenaSettings::from_client_settings(&cs);
+                    self.ball_rules = BallRules::from_arena(&self.world.settings);
                 }
                 SessionEvent::Seeds {
                     green_seed,
@@ -1340,6 +1347,21 @@ impl Sandbox {
             net.session.attach(target);
             net.flush();
         }
+    }
+
+    /// Whether player `pid` shows as a flagger on the radar: carrying flags (when
+    /// `Flag:FlaggerOnRadar` is set) or a ball (always, as in nullspace).
+    pub(super) fn radar_flagger(&self, pid: u16) -> bool {
+        let flags = self
+            .net
+            .as_ref()
+            .and_then(|n| n.session.player(pid as i16))
+            .is_some_and(|p| p.flags > 0);
+        let ball =
+            self.balls.balls.iter().flatten().any(|b| {
+                b.state == super::balls::BallState::Carried && b.carrier == Some(pid as i16)
+            });
+        (flags && self.world.settings.flagger.on_radar) || ball
     }
 
     /// Seconds left on your crown, if you wear one.

@@ -87,6 +87,55 @@ pub struct ShipSettings {
     pub emp_bomb: bool,
     /// Weapons can't be fired while afterburners are on.
     pub disable_fast_shooting: bool,
+    /// Soccer: carry time before an automatic throw (ticks, 0 = none), ball
+    /// friction, pickup distance (pixels) and fire speed (pixels per 10 s).
+    pub soccer_throw_time: u32,
+    pub soccer_ball_friction: u32,
+    pub soccer_ball_proximity: u32,
+    pub soccer_ball_speed: u32,
+}
+
+/// `Flag:Flagger*`: adjustments for players carrying flags (and ball carriers when
+/// `Soccer:UseFlagger` is set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlaggerSettings {
+    /// Added to thrust and top speed (may be negative).
+    pub thrust_adjustment: i32,
+    pub speed_adjustment: i32,
+    /// Extra bomb delay (ticks).
+    pub bomb_fire_delay: u32,
+    /// One gun / bomb level higher.
+    pub gun_upgrade: bool,
+    pub bomb_upgrade: bool,
+    /// Weapon cost and damage taken, in 1/1000 (1000 = unchanged).
+    pub fire_cost_percent: u32,
+    pub damage_percent: u32,
+    /// Carriers are marked on everyone's radar.
+    pub on_radar: bool,
+    /// Kill points multiplier (scored by the server).
+    pub kill_multiplier: u32,
+}
+
+/// `Soccer:*`, the arena-wide ball rules the client enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SoccerSettings {
+    /// Balls bounce off walls (otherwise they stop).
+    pub ball_bounce: bool,
+    /// Ball carriers may fire bombs / guns (otherwise those keys shoot the ball).
+    pub allow_bombs: bool,
+    pub allow_guns: bool,
+    /// Ticks after a shot before anyone can catch it.
+    pub pass_delay: u32,
+    /// Ticks without news of a ball before it can't be picked up (0 = never).
+    pub ball_blank_delay: u32,
+    /// Balls always show on the radar.
+    pub ball_location: bool,
+    /// Goal layout (0-6).
+    pub mode: u8,
+    /// Ball carriers get the flagger adjustments.
+    pub use_flagger: bool,
+    /// `Misc:DisableBallThroughWalls`: no picking a ball up through a wall.
+    pub no_wall_pass: bool,
 }
 
 impl ShipSettings {
@@ -171,6 +220,12 @@ pub struct ArenaSettings {
     pub multi_prize_count: u32,
     /// Random warp/spawn distance limit from the centre (tiles).
     pub warp_radius_limit: u32,
+    pub flagger: FlaggerSettings,
+    pub soccer: SoccerSettings,
+    /// Wormholes pull bombs as well as ships.
+    pub gravity_bombs: bool,
+    /// How often a wormhole's destination changes (ticks; 0 = every trip).
+    pub wormhole_switch_time: u32,
 }
 
 /// Stock ship block: every ship in a freshly installed zone uses these values.
@@ -247,6 +302,36 @@ pub const STOCK_SHIP: ShipSettings = ShipSettings {
     double_barrel: false,
     emp_bomb: false,
     disable_fast_shooting: false,
+    soccer_throw_time: 1200,
+    soccer_ball_friction: 12,
+    soccer_ball_proximity: 64,
+    soccer_ball_speed: 2500,
+};
+
+/// Stock flagger settings (ASSS public arena).
+pub const STOCK_FLAGGER: FlaggerSettings = FlaggerSettings {
+    thrust_adjustment: 0,
+    speed_adjustment: 0,
+    bomb_fire_delay: 0,
+    gun_upgrade: true,
+    bomb_upgrade: true,
+    fire_cost_percent: 1000,
+    damage_percent: 1000,
+    on_radar: true,
+    kill_multiplier: 2,
+};
+
+/// Stock soccer settings (ASSS public arena).
+pub const STOCK_SOCCER: SoccerSettings = SoccerSettings {
+    ball_bounce: true,
+    allow_bombs: true,
+    allow_guns: true,
+    pass_delay: 20,
+    ball_blank_delay: 200,
+    ball_location: true,
+    mode: 0,
+    use_flagger: true,
+    no_wall_pass: false,
 };
 
 /// Stock prize weights (QuickCharge, Energy, Rotation, Stealth, Cloak, XRadar, Warp,
@@ -310,6 +395,10 @@ impl Default for ArenaSettings {
             death_prize_time: 1000,
             multi_prize_count: 10,
             warp_radius_limit: 20,
+            flagger: STOCK_FLAGGER,
+            soccer: STOCK_SOCCER,
+            gravity_bombs: true,
+            wormhole_switch_time: 100_000,
         }
     }
 }
@@ -407,6 +496,10 @@ impl ShipSettings {
             double_barrel: s.double_barrel() != 0,
             emp_bomb: s.emp_bomb() != 0,
             disable_fast_shooting: s.disable_fast_shooting() != 0,
+            soccer_throw_time: s.soccer_throw_time() as u32,
+            soccer_ball_friction: s.soccer_ball_friction() as u32,
+            soccer_ball_proximity: s.soccer_ball_proximity() as u32,
+            soccer_ball_speed: s.soccer_ball_speed() as u32,
         }
     }
 }
@@ -467,6 +560,30 @@ impl ArenaSettings {
             death_prize_time: short(cs.death_prize_time()),
             multi_prize_count: short(cs.multi_prize_count()),
             warp_radius_limit: short(cs.warp_radius_limit()),
+            flagger: FlaggerSettings {
+                thrust_adjustment: cs.flagger_thrust_adjustment() as i32,
+                speed_adjustment: cs.flagger_speed_adjustment() as i32,
+                bomb_fire_delay: short(cs.flagger_bomb_fire_delay()),
+                gun_upgrade: cs.flagger_gun_upgrade() != 0,
+                bomb_upgrade: cs.flagger_bomb_upgrade() != 0,
+                fire_cost_percent: short(cs.flagger_fire_cost_percent()),
+                damage_percent: short(cs.flagger_damage_percent()),
+                on_radar: cs.flagger_on_radar() != 0,
+                kill_multiplier: short(cs.flagger_kill_multiplier()),
+            },
+            soccer: SoccerSettings {
+                ball_bounce: cs.ball_bounce() != 0,
+                allow_bombs: cs.allow_bombs() != 0,
+                allow_guns: cs.allow_guns() != 0,
+                pass_delay: short(cs.pass_delay()),
+                ball_blank_delay: short(cs.ball_blank_delay()),
+                ball_location: cs.ball_location() != 0,
+                mode: cs.soccer_mode(),
+                use_flagger: cs.use_flagger() != 0,
+                no_wall_pass: cs.disable_ball_through_walls() != 0,
+            },
+            gravity_bombs: cs.gravity_bombs() != 0,
+            wormhole_switch_time: clamp_u32(cs.wormhole_switch_time()),
         }
     }
 }
@@ -548,6 +665,10 @@ impl ShipSettings {
         s.set_double_barrel(self.double_barrel as u8);
         s.set_emp_bomb(self.emp_bomb as u8);
         s.set_disable_fast_shooting(self.disable_fast_shooting as u8);
+        s.set_soccer_throw_time(u16_(self.soccer_throw_time));
+        s.set_soccer_ball_friction(u16_(self.soccer_ball_friction));
+        s.set_soccer_ball_proximity(u16_(self.soccer_ball_proximity));
+        s.set_soccer_ball_speed(u16_(self.soccer_ball_speed));
     }
 }
 
@@ -610,6 +731,29 @@ impl ArenaSettings {
         cs.set_death_prize_time(i16_(self.death_prize_time));
         cs.set_multi_prize_count(i16_(self.multi_prize_count));
         cs.set_warp_radius_limit(i16_(self.warp_radius_limit));
+        let f = &self.flagger;
+        let signed = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        cs.set_flagger_thrust_adjustment(signed(f.thrust_adjustment));
+        cs.set_flagger_speed_adjustment(signed(f.speed_adjustment));
+        cs.set_flagger_bomb_fire_delay(i16_(f.bomb_fire_delay));
+        cs.set_flagger_gun_upgrade(f.gun_upgrade as u8);
+        cs.set_flagger_bomb_upgrade(f.bomb_upgrade as u8);
+        cs.set_flagger_fire_cost_percent(i16_(f.fire_cost_percent));
+        cs.set_flagger_damage_percent(i16_(f.damage_percent));
+        cs.set_flagger_on_radar(f.on_radar as i16);
+        cs.set_flagger_kill_multiplier(i16_(f.kill_multiplier));
+        let b = &self.soccer;
+        cs.set_ball_bounce(b.ball_bounce as u8);
+        cs.set_allow_bombs(b.allow_bombs as u8);
+        cs.set_allow_guns(b.allow_guns as u8);
+        cs.set_pass_delay(i16_(b.pass_delay));
+        cs.set_ball_blank_delay(i16_(b.ball_blank_delay));
+        cs.set_ball_location(b.ball_location as u8);
+        cs.set_soccer_mode(b.mode);
+        cs.set_use_flagger(b.use_flagger as u8);
+        cs.set_disable_ball_through_walls(b.no_wall_pass as u8);
+        cs.set_gravity_bombs(self.gravity_bombs as u8);
+        cs.set_wormhole_switch_time(self.wormhole_switch_time.min(i32::MAX as u32) as i32);
         cs.set_send_position_delay(20);
         cs.set_map_zoom_factor(10);
         cs

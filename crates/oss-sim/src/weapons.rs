@@ -141,6 +141,7 @@ impl World {
         let can_fastshoot = !ship.afterburning || !s.disable_fast_shooting;
         let bomb_ready = tick_after(tick, ship.next_bomb_tick);
         let (id, freq) = (ship.id, ship.freq);
+        let flag = Flagging::new(ship.flagger, &self.settings.flagger);
 
         // --- Items that don't fire a normal weapon ---------------------------------
         if input.rocket
@@ -187,14 +188,14 @@ impl World {
             && ship.guns > 0
             && can_fastshoot
         {
-            let level = ship.guns - 1;
+            let level = (ship.guns - 1 + flag.gun_upgrade as u8).min(3);
             let multi = ship.multifire && ship.has(cap::MULTIFIRE);
             let (delay, per) = if multi {
                 (s.multi_fire_delay, s.multi_fire_energy)
             } else {
                 (s.bullet_fire_delay, s.bullet_fire_energy)
             };
-            let cost = (per * (level as u32 + 1)) as i32 * ENERGY_SCALE;
+            let cost = flag.cost((per * (level as u32 + 1)) as i32 * ENERGY_SCALE);
             if cost < ship.energy {
                 shot = Some(Shot::Gun {
                     level,
@@ -204,10 +205,11 @@ impl World {
                 });
             }
         } else if input.mine && bomb_ready && ship.bombs > 0 {
-            let level = ship.bombs - 1;
-            let cost = (s.landmine_fire_energy + s.landmine_fire_energy_upgrade * level as u32)
-                as i32
-                * ENERGY_SCALE;
+            let level = (ship.bombs - 1 + flag.bomb_upgrade as u8).min(3);
+            let cost = flag.cost(
+                (s.landmine_fire_energy + s.landmine_fire_energy_upgrade * level as u32) as i32
+                    * ENERGY_SCALE,
+            );
             let own = self
                 .projectiles
                 .iter()
@@ -233,9 +235,11 @@ impl World {
                 });
             }
         } else if input.bomb && bomb_ready && ship.bombs > 0 && can_fastshoot {
-            let level = ship.bombs - 1;
-            let cost = (s.bomb_fire_energy + s.bomb_fire_energy_upgrade * level as u32) as i32
-                * ENERGY_SCALE;
+            let level = (ship.bombs - 1 + flag.bomb_upgrade as u8).min(3);
+            let cost = flag.cost(
+                (s.bomb_fire_energy + s.bomb_fire_energy_upgrade * level as u32) as i32
+                    * ENERGY_SCALE,
+            );
             let mut ok = cost < ship.energy;
             if ok && ship.has(cap::PROXIMITY) && self.settings.bomb_safety {
                 // Proximity bombs can't be fired with an enemy already in range.
@@ -424,7 +428,7 @@ impl World {
                 let delay = if mine {
                     s.landmine_fire_delay
                 } else {
-                    s.bomb_fire_delay
+                    s.bomb_fire_delay + flag.bomb_delay
                 };
                 let ship = &mut self.ships[index];
                 ship.next_bomb_tick = tick.wrapping_add(delay);
@@ -633,6 +637,43 @@ impl World {
         }
         let before = pr.pos;
 
+        if pr.kind == ProjectileKind::Bomb && self.settings.gravity_bombs {
+            // `Wormhole:GravityBombs`: the shooter's ship's `Gravity` pulls bombs too.
+            // As in nullspace, measured between whole tiles and toward the
+            // wormhole's top-left tile.
+            let owner_kind = self
+                .ships
+                .iter()
+                .find(|s| s.id == pr.owner)
+                .map(|s| s.kind as usize % 8);
+            if let Some(k) = owner_kind {
+                let gravity = self.settings.ships[k].gravity as i64;
+                if gravity != 0 {
+                    let p = pr.pos.pixels();
+                    for &(wx, wy) in &self.wormholes {
+                        let (dx, dy) = (
+                            (p.x.div_euclid(16) - wx) as i64 * 16,
+                            (p.y.div_euclid(16) - wy) as i64 * 16,
+                        );
+                        let dist_sq = dx * dx + dy * dy + 1;
+                        if dist_sq >= gravity.abs() * 1000 {
+                            continue;
+                        }
+                        let pull = gravity * 1000 / dist_sq;
+                        let (tx, ty) = ((wx * 16 - p.x) as i64, (wy * 16 - p.y) as i64);
+                        let len = isqrt(tx * tx + ty * ty).max(1);
+                        pr.vel.x = pr
+                            .vel
+                            .x
+                            .saturating_add((tx * pull * VEL_SCALE as i64 / len) as i32);
+                        pr.vel.y = pr
+                            .vel
+                            .y
+                            .saturating_add((ty * pull * VEL_SCALE as i64 / len) as i32);
+                    }
+                }
+            }
+        }
         if pr.kind != ProjectileKind::Mine {
             let walls = pr.kind != ProjectileKind::Thor;
             let hit_x = move_axis(&terrain, pr, 0, walls);
@@ -905,6 +946,12 @@ impl World {
         let Some(index) = self.ships.iter().position(|s| s.id == target) else {
             return;
         };
+        // Flaggers take `FlaggerDamagePercent` of the damage.
+        let damage = if self.ships[index].flagger {
+            (damage as u64 * self.settings.flagger.damage_percent as u64 / 1000) as u32
+        } else {
+            damage
+        };
         let ship = &self.ships[index];
         if !ship.takes_damage || !ship.is_alive() {
             return;
@@ -1005,4 +1052,37 @@ fn move_axis(terrain: &Terrain, pr: &mut Projectile, axis: usize, walls: bool) -
         return true;
     }
     false
+}
+
+/// The `Flag:Flagger*` adjustments for one shot (all neutral when not a flagger).
+struct Flagging {
+    gun_upgrade: bool,
+    bomb_upgrade: bool,
+    cost_percent: i64,
+    bomb_delay: u32,
+}
+
+impl Flagging {
+    fn new(flagger: bool, f: &crate::settings::FlaggerSettings) -> Self {
+        if flagger {
+            Self {
+                gun_upgrade: f.gun_upgrade,
+                bomb_upgrade: f.bomb_upgrade,
+                cost_percent: f.fire_cost_percent as i64,
+                bomb_delay: f.bomb_fire_delay,
+            }
+        } else {
+            Self {
+                gun_upgrade: false,
+                bomb_upgrade: false,
+                cost_percent: 1000,
+                bomb_delay: 0,
+            }
+        }
+    }
+
+    /// Weapon energy cost after `FlaggerFireCostPercent`.
+    fn cost(&self, cost: i32) -> i32 {
+        (cost as i64 * self.cost_percent / 1000) as i32
+    }
 }

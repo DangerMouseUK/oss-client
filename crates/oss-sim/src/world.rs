@@ -180,7 +180,9 @@ pub struct World {
     /// area. `None` counts the ships in the world.
     pub player_count: Option<u32>,
     /// Top-left tiles of wormholes (for gravity).
-    wormholes: Vec<(i32, i32)>,
+    pub(crate) wormholes: Vec<(i32, i32)>,
+    /// Where wormholes send ships until a tick (`Wormhole:SwitchTime`).
+    wormhole_destination: Option<(Pos, u32)>,
 }
 
 /// Most door changes replayed at once when catching up.
@@ -213,6 +215,7 @@ impl World {
             last_door_tick: 0u32.wrapping_sub(door_delay),
             player_count: None,
             wormholes: Vec::new(),
+            wormhole_destination: None,
         };
         w.spawn_radius = w.settings.warp_radius_limit.clamp(3, 512) as i32;
         for (i, &id) in w.map.cells().iter().enumerate() {
@@ -560,6 +563,11 @@ impl World {
         } else {
             ship.stats.thrust
         };
+        let thrust = if ship.flagger && !shutdown {
+            (thrust as i64 + self.settings.flagger.thrust_adjustment as i64).max(0) as u32
+        } else {
+            thrust
+        };
         let dir = DIRECTION_HEADINGS[ship.direction() as usize];
         let push = scale_unit(dir, thrust as i64 * VEL_SCALE as i64);
         ship.thrusting = 0;
@@ -629,6 +637,9 @@ impl World {
         } else {
             ship.stats.speed
         };
+        if ship.flagger {
+            speed = (speed as i64 + self.settings.flagger.speed_adjustment as i64).max(0) as u32;
+        }
         speed = speed.max(gravity_speed);
         if active(tick, ship.repelled_end_tick) {
             speed = speed.max(self.settings.repel_speed);
@@ -708,6 +719,22 @@ impl World {
             let from = ship.pos;
             let mut moved = ship.clone();
             self.place_at_spawn(&mut moved);
+            // `Wormhole:SwitchTime`: the destination holds for that long, then a new
+            // one is picked (0 = a new spot every trip).
+            let switch = self.settings.wormhole_switch_time;
+            if switch > 0 {
+                match self.wormhole_destination {
+                    Some((dest, until)) if !tick_reached(tick, until) => {
+                        let p = dest.pixels();
+                        let radius = self.settings.ships[moved.kind as usize].radius_pixels();
+                        if !self.map.box_collides(p.x, p.y, radius) {
+                            moved.pos = dest;
+                            moved.prev_pos = dest;
+                        }
+                    }
+                    _ => self.wormhole_destination = Some((moved.pos, tick.wrapping_add(switch))),
+                }
+            }
             moved.energy = energy;
             let (id, to) = (moved.id, moved.pos);
             self.ships[index] = moved;
