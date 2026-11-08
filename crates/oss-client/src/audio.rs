@@ -30,6 +30,7 @@ enum Command {
         samples: Option<Samples>,
         gain: f32,
     },
+    Volume(f32),
 }
 
 struct Voice {
@@ -68,6 +69,7 @@ impl Mixer {
                         pan,
                     });
                 }
+                Command::Volume(v) => self.volume = v,
                 Command::Loop {
                     channel,
                     samples,
@@ -218,6 +220,13 @@ impl Audio {
                 pan: pan.clamp(-1.0, 1.0),
             });
         }
+    }
+
+    /// Master volume, 0-100.
+    pub fn set_volume(&mut self, volume: u32) {
+        let _ = self
+            .tx
+            .send(Command::Volume(volume.min(100) as f32 / 100.0));
     }
 
     /// Sets (or clears, with `None`) a looping channel.

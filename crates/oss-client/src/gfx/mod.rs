@@ -76,6 +76,17 @@ pub struct Renderer {
     pub present_mode: wgpu::PresentMode,
     /// When set, the next rendered frame is also saved to this PNG file.
     pub capture: Option<std::path::PathBuf>,
+    /// Draws egui windows (settings) over the game, created on first use.
+    ui: Option<egui_wgpu::Renderer>,
+    /// egui textures to free once the frame that last used them is done.
+    ui_free: Vec<egui::TextureId>,
+}
+
+/// One frame of egui output to draw over the game.
+pub struct UiFrame {
+    pub primitives: Vec<egui::ClippedPrimitive>,
+    pub textures: egui::TexturesDelta,
+    pub pixels_per_point: f32,
 }
 
 #[derive(Debug)]
@@ -297,6 +308,8 @@ impl Renderer {
             batches: Vec::new(),
             present_mode,
             capture: None,
+            ui: None,
+            ui_free: Vec::new(),
         })
     }
 
@@ -310,6 +323,11 @@ impl Renderer {
     }
 
     /// Surface size in physical pixels.
+    /// The device's largest texture side (for egui).
+    pub fn max_texture_side(&self) -> usize {
+        self.device.limits().max_texture_dimension_2d as usize
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
     }
@@ -456,7 +474,30 @@ impl Renderer {
     }
 
     /// Draws everything queued since the last frame, over a starfield (or black).
-    pub fn render(&mut self, stars: Option<StarParams>, time: f32) -> Result<(), FrameError> {
+    pub fn render(
+        &mut self,
+        stars: Option<StarParams>,
+        time: f32,
+        mut ui: Option<UiFrame>,
+    ) -> Result<(), FrameError> {
+        // egui textures first, so a skipped frame doesn't lose them.
+        if let Some(frame_ui) = ui.as_mut() {
+            let (device, queue, format) = (&self.device, &self.queue, self.config.format);
+            let r = self.ui.get_or_insert_with(|| {
+                egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default())
+            });
+            for id in self.ui_free.drain(..) {
+                r.free_texture(&id);
+            }
+            let mut delta = std::mem::take(&mut frame_ui.textures);
+            for (id, deltas) in &delta.set {
+                for d in deltas {
+                    r.update_texture(device, queue, *id, d);
+                }
+            }
+            self.ui_free.extend(delta.free.drain());
+            delta.clear();
+        }
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
@@ -538,6 +579,39 @@ impl Renderer {
                 }
             }
         }
+        let mut ui_buffers = Vec::new();
+        if let Some(frame_ui) = ui {
+            let (device, queue, format) = (&self.device, &self.queue, self.config.format);
+            let r = self.ui.get_or_insert_with(|| {
+                egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default())
+            });
+            let screen = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: frame_ui.pixels_per_point,
+            };
+            ui_buffers =
+                r.update_buffers(device, queue, &mut encoder, &frame_ui.primitives, &screen);
+            {
+                let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ui"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                let mut pass = pass.forget_lifetime();
+                r.render(&mut pass, &frame_ui.primitives, &screen);
+            }
+        }
         let readback = self.capture.take().and_then(|path| {
             if !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
                 log::warn!("screen capture unsupported on this surface");
@@ -570,7 +644,8 @@ impl Renderer {
             );
             Some((path, buffer, row))
         });
-        self.queue.submit([encoder.finish()]);
+        self.queue
+            .submit(ui_buffers.into_iter().chain([encoder.finish()]));
         if let Some((path, buffer, row)) = readback {
             self.save_capture(&path, &buffer, row);
         }

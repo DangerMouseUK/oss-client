@@ -18,8 +18,9 @@ use crate::game::input::InputState;
 use crate::game::login::{Choice, Login};
 use crate::game::online::{Online, ServerOptions};
 use crate::game::sandbox::Sandbox;
+use crate::game::settings_ui::{SettingsUi, UiAction};
 use crate::game::view::{Canvas, color};
-use crate::gfx::{FrameError, Renderer, TextureId};
+use crate::gfx::{FrameError, Renderer, TextureId, UiFrame};
 
 /// What to play.
 pub enum Mode {
@@ -55,6 +56,10 @@ pub struct Options {
     /// `--config`: the settings file, if not the default one.
     pub config: Option<PathBuf>,
     pub bindings: crate::game::input::Bindings,
+    /// Where the settings file lives (for the settings screen's Save).
+    pub settings_path: Option<PathBuf>,
+    /// `--settings`: open the settings screen at start.
+    pub open_settings: bool,
     /// Macro keys from the settings file.
     pub macros: Vec<(crate::game::input::Binding, String)>,
     /// `--lvz`: LVZ files to show in the sandbox.
@@ -107,6 +112,10 @@ struct App {
     running: Option<Running>,
     input: InputState,
     gilrs: Option<gilrs::Gilrs>,
+    /// egui (the settings screen).
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
+    settings: Option<SettingsUi>,
     error: Option<String>,
 }
 
@@ -157,6 +166,9 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         running: None,
         input,
         gilrs,
+        egui_ctx: egui::Context::default(),
+        egui_state: None,
+        settings: None,
         error: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
@@ -223,6 +235,7 @@ impl ApplicationHandler for App {
                 ) {
                     Ok(mut s) => {
                         s.aim_bot = self.options.autopilot;
+                        s.open_settings = self.options.open_settings;
                         for path in &self.options.lvz {
                             match oss_assets::locate::read_file(path) {
                                 Ok(data) => s.load_lvz(&path.display().to_string(), &data),
@@ -316,6 +329,35 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } if self.settings.is_some() => {
+                // The settings screen has the keyboard (and may be capturing a key).
+                let down = event.state == ElementState::Pressed;
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if down
+                        && let Some(ui) = self.settings.as_mut()
+                        && ui.capturing()
+                    {
+                        ui.capture(code, self.input.shift(), self.input.ctrl());
+                    } else if down && code == KeyCode::Escape {
+                        self.settings = None;
+                    }
+                    // Track modifiers for captures.
+                    if matches!(
+                        code,
+                        KeyCode::ShiftLeft
+                            | KeyCode::ShiftRight
+                            | KeyCode::ControlLeft
+                            | KeyCode::ControlRight
+                    ) {
+                        self.input.key(code, down);
+                    }
+                }
+                self.egui_event(&WindowEvent::KeyboardInput {
+                    device_id: winit::event::DeviceId::dummy(),
+                    event,
+                    is_synthetic: false,
+                });
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -326,7 +368,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop, true),
-            _ => {}
+            other => {
+                if self.settings.is_some() {
+                    self.egui_event(&other);
+                }
+            }
         }
     }
 
@@ -470,10 +516,19 @@ impl App {
 
         let stars = match &mut run.screen {
             Screen::Game(game) => {
-                game.update(&mut self.input);
+                if self.settings.is_none() {
+                    game.update(&mut self.input);
+                } else {
+                    // The world keeps running; your ship idles while the screen is open.
+                    let mut idle = InputState::new(Default::default());
+                    game.update(&mut idle);
+                }
                 if game.quit {
                     event_loop.exit();
                     return;
+                }
+                if std::mem::take(&mut game.open_settings) {
+                    self.settings = Some(SettingsUi::new(current_config(&self.options)));
                 }
                 draw.then(|| game.draw(&mut run.renderer))
             }
@@ -516,7 +571,11 @@ impl App {
             run.renderer.capture = self.options.screenshot.clone();
             run.captured = true;
         }
-        match run.renderer.render(stars, 0.0) {
+        let ui_frame = self.settings_frame();
+        let Some(run) = self.running.as_mut() else {
+            return;
+        };
+        match run.renderer.render(stars, 0.0, ui_frame) {
             Ok(()) | Err(FrameError::Skip) => {}
             Err(FrameError::Fatal(e)) => return self.fail(event_loop, e),
         }
@@ -587,4 +646,104 @@ fn draw_login(login: &Login, art: &Art, atlas: TextureId, r: &mut Renderer, scal
         "Enter connect   Tab/arrows move   F5 sandbox",
     );
     c.text(r, x, y + 14.0, color::WHITE, "Esc quit");
+}
+
+impl App {
+    fn egui_event(&mut self, event: &WindowEvent) {
+        if let (Some(state), Some(run)) = (self.egui_state.as_mut(), self.running.as_ref()) {
+            let _ = state.on_window_event(&run.window, event);
+        }
+    }
+}
+
+/// The settings as they stand now, for the settings screen.
+fn current_config(o: &Options) -> crate::config::Config {
+    {
+        crate::config::Config {
+            scale: o.scale,
+            vsync: o.vsync,
+            fullscreen: o.fullscreen,
+            mute: o.mute,
+            volume: o.volume,
+            name: o.player_name.clone(),
+            bindings: o.bindings.clone(),
+            macros: o.macros.clone(),
+        }
+    }
+}
+
+impl App {
+    /// Runs the settings screen for this frame, applies a save, and returns what to
+    /// draw.
+    fn settings_frame(&mut self) -> Option<UiFrame> {
+        let run = self.running.as_ref()?;
+        let ui = self.settings.as_mut()?;
+        let state = self.egui_state.get_or_insert_with(|| {
+            egui_winit::State::new(
+                self.egui_ctx.clone(),
+                egui::ViewportId::ROOT,
+                &run.window,
+                Some(run.window.scale_factor() as f32),
+                None,
+                Some(run.renderer.max_texture_side()),
+            )
+        });
+        let raw = state.take_egui_input(&run.window);
+        let mut action = UiAction::None;
+        let out = self.egui_ctx.run_ui(raw, |ui_ctx| action = ui.show(ui_ctx));
+        state.handle_platform_output(&run.window, out.platform_output);
+        let pixels_per_point = out.pixels_per_point;
+        let primitives = self.egui_ctx.tessellate(out.shapes, pixels_per_point);
+        let frame = UiFrame {
+            primitives,
+            textures: out.textures_delta,
+            pixels_per_point,
+        };
+        match action {
+            UiAction::None => {}
+            UiAction::Close => self.settings = None,
+            UiAction::Save => self.save_settings(),
+        }
+        Some(frame)
+    }
+
+    fn save_settings(&mut self) {
+        let Some(ui) = self.settings.as_mut() else {
+            return;
+        };
+        let cfg = ui.cfg.clone();
+        let path = self.options.settings_path.clone();
+        ui.status = Some(match &path {
+            Some(p) => match std::fs::write(p, cfg.to_text()) {
+                Ok(()) => format!("Saved to {}", p.display()),
+                Err(e) => format!("Couldn't save: {e}"),
+            },
+            None => "No settings folder; applied for this session only".into(),
+        });
+        // Apply what can change now.
+        let o = &mut self.options;
+        o.scale = cfg.scale;
+        o.vsync = cfg.vsync;
+        o.mute = cfg.mute;
+        o.volume = cfg.volume;
+        o.player_name = cfg.name.clone();
+        o.bindings = cfg.bindings.clone();
+        o.macros = cfg.macros.clone();
+        self.input.set_bindings(cfg.bindings.clone());
+        if let Some(run) = self.running.as_mut() {
+            if cfg.fullscreen != o.fullscreen {
+                run.window.set_fullscreen(
+                    cfg.fullscreen
+                        .then_some(winit::window::Fullscreen::Borderless(None)),
+                );
+            }
+            if let Some(s) = cfg.scale {
+                run.scale = s;
+            }
+            if let Screen::Game(game) = &mut run.screen {
+                game.apply_settings(cfg.scale, cfg.volume, cfg.macros.clone());
+            }
+        }
+        self.options.fullscreen = cfg.fullscreen;
+    }
 }

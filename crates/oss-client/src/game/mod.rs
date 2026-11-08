@@ -11,5 +11,6 @@ pub mod login;
 pub mod lvz;
 pub mod online;
 pub mod sandbox;
+pub mod settings_ui;
 pub mod statbox;
 pub mod view;

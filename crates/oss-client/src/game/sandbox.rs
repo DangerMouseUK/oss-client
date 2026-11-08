@@ -136,6 +136,8 @@ pub struct Sandbox {
     pub(super) big_radar: bool,
     fps: FpsCounter,
     pub quit: bool,
+    /// The player chose Options in the menu; the app opens the settings screen.
+    pub open_settings: bool,
     /// Integer pixel scale (game pixel → physical pixels).
     pub scale: u32,
     audio: Option<Audio>,
@@ -353,6 +355,7 @@ impl Sandbox {
             big_radar: false,
             fps: FpsCounter::default(),
             quit: false,
+            open_settings: false,
             scale: scale.max(1),
             audio,
             net,
@@ -753,6 +756,10 @@ impl Sandbox {
             for key in pressed {
                 match key {
                     KeyCode::KeyQ => self.quit = true,
+                    KeyCode::KeyO => {
+                        self.open_settings = true;
+                        self.menu = false;
+                    }
                     KeyCode::KeyS if self.online() => {
                         self.request_ship(SPECTATOR);
                         self.menu = false;
@@ -1367,6 +1374,22 @@ impl Sandbox {
         }
     }
 
+    /// Applies saved settings that can change mid-game.
+    pub fn apply_settings(
+        &mut self,
+        scale: Option<u32>,
+        volume: u32,
+        macros: Vec<(super::input::Binding, String)>,
+    ) {
+        if let Some(s) = scale {
+            self.scale = s.clamp(1, 8);
+        }
+        if let Some(a) = self.audio.as_mut() {
+            a.set_volume(volume);
+        }
+        self.macros = macros;
+    }
+
     /// Your ship as the ball code needs it.
     fn ball_player(&self) -> BallPlayer {
         let me = self.me();
@@ -1924,6 +1947,7 @@ impl Sandbox {
             lines.push("S     Spectate");
         }
         lines.extend([
+            "O     Options (video, sound, keys, macros)",
             "Q     Quit",
             "Esc   Back to game",
             "Enter Chat ('team, :name:private, ?help)",

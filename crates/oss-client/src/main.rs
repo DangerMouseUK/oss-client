@@ -43,6 +43,7 @@ Options:
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
   --mute                    No sound
+  --settings                Open the settings screen at start (sandbox)
   --config <file>           Settings file (default: oss-client.ini in the user's
                             settings folder, created on first run)
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
@@ -94,6 +95,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut attach = None;
     let mut record = None;
     let mut replay = None;
+    let mut open_settings = false;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -159,6 +161,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--attach" => attach = Some(value("--attach")?),
             "--record" => record = Some(PathBuf::from(value("--record")?)),
             "--replay" => replay = Some(PathBuf::from(value("--replay")?)),
+            "--settings" => open_settings = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -180,6 +183,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             volume: 60,
             config,
             bindings: Default::default(),
+            settings_path: None,
+            open_settings,
             macros: Vec::new(),
             lvz,
             player_name: None,
@@ -224,6 +229,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         volume: 60,
         config,
         bindings: Default::default(),
+        settings_path: None,
+        open_settings,
         macros: Vec::new(),
         lvz,
         player_name: None,
@@ -244,6 +251,7 @@ fn apply_config(opts: &mut app::Options) -> Result<(), String> {
         },
     };
     opts.login_file = path.parent().map(|dir| dir.join(game::login::FILE_NAME));
+    opts.settings_path = Some(path.clone());
     let (cfg, warnings) = config::Config::load(&path, opts.config.is_some())?;
     for w in warnings {
         log::warn!("{}: {w}", path.display());
