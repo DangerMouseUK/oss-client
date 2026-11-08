@@ -105,6 +105,12 @@ pub struct Sandbox {
     pub(super) lvz: Lvz,
     pub(super) flags: Flags,
     pub(super) balls: Balls,
+    /// The ship you're attached to as a turret.
+    attached_to: Option<u16>,
+    /// Players wearing a crown (king of the hill).
+    crowned: std::collections::BTreeSet<u16>,
+    /// When your crown runs out (world tick).
+    crown_deadline: Option<u32>,
     pub(super) ball_rules: BallRules,
     /// When your carried flags will be dropped (game clock), if timed.
     flag_deadline: Option<f32>,
@@ -306,6 +312,9 @@ impl Sandbox {
             flags: Flags::new(flag_tiles),
             flag_deadline: None,
             balls: Balls::default(),
+            attached_to: None,
+            crowned: Default::default(),
+            crown_deadline: None,
             ball_rules: net
                 .as_ref()
                 .and_then(|n| n.session.settings())
@@ -355,7 +364,8 @@ impl Sandbox {
             .ship_index(id)
             .map(|i| self.world.ships[i].bounty)
             .unwrap_or(0);
-        Some(format!("{}({bounty})", p.name))
+        let crown = if self.crowned.contains(&id) { "^" } else { "" };
+        Some(format!("{crown}{}({bounty})", p.name))
     }
 
     pub(super) fn online(&self) -> bool {
@@ -485,6 +495,23 @@ impl Sandbox {
         if !self.spectating && self.spec_follow.is_some() {
             self.spec_follow = None;
         }
+        // --attach: once you're both in ships.
+        let host = self.net.as_ref().and_then(|n| {
+            let name = n.attach.as_ref()?;
+            n.session
+                .players()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.ship != SPECTATOR)
+                .map(|p| p.pid)
+        });
+        if !self.spectating
+            && self.me().is_alive()
+            && let Some(pid) = host
+            && let Some(n) = self.net.as_mut()
+        {
+            n.attach = None;
+            n.session.attach(pid);
+            n.flush();
+        }
         // --follow: once that player is in a ship.
         let wanted = self.net.as_ref().and_then(|n| {
             let name = n.follow.as_ref()?;
@@ -544,6 +571,7 @@ impl Sandbox {
                 *slot = ship_input;
             }
             let events = self.world.step(&inputs);
+            self.turret_and_crown();
             self.step_balls();
             self.handle_events(&events);
             self.report(&events);
@@ -714,6 +742,13 @@ impl Sandbox {
             match e {
                 Action::ShowFps => self.show_fps = !self.show_fps,
                 Action::StatBox => self.statbox.cycle(),
+                Action::Attach => self.toggle_attach(),
+                Action::DetachTurrets => {
+                    if let Some(net) = self.net.as_mut() {
+                        net.session.detach_turrets();
+                        net.flush();
+                    }
+                }
                 Action::StatBoxUp => self.statbox.move_selection(false),
                 Action::StatBoxDown => self.statbox.move_selection(true),
                 Action::ZoomIn => self.scale = (self.scale + 1).min(8),
@@ -1073,6 +1108,47 @@ impl Sandbox {
                     let solid = |x: i32, y: i32, f: u16| world.solid_for(x, y, f);
                     balls.report(&p, now, &me, ball_rules, carrier, &solid);
                 }
+                SessionEvent::Attached { pid, host } => {
+                    if pid as u16 == self.me_id {
+                        self.attached_to = (host >= 0).then_some(host as u16);
+                        let msg = match self.attached_to {
+                            Some(h) => format!("Attached to {}", self.player_name(h as i16)),
+                            None => "Detached".to_string(),
+                        };
+                        self.message(msg, color::GREEN);
+                    }
+                }
+                SessionEvent::TurretsDetached { pid } => {
+                    if self.attached_to == Some(pid as u16) {
+                        self.attached_to = None;
+                        self.message("Detached", color::GREEN);
+                    }
+                }
+                SessionEvent::Crown { on, ticks, pid } => {
+                    let me = self.me_id;
+                    let ids: Vec<u16> = if pid < 0 {
+                        self.world.ships.iter().map(|s| s.id).collect()
+                    } else {
+                        vec![pid as u16]
+                    };
+                    for id in ids {
+                        if on {
+                            self.crowned.insert(id);
+                        } else {
+                            self.crowned.remove(&id);
+                        }
+                        if id == me {
+                            self.crown_deadline = on.then(|| self.world.tick.wrapping_add(ticks));
+                        }
+                    }
+                }
+                SessionEvent::CrownTimer { ticks, add } => {
+                    let base = match (add, self.crown_deadline) {
+                        (true, Some(d)) => d,
+                        _ => self.world.tick,
+                    };
+                    self.crown_deadline = Some(base.wrapping_add(ticks));
+                }
                 SessionEvent::Goal { freq, points } => {
                     self.message(
                         format!("Team {freq} scored a goal: {points} points"),
@@ -1167,6 +1243,67 @@ impl Sandbox {
                 self.map_revision += 1;
             }
             Err(e) => log::warn!("couldn't apply LVZ graphics: {e}"),
+        }
+    }
+
+    fn player_name(&self, pid: i16) -> String {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.player(pid))
+            .map_or_else(|| "?".to_string(), |p| p.name.clone())
+    }
+
+    /// F7: attach to the stat box's selected player, or detach if attached.
+    fn toggle_attach(&mut self) {
+        let target = if self.attached_to.is_some() {
+            -1
+        } else {
+            match self.statbox.selected().filter(|&p| p != self.me_id as i16) {
+                Some(p) => p,
+                None => {
+                    self.message(
+                        "Select a teammate in the stat box first (Page Up/Down).",
+                        color::YELLOW,
+                    );
+                    return;
+                }
+            }
+        };
+        if let Some(net) = self.net.as_mut() {
+            net.session.attach(target);
+            net.flush();
+        }
+    }
+
+    /// Seconds left on your crown, if you wear one.
+    pub(super) fn crown_time_left(&self) -> Option<f32> {
+        self.crown_deadline
+            .map(|d| (d.wrapping_sub(self.world.tick) as i32).max(0) as f32 / 100.0)
+    }
+
+    /// Rides on the host while attached; reports your crown running out.
+    fn turret_and_crown(&mut self) {
+        if let Some(host) = self.attached_to {
+            match self.world.ship_index(host) {
+                Some(h) if self.world.ships[h].is_alive() => {
+                    let (pos, vel) = (self.world.ships[h].pos, self.world.ships[h].vel);
+                    let i = self.me_index();
+                    let me = &mut self.world.ships[i];
+                    me.pos = pos;
+                    me.vel = vel;
+                }
+                // Host gone or dead: the server detaches us; stop following meanwhile.
+                _ => self.attached_to = None,
+            }
+        }
+        if let Some(d) = self.crown_deadline
+            && (self.world.tick.wrapping_sub(d) as i32) >= 0
+        {
+            self.crown_deadline = None;
+            if let Some(net) = self.net.as_mut() {
+                net.session.crown_expired();
+                net.flush();
+            }
         }
     }
 
@@ -1715,7 +1852,8 @@ impl Sandbox {
             "Home stealth, Shift+Home cloak, End x-radar,",
             "Shift+End antiwarp, F3 rocket, F4 brick, F5 decoy,",
             "F6 thor, Alt big radar, Ctrl +/- scale, F12 fps",
-            "F2 stat box, PgUp/PgDn select, /text to selected",
+            "F2 stat box, PgUp/PgDn select, /text to selected,",
+            "F7 attach to selected (again: detach), Ctrl+F7 shake off",
         ]);
         let w = 54.0 * 8.0;
         let h = lines.len() as f32 * 14.0 + 16.0;

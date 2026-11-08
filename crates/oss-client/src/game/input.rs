@@ -49,10 +49,14 @@ pub enum Action {
     ShowFps,
     ZoomIn,
     ZoomOut,
+    /// Attach to the player selected in the stat box (or detach).
+    Attach,
+    /// Shake off ships attached to you.
+    DetachTurrets,
 }
 
 impl Action {
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 31] = [
         Action::Forward,
         Action::Backward,
         Action::Left,
@@ -82,6 +86,8 @@ impl Action {
         Action::ShowFps,
         Action::ZoomIn,
         Action::ZoomOut,
+        Action::Attach,
+        Action::DetachTurrets,
     ];
 
     /// Name used in the config file.
@@ -116,6 +122,8 @@ impl Action {
             Action::ShowFps => "show_fps",
             Action::ZoomIn => "zoom_in",
             Action::ZoomOut => "zoom_out",
+            Action::Attach => "attach",
+            Action::DetachTurrets => "detach_turrets",
         }
     }
 
@@ -190,6 +198,8 @@ impl Default for Bindings {
             (Action::ZoomIn, K::NumpadAdd, Ctrl),
             (Action::ZoomOut, K::Minus, Ctrl),
             (Action::ZoomOut, K::NumpadSubtract, Ctrl),
+            (Action::Attach, K::F7, None),
+            (Action::DetachTurrets, K::F7, Ctrl),
         ];
         let mut b = Bindings {
             map: HashMap::new(),

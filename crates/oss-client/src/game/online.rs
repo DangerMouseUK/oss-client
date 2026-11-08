@@ -17,6 +17,8 @@ pub struct ServerOptions {
     pub freq: Option<i16>,
     /// Spectate and follow this player (name) once they're in a ship.
     pub follow: Option<String>,
+    /// Attach to this player (name) as a turret once you're both in ships.
+    pub attach: Option<String>,
 }
 
 pub struct Online {
@@ -35,6 +37,8 @@ pub struct Online {
     pub freq: Option<i16>,
     /// Player to follow (`--follow`), until found.
     pub follow: Option<String>,
+    /// Player to attach to (`--attach`), until done.
+    pub attach: Option<String>,
     /// LVZ files received and not yet loaded by the game: (name, bytes).
     pub files: Vec<(String, Vec<u8>)>,
 }
@@ -67,6 +71,7 @@ impl Online {
             error: None,
             freq: opts.freq,
             follow: opts.follow.clone(),
+            attach: opts.attach.clone(),
             files: Vec::new(),
         })
     }

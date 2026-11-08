@@ -218,6 +218,7 @@ impl Login {
             ship: self.ship,
             freq: None,
             follow: None,
+            attach: None,
         }))
     }
 }

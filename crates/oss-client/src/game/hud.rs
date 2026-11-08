@@ -476,6 +476,10 @@ fn draw_messages(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
     if !flag_line.is_empty() {
         c.text_right(r, c.view_w - 4.0, 26.0, color::YELLOW, &flag_line);
     }
+    if let Some(left) = s.crown_time_left() {
+        let line = format!("Crown {}:{:02}", left as u32 / 60, left as u32 % 60);
+        c.text_right(r, c.view_w - 4.0, 38.0, color::YELLOW, &line);
+    }
     if !me.is_alive() && !s.spectating {
         let msg = "You have been destroyed";
         c.text(
