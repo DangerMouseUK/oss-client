@@ -7,8 +7,8 @@ use std::io::Write;
 use oss_net::{Config, Event, Server, VieAcceptor};
 use oss_proto::common::PlayerData;
 use oss_proto::s2c::{
-    ChatBody, EnteringArena, Green, LoginResponse, MapData, MapFilename, PlayerEntering, PlayerId,
-    S2CChat, Security,
+    ChatBody, EnteringArena, Green, LoginResponse, MapData, MapFile, MapFilename, PlayerEntering,
+    PlayerId, S2CChat, Security,
 };
 use oss_proto::{C2SPacket, ClientSettings, FixedStr, Packet, checksum};
 use oss_session::{OwnPosition, Session, SessionConfig, SessionEvent, State, chat_type};
@@ -49,7 +49,12 @@ struct Zone {
     positions: Vec<oss_proto::C2SPosition>,
     chats: Vec<String>,
     greens: Vec<(i16, i16, i16)>,
+    /// Files requested, in order (0 = the map).
+    requests: Vec<u16>,
 }
+
+/// Stand-in LVZ contents (the session doesn't parse them).
+const LVZ: &[u8] = b"CONT fake lvz bytes";
 
 impl Zone {
     fn handle(&mut self, server: &mut Server<u32>, pkt: &[u8]) {
@@ -71,7 +76,8 @@ impl Zone {
                     .encode(o)
                 });
             }
-            C2SPacket::GoArena(_) => {
+            C2SPacket::GoArena(go) => {
+                assert_eq!(go.optional_graphics, Some(1), "asks for LVZ files");
                 let settings = ClientSettings::default();
                 self.settings = settings.to_bytes();
                 let s = self.settings.clone();
@@ -91,10 +97,18 @@ impl Zone {
                     .encode(o)
                 });
                 send(server, &|o| {
-                    MapFilename::Single {
-                        name: FixedStr::new(b"tiny.lvl"),
-                        checksum: checksum::crc32(&map),
-                    }
+                    MapFilename::Files(vec![
+                        MapFile {
+                            name: FixedStr::new(b"tiny.lvl"),
+                            checksum: checksum::crc32(&map),
+                            size: 0,
+                        },
+                        MapFile {
+                            name: FixedStr::new(b"art.lvz"),
+                            checksum: checksum::crc32(LVZ),
+                            size: LVZ.len() as u32 + 17,
+                        },
+                    ])
                     .encode(o)
                 });
                 send(server, &|o| EnteringArena {}.encode(o));
@@ -108,11 +122,19 @@ impl Zone {
                     .encode(o)
                 });
             }
-            C2SPacket::MapRequest(_) => {
+            C2SPacket::MapRequest(r) => {
+                let index = r.index.unwrap_or(0);
+                self.requests.push(index);
                 let mut p = Vec::new();
-                MapData {
-                    name: FixedStr::new(b"tiny.lvl"),
-                    data: zlib(&map_bytes()),
+                match index {
+                    0 => MapData {
+                        name: FixedStr::new(b"tiny.lvl"),
+                        data: zlib(&map_bytes()),
+                    },
+                    _ => MapData {
+                        name: FixedStr::new(b"art.lvz"),
+                        data: LVZ.to_vec(),
+                    },
                 }
                 .encode(&mut p);
                 server.connection_mut(&ADDR).unwrap().send_sized(p);
@@ -155,6 +177,7 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
     let cfg = SessionConfig {
         name: "tester".into(),
         password: "pw".into(),
+        want_lvz: true,
         ..Default::default()
     };
     let mut client = Session::new(cfg, now, 0xBEEF);
@@ -187,6 +210,12 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
                         "wrong CRC must be rejected"
                     );
                     client.download_map();
+                }
+                SessionEvent::FilesListed(files) => {
+                    assert_eq!(files.len(), 1);
+                    assert_eq!((files[0].index, files[0].name.as_str()), (1, "art.lvz"));
+                    assert!(!client.use_cached_file("art.lvz", b"stale"));
+                    client.download_file("art.lvz");
                 }
                 SessionEvent::MapReady {
                     data, downloaded, ..
@@ -264,6 +293,12 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
             .all(|w| (w[1].time.wrapping_sub(w[0].time) as i32) > 0)
     );
     assert_eq!(zone.chats, vec!["hello zone".to_string()]);
+    // The map first, then the LVZ, one transfer at a time.
+    assert_eq!(zone.requests, vec![0, 1]);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SessionEvent::FileReady { name, data, downloaded: true } if name == "art.lvz" && data == LVZ
+    )));
     assert_eq!(zone.greens, vec![(512, 513, -7)]);
     assert!(events.contains(&SessionEvent::GreenTaken {
         pid: 9,

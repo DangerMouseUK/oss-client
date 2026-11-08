@@ -26,6 +26,7 @@ use oss_proto::{C2SPosition, ClientSettings, FixedStr, Packet, S2CPacket, Weapon
 
 pub use oss_net::DisconnectReason as Reason;
 pub use oss_proto::common::chat_type;
+pub use oss_proto::common::{ObjectChange, object_change};
 
 /// Spectator "ship".
 pub const SPECTATOR: u8 = 8;
@@ -44,6 +45,8 @@ pub struct SessionConfig {
     pub machine_id: u32,
     /// Minutes from UTC.
     pub timezone_bias: i16,
+    /// Ask for the arena's LVZ files (graphics; bots usually don't need them).
+    pub want_lvz: bool,
 }
 
 impl Default for SessionConfig {
@@ -56,6 +59,7 @@ impl Default for SessionConfig {
             resolution: (1920, 1080),
             machine_id: 0x0C55_0C55,
             timezone_bias: 0,
+            want_lvz: false,
         }
     }
 }
@@ -156,6 +160,19 @@ pub enum SessionEvent {
         total: usize,
     },
     /// The map is ready (decompressed `.lvl` bytes). Cache it if it was downloaded.
+    /// The arena's extra files (LVZ), listed after its map. Answer each with
+    /// [`Session::use_cached_file`] or [`Session::download_file`].
+    FilesListed(Vec<ArenaFile>),
+    /// An extra file is ready (raw bytes). Cache it if it was downloaded.
+    FileReady {
+        name: String,
+        data: Vec<u8>,
+        downloaded: bool,
+    },
+    /// LVZ objects shown (`true`) or hidden (S2C `0x35`).
+    ObjectsToggled(Vec<(u16, bool)>),
+    /// LVZ object properties changed (S2C `0x36`).
+    ObjectsChanged(Vec<ObjectChange>),
     MapReady {
         name: String,
         data: Vec<u8>,
@@ -219,6 +236,17 @@ pub enum SessionEvent {
 }
 
 /// The map the arena uses.
+/// A file the arena lists after its map (an LVZ).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArenaFile {
+    /// Index for the file request (1 = first file after the map).
+    pub index: u16,
+    pub name: String,
+    /// CRC-32 of the file.
+    pub checksum: u32,
+    pub size: u32,
+}
+
 #[derive(Debug, Clone)]
 struct MapInfo {
     name: String,
@@ -236,6 +264,12 @@ pub struct Session {
     settings: Option<Box<ClientSettings>>,
     settings_raw: Vec<u8>,
     map: Option<MapInfo>,
+    /// Extra files listed with the map.
+    files: Vec<ArenaFile>,
+    /// File requests waiting for the current transfer to finish (0 = the map).
+    downloads: VecDeque<u16>,
+    /// A map or file transfer is in flight.
+    downloading: bool,
     entering_done: bool,
     events: VecDeque<SessionEvent>,
     weapons_received: u32,
@@ -264,6 +298,9 @@ impl Session {
             settings: None,
             settings_raw: Vec::new(),
             map: None,
+            files: Vec::new(),
+            downloads: VecDeque::new(),
+            downloading: false,
             entering_done: false,
             events: VecDeque::new(),
             weapons_received: 0,
@@ -409,7 +446,7 @@ impl Session {
             y_res: self.cfg.resolution.1 as i16,
             arena_type,
             arena,
-            optional_graphics: None,
+            optional_graphics: self.cfg.want_lvz.then_some(1),
         };
         self.send(&go, true);
         self.state = State::EnteringArena;
@@ -487,6 +524,21 @@ impl Session {
                         None => return,
                     },
                 };
+                self.files = match &m {
+                    MapFilename::Files(files) => files
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .map(|(i, f)| ArenaFile {
+                            index: i.min(u16::MAX as usize) as u16,
+                            name: fixed_to_string(f.name.as_bytes()),
+                            checksum: f.checksum,
+                            size: f.size,
+                        })
+                        .collect(),
+                    MapFilename::Single { .. } => Vec::new(),
+                };
+                self.downloads.clear();
                 self.map = Some(MapInfo {
                     name: name.clone(),
                     checksum,
@@ -497,8 +549,31 @@ impl Session {
                 }
                 self.events
                     .push_back(SessionEvent::MapNeeded { name, checksum });
+                if !self.files.is_empty() {
+                    self.events
+                        .push_back(SessionEvent::FilesListed(self.files.clone()));
+                }
             }
-            S2CPacket::MapData(m) => self.on_map_data(&m.data),
+            S2CPacket::MapData(m) => {
+                let name = fixed_to_string(m.name.as_bytes());
+                let is_map = self
+                    .map
+                    .as_ref()
+                    .is_some_and(|i| i.name.eq_ignore_ascii_case(&name));
+                if !is_map && let Some(f) = self.file_named(&name).cloned() {
+                    self.on_file_data(&f, m.data);
+                } else {
+                    self.on_map_data(&m.data);
+                }
+                self.downloading = false;
+                self.next_download();
+            }
+            S2CPacket::ToggleObjects(t) => self.events.push_back(SessionEvent::ObjectsToggled(
+                t.toggles.iter().map(|t| (t.id(), t.on())).collect(),
+            )),
+            S2CPacket::MoveObjects(m) => self
+                .events
+                .push_back(SessionEvent::ObjectsChanged(m.changes)),
             S2CPacket::EnteringArena(_) => {
                 self.entering_done = true;
                 self.maybe_playing();
@@ -682,7 +757,76 @@ impl Session {
 
     /// Asks the server for the map named in [`SessionEvent::MapNeeded`].
     pub fn download_map(&mut self) {
-        self.send(&MapRequest { index: None }, true);
+        self.request_download(0);
+    }
+
+    /// The extra files (LVZ) the arena listed.
+    pub fn files(&self) -> &[ArenaFile] {
+        &self.files
+    }
+
+    fn file_named(&self, name: &str) -> Option<&ArenaFile> {
+        self.files
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Offers a cached copy of extra file `name`; accepted (and reported as
+    /// [`SessionEvent::FileReady`]) when its CRC matches the server's.
+    pub fn use_cached_file(&mut self, name: &str, data: &[u8]) -> bool {
+        let Some(f) = self.file_named(name) else {
+            return false;
+        };
+        if checksum::crc32(data) != f.checksum {
+            return false;
+        }
+        let name = f.name.clone();
+        self.events.push_back(SessionEvent::FileReady {
+            name,
+            data: data.to_vec(),
+            downloaded: false,
+        });
+        true
+    }
+
+    /// Downloads extra file `name`. Transfers run one at a time, after the map.
+    pub fn download_file(&mut self, name: &str) {
+        if let Some(index) = self.file_named(name).map(|f| f.index) {
+            self.request_download(index);
+        }
+    }
+
+    fn request_download(&mut self, index: u16) {
+        if self.downloads.contains(&index) {
+            return;
+        }
+        self.downloads.push_back(index);
+        self.next_download();
+    }
+
+    fn next_download(&mut self) {
+        if self.downloading {
+            return;
+        }
+        if let Some(index) = self.downloads.pop_front() {
+            self.downloading = true;
+            let index = (index != 0).then_some(index);
+            self.send(&MapRequest { index }, true);
+        }
+    }
+
+    fn on_file_data(&mut self, file: &ArenaFile, data: Vec<u8>) {
+        if checksum::crc32(&data) != file.checksum {
+            log::warn!(
+                "{} checksum differs from the server's; using it anyway",
+                file.name
+            );
+        }
+        self.events.push_back(SessionEvent::FileReady {
+            name: file.name.clone(),
+            data,
+            downloaded: true,
+        });
     }
 
     fn on_map_data(&mut self, compressed: &[u8]) {
