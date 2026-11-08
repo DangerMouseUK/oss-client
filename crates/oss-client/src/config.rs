@@ -40,6 +40,8 @@ pub struct Config {
     pub ui_scale: u32,
     /// Gamepad buttons per action (the left stick always steers).
     pub pad: PadBindings,
+    /// Directory servers for the zone browser ("host:port"); none by default.
+    pub directories: Vec<String>,
 }
 
 impl Default for Config {
@@ -56,6 +58,7 @@ impl Default for Config {
             palette: Default::default(),
             ui_scale: 0,
             pad: PadBindings::default(),
+            directories: Vec::new(),
         }
     }
 }
@@ -134,6 +137,15 @@ impl Config {
                     .map(|p| c.palette = p)
                     .ok_or_else(|| format!("unknown palette `{value}`")),
                 ("accessibility", "ui_scale") => number(value, 0, 4).map(|n| c.ui_scale = n),
+                ("directory", "servers") => {
+                    c.directories = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    Ok(())
+                }
                 ("player", "name") => {
                     c.name = (!value.is_empty()).then(|| value.to_string());
                     Ok(())
@@ -196,6 +208,13 @@ impl Config {
              ui_scale = {}        ; 0-4: draw the interface (text, HUD) this much larger\n\n",
             self.palette.name(),
             self.ui_scale
+        );
+        s += &format!(
+            "[directory]\n\
+             ; Directory servers for the zone browser (F3 on the login screen), as\n\
+             ; host:port, comma separated. None by default.\n\
+             servers = {}\n\n",
+            self.directories.join(", ")
         );
         s += &format!(
             "[player]\nname = {}\n\n",
@@ -427,6 +446,7 @@ mod tests {
                 p.set(Action::Gun, vec![PadButton::R2, PadButton::South]);
                 p
             },
+            directories: vec!["127.0.0.1:4990".into(), "localhost:4991".into()],
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);

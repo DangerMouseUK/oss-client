@@ -49,6 +49,8 @@ impl Field {
 pub enum Choice {
     Connect(ServerOptions),
     Sandbox,
+    /// Open the zone browser.
+    Browse,
     Quit,
 }
 
@@ -170,6 +172,7 @@ impl Login {
             match key {
                 KeyCode::Escape => return Some(Choice::Quit),
                 KeyCode::F5 => return Some(Choice::Sandbox),
+                KeyCode::F3 => return Some(Choice::Browse),
                 KeyCode::Enter | KeyCode::NumpadEnter => return self.submit(),
                 KeyCode::ArrowDown => self.focus = (self.focus + 1) % FIELDS.len(),
                 KeyCode::Tab if !shift => self.focus = (self.focus + 1) % FIELDS.len(),

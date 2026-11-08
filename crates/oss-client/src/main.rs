@@ -44,6 +44,9 @@ Options:
   --fullscreen              Borderless fullscreen
   --mute                    No sound
   --settings                Open the settings screen at start (sandbox)
+  --directory <host:port>   A directory server for the zone browser (F3 on the
+                            login screen; repeatable; adds to the settings file's)
+  --zones                   Start on the zone browser
   --config <file>           Settings file (default: oss-client.ini in the user's
                             settings folder, created on first run)
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
@@ -96,6 +99,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut record = None;
     let mut replay = None;
     let mut open_settings = false;
+    let mut directories = Vec::new();
+    let mut open_zones = false;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -162,6 +167,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--record" => record = Some(PathBuf::from(value("--record")?)),
             "--replay" => replay = Some(PathBuf::from(value("--replay")?)),
             "--settings" => open_settings = true,
+            "--directory" => directories.push(value("--directory")?),
+            "--zones" => open_zones = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -188,6 +195,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             macros: Vec::new(),
             palette: Default::default(),
             ui_scale: 0,
+            directories: directories.clone(),
+            open_zones,
             pad: Default::default(),
             lvz,
             player_name: None,
@@ -237,6 +246,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         macros: Vec::new(),
         palette: Default::default(),
         ui_scale: 0,
+        directories,
+        open_zones,
         pad: Default::default(),
         lvz,
         player_name: None,
@@ -277,6 +288,7 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     opts.palette = cfg.palette;
     opts.ui_scale = cfg.ui_scale;
     opts.pad = cfg.pad;
+    opts.directories.extend(cfg.directories);
     opts.player_name = cfg.name.clone();
     if let app::Mode::Zone(z) = &mut opts.mode
         && z.name.is_empty()

@@ -25,6 +25,17 @@ the biller), `::text` reply, `/text` private to the player selected in the stat 
 F2 cycles the stat box views, Page Up/Down select a player. Esc opens the menu: 1-8
 change ship, S spectate, Q quit. Maps you download are cached per server.
 
+## Zone browser
+
+F3 on the login screen lists zones from the directory servers you configure
+(`[directory] servers = host:port` in the settings file, or `--directory host:port`),
+with population and ping. None are configured by default. For local testing:
+
+```
+cargo run -p oss-session --example test_directory -- "Local=127.0.0.1:5000"
+cargo run --release -p oss-client -- --directory 127.0.0.1:4990 --zones
+```
+
 ## Replays
 
 `--record visit.ossr` records a visit (everything the server sent and the client sent,

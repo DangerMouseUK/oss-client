@@ -15,3 +15,4 @@ pub mod sandbox;
 pub mod settings_ui;
 pub mod statbox;
 pub mod view;
+pub mod zones;

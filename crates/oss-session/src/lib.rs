@@ -9,6 +9,7 @@
 //! your position. Packet handling follows ASSS (server truth) and the nullspace and
 //! mervbot clients.
 
+pub mod directory;
 pub mod map;
 pub mod replay;
 pub mod sim;

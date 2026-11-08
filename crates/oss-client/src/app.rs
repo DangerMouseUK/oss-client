@@ -62,6 +62,10 @@ pub struct Options {
     pub open_settings: bool,
     /// Macro keys from the settings file.
     pub macros: Vec<(crate::game::input::Binding, String)>,
+    /// Directory servers for the zone browser.
+    pub directories: Vec<String>,
+    /// `--zones`: start on the zone browser.
+    pub open_zones: bool,
     /// Accessibility settings.
     pub palette: crate::game::palette::PaletteKind,
     pub ui_scale: u32,
@@ -88,6 +92,8 @@ struct LoginScreen {
     login: Login,
     art: Art,
     atlas: TextureId,
+    /// The zone browser, when open (F3).
+    browser: Option<crate::game::zones::ZoneBrowser>,
 }
 
 enum Screen {
@@ -302,7 +308,16 @@ impl ApplicationHandler for App {
                 if let Some(s) = server {
                     login.server = s.clone();
                 }
-                Screen::Login(Box::new(LoginScreen { login, art, atlas }))
+                let browser = self
+                    .options
+                    .open_zones
+                    .then(|| crate::game::zones::ZoneBrowser::open(&self.options.directories));
+                Screen::Login(Box::new(LoginScreen {
+                    login,
+                    art,
+                    atlas,
+                    browser,
+                }))
             }
         };
         window.request_redraw();
@@ -424,7 +439,27 @@ impl App {
             let pressed = self.input.take_pressed();
             let typed = std::mem::take(&mut self.input.typed);
             self.input.take_edges();
-            match ls.login.input(&pressed, &typed, self.input.shift()) {
+            let choice = if let Some(b) = ls.browser.as_mut() {
+                b.pump();
+                match b.input(&pressed) {
+                    Some(crate::game::zones::BrowserChoice::Pick(address)) => {
+                        ls.login.server = address;
+                        ls.login.error = None;
+                        ls.browser = None;
+                    }
+                    Some(crate::game::zones::BrowserChoice::Back) => ls.browser = None,
+                    None => {}
+                }
+                None
+            } else {
+                ls.login.input(&pressed, &typed, self.input.shift())
+            };
+            match choice {
+                Some(Choice::Browse) => {
+                    ls.browser = Some(crate::game::zones::ZoneBrowser::open(
+                        &self.options.directories,
+                    ));
+                }
                 None => {}
                 Some(Choice::Quit) => {
                     event_loop.exit();
@@ -463,7 +498,9 @@ impl App {
                             else {
                                 unreachable!()
                             };
-                            let LoginScreen { login, art, atlas } = *ls;
+                            let LoginScreen {
+                                login, art, atlas, ..
+                            } = *ls;
                             run.screen = Screen::Connecting(Box::new(Connecting {
                                 net,
                                 art,
@@ -496,7 +533,12 @@ impl App {
                 match (login, failed) {
                     (Some(mut login), err) => {
                         login.error = Some(err.unwrap_or_else(|| "Cancelled".into()));
-                        run.screen = Screen::Login(Box::new(LoginScreen { login, art, atlas }));
+                        run.screen = Screen::Login(Box::new(LoginScreen {
+                            login,
+                            art,
+                            atlas,
+                            browser: None,
+                        }));
                     }
                     (None, Some(err)) => return self.fail(event_loop, err),
                     (None, None) => {
@@ -558,7 +600,10 @@ impl App {
             }
             Screen::Connecting(_) | Screen::Login(_) if !draw => None,
             Screen::Login(ls) => {
-                draw_login(&ls.login, &ls.art, ls.atlas, &mut run.renderer, run.scale);
+                match &ls.browser {
+                    Some(b) => draw_browser(b, &ls.art, ls.atlas, &mut run.renderer, run.scale),
+                    None => draw_login(&ls.login, &ls.art, ls.atlas, &mut run.renderer, run.scale),
+                }
                 None
             }
             Screen::Connecting(conn) => {
@@ -667,9 +712,9 @@ fn draw_login(login: &Login, art: &Art, atlas: TextureId, r: &mut Renderer, scal
         x,
         y,
         color::WHITE,
-        "Enter connect   Tab/arrows move   F5 sandbox",
+        "Enter connect   Tab/arrows move   F3 zone list",
     );
-    c.text(r, x, y + 14.0, color::WHITE, "Esc quit");
+    c.text(r, x, y + 14.0, color::WHITE, "F5 sandbox   Esc quit");
 }
 
 impl App {
@@ -695,6 +740,7 @@ fn current_config(o: &Options) -> crate::config::Config {
             palette: o.palette,
             ui_scale: o.ui_scale,
             pad: o.pad.clone(),
+            directories: o.directories.clone(),
         }
     }
 }
@@ -830,6 +876,63 @@ fn utc_stamp(secs: u64) -> String {
         rem / 60 % 60,
         rem % 60
     )
+}
+
+/// The zone browser: name, players and ping per zone, the selected one highlighted.
+fn draw_browser(
+    b: &crate::game::zones::ZoneBrowser,
+    art: &Art,
+    atlas: TextureId,
+    r: &mut Renderer,
+    scale: u32,
+) {
+    let c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
+    let w = (c.view_w - 40.0).min(72.0 * 8.0);
+    let x = ((c.view_w - w) / 2.0).floor();
+    let rows = (((c.view_h - 120.0) / 14.0).floor() as usize).max(3);
+    let top = b.selected.saturating_sub(rows - 1);
+    let mut y = 30.0;
+    c.rect(
+        r,
+        x - 10.0,
+        y - 10.0,
+        w + 20.0,
+        c.view_h - 40.0,
+        [0.0, 0.0, 0.0, 0.85],
+    );
+    c.text(r, x, y, color::YELLOW, "Zones");
+    c.text_right(r, x + w, y, color::GREEN, "Players  Ping");
+    y += 22.0;
+    let name_chars = ((w - 14.0 * 8.0) / 8.0) as usize;
+    for (i, z) in b.zones.iter().enumerate().skip(top).take(rows) {
+        if i == b.selected {
+            c.rect(r, x - 4.0, y - 2.0, w + 8.0, 14.0, [0.2, 0.25, 0.45, 0.8]);
+        }
+        let name: String = z.name.chars().take(name_chars).collect();
+        c.text(r, x, y, color::WHITE, &name);
+        let ping = z.ping_ms.map_or_else(|| "-".to_string(), |p| p.to_string());
+        c.text_right(
+            r,
+            x + w,
+            y,
+            color::WHITE,
+            &format!("{:>7}  {ping:>4}", z.players),
+        );
+        y += 14.0;
+    }
+    let bottom = c.view_h - 46.0;
+    if let Some(z) = b.zones.get(b.selected) {
+        let desc: String = z.description.chars().take((w / 8.0) as usize).collect();
+        c.text(r, x, bottom - 14.0, color::GREEN, &desc);
+    }
+    c.text(r, x, bottom, color::WHITE, &b.status);
+    c.text(
+        r,
+        x,
+        bottom + 14.0,
+        color::WHITE,
+        "Up/Down choose   Enter use   Esc back",
+    );
 }
 
 #[cfg(test)]
