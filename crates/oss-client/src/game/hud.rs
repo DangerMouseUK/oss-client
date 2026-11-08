@@ -461,6 +461,21 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
 
 fn draw_messages(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
     let me = s.me();
+    // Flags: what you carry (and when they drop), and what your team holds.
+    let carried = s.carried_flags();
+    let held = s.flags.owned_by(me.freq);
+    let mut flag_line = String::new();
+    if carried > 0 {
+        flag_line = format!("Flags:{carried}");
+        if let Some(left) = s.flag_time_left() {
+            flag_line += &format!(" {}:{:02}", left as u32 / 60, left as u32 % 60);
+        }
+    } else if held > 0 && !s.spectating {
+        flag_line = format!("Team flags:{held}");
+    }
+    if !flag_line.is_empty() {
+        c.text_right(r, c.view_w - 4.0, 26.0, color::YELLOW, &flag_line);
+    }
     if !me.is_alive() && !s.spectating {
         let msg = "You have been destroyed";
         c.text(

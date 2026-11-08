@@ -360,6 +360,33 @@ impl World {
         }
     }
 
+    /// Places a brick the server reported: the straight line of tiles from (x1, y1)
+    /// to (x2, y2), placed at server tick `start` (it expires `BrickTime` after that).
+    /// Lines are capped at 64 tiles.
+    pub fn place_server_brick(&mut self, from: (i32, i32), to: (i32, i32), freq: u16, start: u32) {
+        let (dx, dy) = ((to.0 - from.0).signum(), (to.1 - from.1).signum());
+        let len = (to.0 - from.0).abs().max((to.1 - from.1).abs()).min(63);
+        let end_tick = start.wrapping_add(self.settings.brick_time);
+        for k in 0..=len {
+            let (x, y) = (from.0 + dx * k, from.1 + dy * k);
+            if self.map.get(x, y) != 0 {
+                continue;
+            }
+            self.map.set(x, y, tile::BRICK);
+            self.bricks.insert((x, y), Brick { freq, end_tick });
+            self.evict_enemies_from_brick(x, y, freq);
+        }
+    }
+
+    /// Removes every brick (the server's empty brick list).
+    pub fn clear_bricks(&mut self) {
+        let tiles: Vec<(i32, i32)> = self.bricks.keys().copied().collect();
+        for (x, y) in tiles {
+            self.map.set(x, y, 0);
+        }
+        self.bricks.clear();
+    }
+
     fn evict_enemies_from_brick(&mut self, x: i32, y: i32, freq: u16) {
         let enemies: Vec<usize> = (0..self.ships.len())
             .filter(|&i| self.ships[i].freq != freq)

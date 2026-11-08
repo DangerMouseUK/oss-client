@@ -26,7 +26,8 @@ use oss_proto::{C2SPosition, ClientSettings, FixedStr, Packet, S2CPacket, Weapon
 
 pub use oss_net::DisconnectReason as Reason;
 pub use oss_proto::common::chat_type;
-pub use oss_proto::common::{ObjectChange, object_change};
+pub use oss_proto::common::{Brick, ObjectChange, object_change};
+pub use oss_proto::s2c::BallPosition;
 
 /// Spectator "ship".
 pub const SPECTATOR: u8 = 8;
@@ -169,6 +170,62 @@ pub enum SessionEvent {
         data: Vec<u8>,
         downloaded: bool,
     },
+    /// A flag is on the map at tile (x, y), owned by `freq` (`0xFFFF` neutral)
+    /// (S2C `0x12`).
+    FlagLocation {
+        id: u16,
+        x: u16,
+        y: u16,
+        freq: u16,
+    },
+    /// A player picked up (or, for turf flags, claimed) a flag (S2C `0x13`).
+    FlagPickup {
+        id: u16,
+        pid: i16,
+    },
+    /// A player dropped every flag they carried (S2C `0x16`).
+    FlagsDropped {
+        pid: i16,
+    },
+    /// A team won the flag game (S2C `0x14`).
+    FlagVictory {
+        freq: i16,
+        points: i32,
+    },
+    /// Owner of every static (turf) flag, by flag id; -1 = none (S2C `0x22`).
+    TurfFlags(Vec<i16>),
+    /// Periodic flag reward: (freq, points per player) (S2C `0x23`).
+    FlagReward(Vec<(i16, i16)>),
+    /// A ball's position, carrier or shooter (S2C `0x2E`).
+    Ball(BallPosition),
+    /// A team scored a goal (S2C `0x0B`).
+    Goal {
+        freq: i16,
+        points: i32,
+    },
+    /// `pid` attached to `host` as a turret, or detached (`host` -1) (S2C `0x0E`).
+    Attached {
+        pid: i16,
+        host: i16,
+    },
+    /// Everyone attached to `pid` was detached (S2C `0x15`).
+    TurretsDetached {
+        pid: i16,
+    },
+    /// Bricks placed (S2C `0x21`); an empty list clears them all.
+    Bricks(Vec<Brick>),
+    /// King of the hill: a crown given (`on`) or taken, for `pid` (-1 = everyone)
+    /// (S2C `0x2C`).
+    Crown {
+        on: bool,
+        ticks: u32,
+        pid: i16,
+    },
+    /// Your crown timer set (`add` false) or extended (S2C `0x2B`/`0x2D`).
+    CrownTimer {
+        ticks: u32,
+        add: bool,
+    },
     /// LVZ objects shown (`true`) or hidden (S2C `0x35`).
     ObjectsToggled(Vec<(u16, bool)>),
     /// LVZ object properties changed (S2C `0x36`).
@@ -266,6 +323,8 @@ pub struct Session {
     map: Option<MapInfo>,
     /// Extra files listed with the map.
     files: Vec<ArenaFile>,
+    /// Flag ids the server reported as turf (static) flags.
+    turf_flags: std::collections::BTreeSet<u16>,
     /// File requests waiting for the current transfer to finish (0 = the map).
     downloads: VecDeque<u16>,
     /// A map or file transfer is in flight.
@@ -300,6 +359,7 @@ impl Session {
             map: None,
             files: Vec::new(),
             downloads: VecDeque::new(),
+            turf_flags: Default::default(),
             downloading: false,
             entering_done: false,
             events: VecDeque::new(),
@@ -568,6 +628,74 @@ impl Session {
                 self.downloading = false;
                 self.next_download();
             }
+            S2CPacket::FlagLocation(f) => self.events.push_back(SessionEvent::FlagLocation {
+                id: f.flag_id,
+                x: f.x,
+                y: f.y,
+                freq: f.freq,
+            }),
+            S2CPacket::FlagPickup(f) => {
+                let id = f.flag_id as u16;
+                // Carried (not turf) flags count toward the carrier's total.
+                let carry = self.settings.as_ref().is_some_and(|s| s.carry_flags() > 0);
+                if carry
+                    && !self.turf_flags.contains(&id)
+                    && let Some(p) = self.players.get_mut(&f.pid)
+                {
+                    p.flags = p.flags.saturating_add(1);
+                }
+                self.events
+                    .push_back(SessionEvent::FlagPickup { id, pid: f.pid });
+            }
+            S2CPacket::FlagDrop(f) => {
+                if let Some(p) = self.players.get_mut(&f.pid) {
+                    p.flags = 0;
+                }
+                self.events
+                    .push_back(SessionEvent::FlagsDropped { pid: f.pid });
+            }
+            S2CPacket::FlagVictory(v) => {
+                for p in self.players.values_mut() {
+                    p.flags = 0;
+                }
+                self.events.push_back(SessionEvent::FlagVictory {
+                    freq: v.freq,
+                    points: v.points,
+                });
+            }
+            S2CPacket::TurfFlags(t) => {
+                self.turf_flags = (0..t.owners.len().min(u16::MAX as usize) as u16).collect();
+                self.events.push_back(SessionEvent::TurfFlags(t.owners));
+            }
+            S2CPacket::PeriodicReward(r) => self.events.push_back(SessionEvent::FlagReward(
+                r.rewards.iter().map(|r| (r.freq, r.points)).collect(),
+            )),
+            S2CPacket::Ball(b) => self.events.push_back(SessionEvent::Ball(b)),
+            S2CPacket::SoccerGoal(g) => self.events.push_back(SessionEvent::Goal {
+                freq: g.freq,
+                points: g.points,
+            }),
+            S2CPacket::Turret(t) => self.events.push_back(SessionEvent::Attached {
+                pid: t.pid,
+                host: t.host,
+            }),
+            S2CPacket::TurretKickoff(t) => self
+                .events
+                .push_back(SessionEvent::TurretsDetached { pid: t.pid }),
+            S2CPacket::Bricks(b) => self.events.push_back(SessionEvent::Bricks(b.bricks)),
+            S2CPacket::Koth(k) => self.events.push_back(SessionEvent::Crown {
+                on: k.action != 0,
+                ticks: k.time,
+                pid: k.pid,
+            }),
+            S2CPacket::SetKothTimer(t) => self.events.push_back(SessionEvent::CrownTimer {
+                ticks: t.time,
+                add: false,
+            }),
+            S2CPacket::AddKothTime(t) => self.events.push_back(SessionEvent::CrownTimer {
+                ticks: t.time,
+                add: true,
+            }),
             S2CPacket::ToggleObjects(t) => self.events.push_back(SessionEvent::ObjectsToggled(
                 t.toggles.iter().map(|t| (t.id(), t.on())).collect(),
             )),
@@ -1023,6 +1151,59 @@ impl Session {
             },
             reliable,
         );
+    }
+
+    /// Asks to pick up (or claim) flag `id` (C2S `0x13`).
+    pub fn pickup_flag(&mut self, id: u16) {
+        self.send(&c2s::PickupFlag { flag_id: id as i16 }, true);
+    }
+
+    /// Drops every flag you carry (C2S `0x15`).
+    pub fn drop_flags(&mut self) {
+        self.send(&c2s::DropFlags {}, true);
+    }
+
+    /// Attaches to `pid` as a turret, or detaches with -1 (C2S `0x10`).
+    pub fn attach(&mut self, pid: i16) {
+        self.send(&c2s::AttachTo { pid }, true);
+    }
+
+    /// Detaches everyone attached to you (C2S `0x14`).
+    pub fn detach_turrets(&mut self) {
+        self.send(&c2s::TurretKickoff {}, true);
+    }
+
+    /// Asks to pick up ball `id` (C2S `0x20`); `time` is the ball's last update time.
+    pub fn pickup_ball(&mut self, id: u8, time: u32) {
+        self.send(&c2s::PickupBall { ball_id: id, time }, true);
+    }
+
+    /// Shoots the ball you carry (C2S `0x1F`): pixels and pixels per 10 s.
+    pub fn shoot_ball(&mut self, now_ms: u64, id: u8, pos: (i16, i16), vel: (i16, i16)) {
+        let pid = self.pid().unwrap_or(-1);
+        let time = self.server_ticks(now_ms);
+        self.send(
+            &c2s::ShootBall {
+                ball_id: id,
+                x: pos.0,
+                y: pos.1,
+                x_speed: vel.0,
+                y_speed: vel.1,
+                pid,
+                time,
+            },
+            true,
+        );
+    }
+
+    /// Reports ball `id` entering a goal at tile (x, y) (C2S `0x21`).
+    pub fn goal(&mut self, id: u8, x: i16, y: i16) {
+        self.send(&c2s::Goal { ball_id: id, x, y }, true);
+    }
+
+    /// Reports that your crown timer ran out (C2S `0x1E`).
+    pub fn crown_expired(&mut self) {
+        self.send(&c2s::KothExpired {}, true);
     }
 
     /// Asks for player `pid`'s extra data while spectating them (C2S `0x08`); -1

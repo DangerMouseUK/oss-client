@@ -19,6 +19,7 @@ use oss_sim::{
 use winit::keyboard::KeyCode;
 
 use super::art::{self, Art};
+use super::flags::{Flags, Toucher};
 use super::hud::{self, RadarCache};
 use super::input::{Action, InputState};
 use super::lvz::{Lvz, ScreenRefs};
@@ -101,6 +102,9 @@ pub struct Sandbox {
     /// Bottom-right of the stat box as last drawn (an LVZ anchor).
     statbox_corner: (f32, f32),
     pub(super) lvz: Lvz,
+    pub(super) flags: Flags,
+    /// When your carried flags will be dropped (game clock), if timed.
+    flag_deadline: Option<f32>,
     /// LVZ screen anchors for this frame.
     pub(super) screen_refs: ScreenRefs,
     /// World tick of the last clock correction (online).
@@ -277,6 +281,12 @@ impl Sandbox {
         }
         let (art, atlas_size, atlas_pixels) = art::load(dir, tileset)?;
         let atlas = renderer.create_texture(atlas_size, atlas_size, &atlas_pixels);
+        // Turf flags sit on the map's flag tiles, numbered in file order.
+        let flag_tiles = objects
+            .iter()
+            .filter(|o| o.id == oss_sim::tile::FLAG)
+            .map(|o| (o.x as i32, o.y as i32))
+            .collect();
         let mut s = Self {
             world,
             me_id,
@@ -290,6 +300,8 @@ impl Sandbox {
             statbox: StatBox::default(),
             statbox_corner: (0.0, 0.0),
             lvz: Lvz::default(),
+            flags: Flags::new(flag_tiles),
+            flag_deadline: None,
             screen_refs: [(0.0, 0.0); 12],
             slew_tick: 0,
             brick_count: 0,
@@ -528,6 +540,7 @@ impl Sandbox {
             }
         }
         self.send_position_if_due();
+        self.check_flags();
         if self.world.tick / 100 != (self.world.tick.wrapping_sub(ticks)) / 100 {
             let me = self.me();
             log::debug!(
@@ -947,6 +960,55 @@ impl Sandbox {
                     self.world.reset_green_timer();
                     sim_events.extend(self.world.sync_doors(door_seed, timestamp));
                 }
+                SessionEvent::FlagLocation { id, x, y, freq } => {
+                    self.flags.location(id, x, y, freq)
+                }
+                SessionEvent::FlagPickup { id, pid } => {
+                    let freq = self.player_freq(pid);
+                    let carry = self.carry_flags();
+                    let was_dropped = self.flags.flags.get(id as usize).is_some_and(|f| !f.turf);
+                    self.flags.pickup(id, freq, carry);
+                    if pid as u16 == self.me_id {
+                        self.sound("flag", 1.0, None);
+                        let delay = self.flag_drop_delay();
+                        if was_dropped && carry > 0 && delay > 0 && self.flag_deadline.is_none() {
+                            self.flag_deadline = Some(self.clock + delay as f32 / 100.0);
+                        }
+                    }
+                }
+                SessionEvent::FlagsDropped { pid } => {
+                    if pid as u16 == self.me_id {
+                        self.flag_deadline = None;
+                    }
+                }
+                SessionEvent::FlagVictory { freq, points } => {
+                    self.flags.victory();
+                    self.flag_deadline = None;
+                    self.message(
+                        format!("Team {freq} won the flag game: {points} points"),
+                        color::GREEN,
+                    );
+                }
+                SessionEvent::TurfFlags(owners) => self.flags.turf(&owners),
+                SessionEvent::FlagReward(rewards) => {
+                    let mine = self.me().freq as i16;
+                    if let Some(&(_, points)) = rewards.iter().find(|r| r.0 == mine) {
+                        self.message(format!("Flag reward: {points} points"), color::GREEN);
+                    }
+                }
+                SessionEvent::Bricks(bricks) => {
+                    if bricks.is_empty() {
+                        self.world.clear_bricks();
+                    }
+                    for b in bricks {
+                        self.world.place_server_brick(
+                            (b.x1 as i32, b.y1 as i32),
+                            (b.x2 as i32, b.y2 as i32),
+                            b.freq as u16,
+                            b.start_time,
+                        );
+                    }
+                }
                 SessionEvent::ObjectsToggled(toggles) => {
                     for (id, on) in toggles {
                         self.lvz.toggle(id, on, self.clock);
@@ -1022,6 +1084,83 @@ impl Sandbox {
             }
             Err(e) => log::warn!("couldn't apply LVZ graphics: {e}"),
         }
+    }
+
+    /// A player's team (yours if unknown).
+    fn player_freq(&self, pid: i16) -> u16 {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.player(pid))
+            .map_or(self.me().freq, |p| p.freq as u16)
+    }
+
+    /// `Flag:HideFlags`: spectators don't see dropped flags.
+    pub(super) fn hide_flags(&self) -> bool {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .is_some_and(|s| s.hide_flags() != 0)
+    }
+
+    /// `Flag:CarryFlags` (0 offline).
+    fn carry_flags(&self) -> u8 {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .map_or(0, |s| s.carry_flags())
+    }
+
+    /// `Flag:FlagDropDelay` in ticks (0 = never).
+    fn flag_drop_delay(&self) -> i32 {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .map_or(0, |s| s.flag_drop_delay())
+    }
+
+    /// Flags you carry, as the server last said.
+    pub(super) fn carried_flags(&self) -> u32 {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.me())
+            .map_or(0, |p| p.flags.max(0) as u32)
+    }
+
+    /// Seconds until your carried flags drop, if timed.
+    pub(super) fn flag_time_left(&self) -> Option<f32> {
+        self.flag_deadline.map(|d| (d - self.clock).max(0.0))
+    }
+
+    /// Asks for flags your ship touches, and drops carried flags when their time
+    /// runs out.
+    fn check_flags(&mut self) {
+        if self.net.is_none() || self.spectating {
+            return;
+        }
+        let me = self.me();
+        if !me.is_alive() {
+            return;
+        }
+        let p = me.pos.pixels();
+        let toucher = Toucher {
+            x: p.x,
+            y: p.y,
+            radius: self.world.settings.ships[me.kind as usize % 8].radius_pixels(),
+            freq: me.freq,
+            carried: self.carried_flags(),
+        };
+        let carry = self.carry_flags();
+        let wanted = self.flags.touched(toucher, carry, self.clock);
+        let expired = self.flag_deadline.is_some_and(|d| self.clock >= d);
+        let Some(net) = self.net.as_mut() else { return };
+        for id in wanted {
+            net.session.pickup_flag(id);
+        }
+        if expired {
+            self.flag_deadline = None;
+            net.session.drop_flags();
+        }
+        net.flush();
     }
 
     /// Adds an LVZ file's objects (logged and skipped if it doesn't parse).

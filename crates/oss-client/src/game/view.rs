@@ -302,6 +302,23 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         c.world(r, region, (ox * 16) as f32, (oy * 16) as f32);
     }
 
+    // --- Flags (yours in the sheet's second half) -------------------------------------
+    let hide_flags = s.spectating && s.hide_flags();
+    let flag_frames = a.flag.frame_count(16, 16) / 2;
+    for f in s
+        .flags
+        .flags
+        .iter()
+        .filter(|f| f.visible(s.clock) && !hide_flags)
+    {
+        if !visible(f.x, f.y, 1) || flag_frames == 0 {
+            continue;
+        }
+        let first = if f.owner == me.freq { flag_frames } else { 0 };
+        let region = anim_frame(a.flag, 16, 16, first, flag_frames, 1.0, t);
+        c.world(r, region, (f.x * 16) as f32, (f.y * 16) as f32);
+    }
+
     s.lvz.draw(layer::AFTER_TILES, c, r, t, &s.screen_refs);
 
     // --- Greens ------------------------------------------------------------------------

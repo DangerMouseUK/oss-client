@@ -2,6 +2,7 @@
 
 pub mod art;
 pub mod default_map;
+pub mod flags;
 pub mod hud;
 pub mod input;
 pub mod login;
