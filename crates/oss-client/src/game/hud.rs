@@ -436,7 +436,7 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
     // Ships: you blink yellow, team yellow, enemies blue (stealth hides enemies
     // unless your X-radar is on).
     let blink = (s.clock * 2.5).fract() < 0.5;
-    let xradar = me.is_on(toggle::XRADAR);
+    let xradar = s.xradar();
     for ship in &s.world.ships {
         if !ship.is_alive() {
             continue;

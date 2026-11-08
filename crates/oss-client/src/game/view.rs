@@ -451,7 +451,7 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, ui: &Canvas, r: &mut Renderer, alpha:
     }
 
     // --- Ships ---------------------------------------------------------------------------
-    let xradar = me.is_on(toggle::XRADAR);
+    let xradar = s.xradar();
     let mut labels = Vec::new();
     for ship in &world.ships {
         if !ship.is_alive() {

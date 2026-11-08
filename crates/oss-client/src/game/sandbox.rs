@@ -158,6 +158,8 @@ pub struct Sandbox {
     spec_cam: (f32, f32),
     /// Spectating: the player the camera follows.
     spec_follow: Option<u16>,
+    /// Spectating with X-radar on (End), unless `Spectator:NoXRadar`.
+    spec_xradar: bool,
     /// The chat line being typed, if the chat box is open.
     pub(super) typing: Option<String>,
     /// Testing aid: steer toward the nearest enemy and shoot (overrides the keys
@@ -231,16 +233,10 @@ impl Sandbox {
         // Playing a replay you're a spectator; the recorder is one of the remote ships.
         let replay = net.is_replay();
         let me_id = if replay { REPLAY_VIEWER } else { me.pid as u16 };
-        // Spawn where the arena says (first spawn point for your team, if any).
-        let spawns: Vec<_> = settings
-            .spawns
-            .iter()
-            .filter(|s| s.x() != 0 || s.y() != 0)
-            .collect();
-        if !spawns.is_empty() {
-            let sp = spawns[(me.freq.unsigned_abs() as usize) % spawns.len()];
-            world.spawn_center = (sp.x() as i32, sp.y() as i32);
-            world.spawn_radius = sp.radius() as i32;
+        // Spawn where the arena says for your team.
+        if let Some((center, radius)) = spawn_area(&settings, me.freq as u16) {
+            world.spawn_center = center;
+            world.spawn_radius = radius;
         }
         for p in net.session.players() {
             if (replay || p.pid != me.pid) && p.ship != SPECTATOR {
@@ -379,6 +375,7 @@ impl Sandbox {
             spectating: false,
             spec_cam: (8192.0, 8192.0),
             spec_follow: None,
+            spec_xradar: false,
             typing: None,
             aim_bot: false,
         };
@@ -449,6 +446,70 @@ impl Sandbox {
             .as_ref()
             .and_then(|n| n.session.settings())
             .map_or(0.0, |cs| cs.jitter_time().max(0) as f32 / 100.0)
+    }
+
+    /// Moves your team's spawn area for `freq` (see [`spawn_area`]).
+    fn place_spawn(&mut self, freq: u16) {
+        let area = self
+            .net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .and_then(|cs| spawn_area(cs, freq));
+        (self.world.spawn_center, self.world.spawn_radius) = area.unwrap_or((
+            (512, 512),
+            self.world.settings.warp_radius_limit.clamp(3, 512) as i32,
+        ));
+    }
+
+    /// The window got the focus back: `Misc:ActivateAppShutdownTime` shuts your
+    /// engine down for a moment, so switching back in can't be used to dodge.
+    pub fn refocused(&mut self) {
+        let Some(ticks) = self
+            .net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .map(|s| s.activate_app_shutdown_time())
+            .filter(|t| *t > 0)
+        else {
+            return;
+        };
+        if self.spectating || !self.me().is_alive() {
+            return;
+        }
+        let i = self.me_index();
+        let until = self.world.tick.wrapping_add(ticks as u32);
+        let ship = &mut self.world.ships[i];
+        // Keep a longer shutdown (an EMP hit) if one is running.
+        ship.shutdown_end_tick = oss_sim::ship::later(ship.shutdown_end_tick, until);
+    }
+
+    /// `Spectator:NoXRadar`: spectators may not use X-radar (allowed offline).
+    fn spec_xradar_allowed(&self) -> bool {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .is_none_or(|s| s.no_xradar() == 0)
+    }
+
+    /// Spectators toggle X-radar with the X-radar key, as in Continuum.
+    fn toggle_spec_xradar(&mut self) {
+        if !self.spec_xradar_allowed() {
+            self.spec_xradar = false;
+            self.message("Spectators can't use X-radar in this arena.", color::YELLOW);
+            return;
+        }
+        self.spec_xradar = !self.spec_xradar;
+        self.sound(if self.spec_xradar { "xradar" } else { "off" }, 0.8, None);
+    }
+
+    /// Whether you see cloaked and stealthed ships: your ship's X-radar, or a
+    /// spectator's.
+    pub(super) fn xradar(&self) -> bool {
+        if self.spectating {
+            self.spec_xradar && self.spec_xradar_allowed()
+        } else {
+            self.me().is_on(toggle::XRADAR)
+        }
     }
 
     /// The ship being followed while spectating, if it's in play.
@@ -535,6 +596,10 @@ impl Sandbox {
         let mods = (input.shift(), input.ctrl());
         self.ui_input(&mut edges, &pressed, &typed, mods);
         self.big_radar = !self.menu && input.action_held(Action::BigRadar);
+        if self.spectating && !self.menu && self.typing.is_none() && edges.contains(&Action::XRadar)
+        {
+            self.toggle_spec_xradar();
+        }
         if self.spectating && !self.menu && self.typing.is_none() {
             let step = SPEC_SPEED * dt.as_secs_f32() * if input.shift() { 3.0 } else { 1.0 };
             let (dx, dy) = (
@@ -1067,6 +1132,7 @@ impl Sandbox {
                 }
                 SessionEvent::ShipChanged { pid, ship, freq } => {
                     if pid as u16 == self.me_id {
+                        self.place_spawn(freq as u16);
                         let i = self.me_index();
                         self.world.ships.remove(i);
                         add_own_ship(&mut self.world, self.me_id, ship, freq as u16);
@@ -1086,6 +1152,9 @@ impl Sandbox {
                 SessionEvent::FreqChanged { pid, freq } => {
                     if let Some(i) = self.world.ship_index(pid as u16) {
                         self.world.ships[i].freq = freq as u16;
+                    }
+                    if pid as u16 == self.me_id {
+                        self.place_spawn(freq as u16);
                     }
                 }
                 SessionEvent::PlayerMoved(pid) => {
@@ -2153,6 +2222,31 @@ impl Sandbox {
 const REPLAY_VIEWER: u16 = u16::MAX - 1;
 
 /// Adds your own ship to an online world; as a spectator it is a hidden placeholder.
+/// Where a team spawns, as (centre tile, radius in tiles), following nullspace:
+/// `Spawn:Team*` by frequency (an x or y of 0 is the map's middle); without those,
+/// `Radar:RadarMode` 1 and 3 split the map into a left and right half by even and
+/// odd frequency, and 2 and 4 into quarters. `None`: the middle of the map, within
+/// `Misc:WarpRadiusLimit`.
+fn spawn_area(cs: &oss_proto::settings::ClientSettings, freq: u16) -> Option<((i32, i32), i32)> {
+    let set: Vec<_> = cs
+        .spawns
+        .iter()
+        .filter(|s| s.x() != 0 || s.y() != 0 || s.radius() != 0)
+        .collect();
+    if !set.is_empty() {
+        let sp = set[freq as usize % set.len()];
+        let middle = |v: u16| if v == 0 { 512 } else { v as i32 };
+        return Some(((middle(sp.x()), middle(sp.y())), sp.radius() as i32));
+    }
+    // A 256-tile square at the edge of the team's half or quarter.
+    let side = |bit: u16| (bit & 1) as i32 * 0x300 + 0x80;
+    match cs.radar_mode() {
+        1 | 3 => Some(((side(freq), 0x180), 0x80)),
+        2 | 4 => Some(((side(freq), side(freq / 2)), 0x80)),
+        _ => None,
+    }
+}
+
 fn add_own_ship(world: &mut World, id: u16, ship: u8, freq: u16) {
     if ship == SPECTATOR {
         let i = world.add_remote_ship(id, 0, freq);
@@ -2198,7 +2292,29 @@ impl FpsCounter {
 
 #[cfg(test)]
 mod tests {
+    use super::spawn_area;
     use super::view::lerp_direction;
+    use oss_proto::settings::{ClientSettings, SpawnPosition};
+
+    #[test]
+    fn team_spawns_and_radar_mode_halves() {
+        let mut cs = ClientSettings::default();
+        assert_eq!(spawn_area(&cs, 0), None);
+        // RadarMode 1: even frequencies on the left, odd on the right.
+        cs.set_radar_mode(1);
+        assert_eq!(spawn_area(&cs, 0), Some(((0x80, 0x180), 0x80)));
+        assert_eq!(spawn_area(&cs, 1), Some(((0x380, 0x180), 0x80)));
+        // RadarMode 4: quarters.
+        cs.set_radar_mode(4);
+        assert_eq!(spawn_area(&cs, 2), Some(((0x80, 0x380), 0x80)));
+        assert_eq!(spawn_area(&cs, 3), Some(((0x380, 0x380), 0x80)));
+        // Spawn points win, by frequency over those set; x = 0 is the middle.
+        cs.spawns[0] = SpawnPosition::new(100, 200, 5);
+        cs.spawns[1] = SpawnPosition::new(0, 900, 10);
+        assert_eq!(spawn_area(&cs, 0), Some(((100, 200), 5)));
+        assert_eq!(spawn_area(&cs, 1), Some(((512, 900), 10)));
+        assert_eq!(spawn_area(&cs, 2), Some(((100, 200), 5)));
+    }
 
     #[test]
     fn direction_interpolates_the_short_way() {

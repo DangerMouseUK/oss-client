@@ -352,6 +352,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => self.input.clear(),
+            WindowEvent::Focused(true) => {
+                if let Some(Running {
+                    screen: Screen::Game(game),
+                    ..
+                }) = self.running.as_mut()
+                {
+                    game.refocused();
+                }
+            }
             WindowEvent::Occluded(hidden) => {
                 if let Some(run) = self.running.as_mut() {
                     run.occluded = hidden;
