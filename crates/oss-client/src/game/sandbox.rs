@@ -91,6 +91,9 @@ pub struct Sandbox {
     pub(super) objects: Vec<MapObject>,
     pub(super) art: Art,
     pub(super) atlas: TextureId,
+    /// What the atlas was built from, to rebuild it when an LVZ replaces a sheet.
+    asset_dirs: AssetDirs,
+    tileset: Option<Vec<u8>>,
     pub(super) radar: Option<RadarCache>,
     /// Bumped whenever doors or bricks change, so the radar image is rebuilt.
     pub(super) map_revision: u64,
@@ -278,6 +281,8 @@ impl Sandbox {
             objects,
             art,
             atlas,
+            asset_dirs: dir.clone(),
+            tileset: tileset.map(<[u8]>::to_vec),
             radar: None,
             map_revision: 0,
             statbox: StatBox::default(),
@@ -930,6 +935,24 @@ impl Sandbox {
         self.handle_events(&sim_events);
     }
 
+    /// Rebuilds the atlas with the LVZ replacement sheets. On failure (say the atlas
+    /// is full) the current art stays.
+    fn rebuild_art(&mut self, r: &mut Renderer) {
+        let built = art::load_with(
+            &self.asset_dirs,
+            self.tileset.as_deref(),
+            &self.lvz.art_overrides,
+        );
+        match built {
+            Ok((art, size, pixels)) => {
+                self.atlas = r.create_texture(size, size, &pixels);
+                self.art = art;
+                self.map_revision += 1;
+            }
+            Err(e) => log::warn!("couldn't apply LVZ graphics: {e}"),
+        }
+    }
+
     /// Adds an LVZ file's objects (logged and skipped if it doesn't parse).
     pub fn load_lvz(&mut self, name: &str, data: &[u8]) {
         match self.lvz.add_file(name, data, self.clock) {
@@ -1191,8 +1214,12 @@ impl Sandbox {
         let cam = self.camera(alpha);
         let c = Canvas::new(&self.art, self.atlas, r.size(), self.scale, cam);
         self.lvz.upload(r);
+        if self.lvz.art_changed {
+            self.lvz.art_changed = false;
+            self.rebuild_art(r);
+        }
         let chat_top = c.view_h - 16.0 - LOG_LINES as f32 * 12.0;
-        self.screen_refs = hud::screen_refs(&c, self.statbox_corner, chat_top);
+        self.screen_refs = hud::screen_refs(&c, self.statbox_corner, chat_top, self.spectating);
         view::draw_world(self, &c, r, alpha);
         hud::draw(self, &c, r);
         self.lvz

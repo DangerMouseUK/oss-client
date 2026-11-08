@@ -42,16 +42,45 @@ fn radar_dim(c: &Canvas) -> f32 {
     ((((c.view_w as u32 / 6) / 4) * 8) / 2) as f32
 }
 
-/// Anchor points for LVZ screen objects, indexed by `oss_proto::objects::reference`:
-/// screen corners and centre, the stat box, the item (specials) column on the left,
-/// below the energy bar, the chat, the radar and the weapon column on the right.
-pub fn screen_refs(c: &Canvas, statbox_corner: (f32, f32), chat_top: f32) -> ScreenRefs {
+/// Anchor points for LVZ screen objects, indexed by `oss_proto::objects::reference`
+/// (the LVZ format's one-letter codes in brackets).
+///
+/// Sources: the LVZ format notes give each code's meaning; nullspace (MIT) implements
+/// only Normal, Centre, Bottom-right and Below-energy, and those four follow it
+/// exactly. The rest are our reading of the format notes placed on our HUD, which
+/// mirrors Continuum's layout. They are **unverified** against Continuum and need a
+/// veteran play-test (a zone tutorial LVZ that points arrows at each HUD element is a
+/// good check):
+///
+/// | # | Code | Meaning                         | Status     |
+/// |---|------|---------------------------------|------------|
+/// | 0 | (none) | screen top-left               | nullspace  |
+/// | 1 | C    | screen centre                   | nullspace  |
+/// | 2 | B    | screen bottom-right             | nullspace  |
+/// | 3 | S    | stat box bottom-right           | unverified |
+/// | 4 | G    | specials (left items) top-right | unverified |
+/// | 5 | F    | specials bottom-right           | unverified |
+/// | 6 | E    | below the energy bar            | nullspace (spectating: unverified) |
+/// | 7 | T    | chat top-left                   | unverified |
+/// | 8 | R    | radar top-left                  | unverified (radar size from nullspace) |
+/// | 9 | O    | radar text top-left             | unverified |
+/// | 10 | W   | weapons (right icons) top-left  | unverified |
+/// | 11 | V   | weapons bottom-left             | unverified |
+pub fn screen_refs(
+    c: &Canvas,
+    statbox_corner: (f32, f32),
+    chat_top: f32,
+    spectating: bool,
+) -> ScreenRefs {
     let (w, h) = (c.view_w, c.view_h);
     let top = icons_top(c);
     let dim = radar_dim(c);
     let (rx, ry) = (w - dim - RADAR_MARGIN, h - dim - RADAR_MARGIN);
     // Icon (26) plus the count tab beside it.
     let specials_right = 37.0;
+    // nullspace: the health bar's height, or below the spectator text lines when
+    // spectating (we show no energy bar then; our spectator line is one row).
+    let below_energy = if spectating { 12.0 } else { 28.0 };
     [
         (0.0, 0.0),
         ((w / 2.0).floor(), (h / 2.0).floor()),
@@ -59,9 +88,10 @@ pub fn screen_refs(c: &Canvas, statbox_corner: (f32, f32), chat_top: f32) -> Scr
         statbox_corner,
         (specials_right, top),
         (specials_right, top + 7.0 * 25.0),
-        ((w / 2.0).floor(), 28.0),
+        ((w / 2.0).floor(), below_energy),
         (0.0, chat_top),
         (rx, ry),
+        // The radar's text line (coordinates/clock) sits just above it.
         (rx, ry - 12.0),
         (w - 26.0, top),
         (w - 26.0, top + 6.0 * 25.0),

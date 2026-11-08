@@ -1,5 +1,7 @@
 //! Loads the Continuum graphics the game draws into one texture atlas.
 
+use std::collections::HashMap;
+
 use oss_assets::{AssetDirs, Image, decode_image};
 
 use crate::gfx::{AtlasBuilder, Region};
@@ -47,6 +49,26 @@ pub struct Art {
     pub icondoor: Region,
     pub empburst: Region,
     pub rocket: Region,
+    /// Per-ship replacement sheets from LVZ files (`ship1`..`ship8`): region and
+    /// frame side (40 square frames).
+    pub ship_sheets: [Option<(Region, u32)>; 8],
+}
+
+/// Sheets an LVZ file can replace, by file name without extension (lowercase),
+/// besides `ship1`..`ship8`. Mirrors the graphics nullspace lets zones override.
+pub const OVERRIDABLE: &[&str] = &[
+    "ships", "bullets", "bombs", "mines", "explode0", "explode1", "explode2", "warp", "exhaust",
+    "goal", "flag", "prizes", "shrapnel", "warppnt", "repel", "shield", "super", "empburst",
+    "rocket", "over1", "over2", "over3", "over4", "over5", "wall",
+];
+
+/// Whether an LVZ file named `stem` (no extension, lowercase) replaces a standard sheet.
+pub fn is_overridable(stem: &str) -> bool {
+    OVERRIDABLE.contains(&stem)
+        || stem
+            .strip_prefix("ship")
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| (1..=8).contains(&n))
 }
 
 impl Art {
@@ -57,6 +79,9 @@ impl Art {
 
     /// Ship sprite for ship type `kind` (0..8) facing `direction` (0..40).
     pub fn ship(&self, kind: u8, direction: u8) -> Region {
+        if let Some(Some((sheet, side))) = self.ship_sheets.get(kind as usize) {
+            return sheet.frame(*side, *side, direction as u32 % 40);
+        }
         self.ships
             .frame(36, 36, kind as u32 * 40 + direction as u32 % 40)
     }
@@ -112,6 +137,16 @@ pub fn prepare_tileset(mut img: Image) -> Image {
 /// Builds the atlas. `level_tileset` is the `.lvl`'s embedded BMP, if any; otherwise
 /// the install's `tiles.bm2` is used.
 pub fn load(dir: &AssetDirs, level_tileset: Option<&[u8]>) -> Result<(Art, u32, Vec<u8>), String> {
+    load_with(dir, level_tileset, &HashMap::new())
+}
+
+/// [`load`] with sheets replaced by `overrides` (keyed by lowercase name without
+/// extension, as in [`OVERRIDABLE`] and `ship1`..`ship8`; already colour-keyed).
+pub fn load_with(
+    dir: &AssetDirs,
+    level_tileset: Option<&[u8]>,
+    overrides: &HashMap<String, Image>,
+) -> Result<(Art, u32, Vec<u8>), String> {
     let mut atlas = AtlasBuilder::new(ATLAS_SIZE);
     let mut add = |img: &Image| {
         atlas
@@ -135,6 +170,9 @@ pub fn load(dir: &AssetDirs, level_tileset: Option<&[u8]>) -> Result<(Art, u32, 
     art.tiles = add(&prepare_tileset(tileset))?;
 
     let mut sheet = |name: &str, required: bool| -> Result<Region, String> {
+        if let Some(img) = overrides.get(&name.to_ascii_lowercase()) {
+            return add(img);
+        }
         match dir.load_graphic(name) {
             Ok(mut img) => {
                 img.key_black_transparent();
@@ -178,6 +216,16 @@ pub fn load(dir: &AssetDirs, level_tileset: Option<&[u8]>) -> Result<(Art, u32, 
     art.icondoor = sheet("icondoor", false)?;
     art.empburst = sheet("empburst", false)?;
     art.rocket = sheet("rocket", false)?;
+    drop(sheet);
+    for (k, slot) in art.ship_sheets.iter_mut().enumerate() {
+        if let Some(img) = overrides.get(&format!("ship{}", k + 1)) {
+            // 40 square frames (10 by 4 in the stock layout).
+            let side = ((img.width as f64 * img.height as f64 / 40.0).sqrt()) as u32;
+            if side > 0 {
+                *slot = Some((add(img)?, side));
+            }
+        }
+    }
 
     let size = atlas.size();
     Ok((art, size, atlas.into_pixels()))

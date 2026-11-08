@@ -137,6 +137,11 @@ pub struct Lvz {
     pub objects: Vec<LvzObject>,
     /// Decoded images waiting for upload: (image index, pixels).
     pending: Vec<(usize, Image)>,
+    /// Files that replace standard sheets (`ships`, `ship3`, `bullets`...), keyed by
+    /// lowercase name without extension.
+    pub art_overrides: HashMap<String, Image>,
+    /// Set when `art_overrides` changed and the atlas needs rebuilding.
+    pub art_changed: bool,
 }
 
 impl Lvz {
@@ -148,7 +153,20 @@ impl Lvz {
         for s in file.sections.iter().filter(|s| !s.is_object_section()) {
             match s.data() {
                 Ok(d) => {
-                    files.insert(String::from_utf8_lossy(&s.name).to_ascii_lowercase(), d);
+                    let file_name = String::from_utf8_lossy(&s.name).to_ascii_lowercase();
+                    let stem = file_name.split('.').next().unwrap_or_default().to_string();
+                    if super::art::is_overridable(&stem) {
+                        match decode_image(&d) {
+                            Ok(mut img) => {
+                                img.key_black_transparent();
+                                log::info!("{name}: {file_name} replaces the standard {stem}");
+                                self.art_overrides.insert(stem, img);
+                                self.art_changed = true;
+                            }
+                            Err(e) => log::warn!("{name}: {file_name}: {e}"),
+                        }
+                    }
+                    files.insert(file_name, d);
                 }
                 Err(e) => log::warn!("{name}: {}: {e}", String::from_utf8_lossy(&s.name)),
             }
@@ -210,6 +228,19 @@ impl Lvz {
                     (o.screen_x(), o.screen_y())
                 };
                 let mode = o.mode();
+                if !o.is_map_object() {
+                    log::debug!(
+                        "{name}: screen object {} at ref {} {:+}, ref {} {:+}, image {} layer {} mode {}",
+                        o.id(),
+                        o.x_ref(),
+                        x,
+                        o.y_ref(),
+                        y,
+                        o.image,
+                        o.layer,
+                        mode
+                    );
+                }
                 let shown = matches!(
                     mode,
                     mode::SHOW_ALWAYS | mode::ENTER_ZONE | mode::ENTER_ARENA
@@ -429,6 +460,27 @@ mod tests {
         assert_eq!(img.frame(0.7).x, 2);
         assert_eq!(img.frame(1.2).x, 0);
         assert!(lvz.add_file("bad.lvz", b"nope", 0.0).is_err());
+    }
+
+    #[test]
+    fn sections_named_like_standard_sheets_replace_them() {
+        let bytes = LvzFile {
+            sections: vec![
+                Section::new(b"Ship3.bmp", 0, &sheet()),
+                Section::new(b"bullets.bm2", 0, &sheet()),
+                Section::new(b"ship9.bmp", 0, &sheet()),
+                Section::new(b"logo.bmp", 0, &sheet()),
+            ],
+        }
+        .to_bytes();
+        let mut lvz = Lvz::default();
+        lvz.add_file("art.lvz", &bytes, 0.0).unwrap();
+        let mut names: Vec<&str> = lvz.art_overrides.keys().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, ["bullets", "ship3"]);
+        assert!(lvz.art_changed);
+        // Black was keyed out as in object images.
+        assert_eq!(lvz.art_overrides["ship3"].pixel(0, 0).unwrap()[3], 255);
     }
 
     #[test]
