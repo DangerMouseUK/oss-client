@@ -91,6 +91,8 @@ pub struct Sandbox {
     pub(super) radar: Option<RadarCache>,
     /// Bumped whenever doors or bricks change, so the radar image is rebuilt.
     pub(super) map_revision: u64,
+    /// World tick of the last clock correction (online).
+    slew_tick: u32,
     brick_count: usize,
     last: Instant,
     acc: Duration,
@@ -169,7 +171,15 @@ impl Sandbox {
     ) -> Result<Self, String> {
         let (_, map_bytes) = net.map.clone().ok_or("no map")?;
         let settings = net.session.settings().cloned().ok_or("no settings")?;
-        let (mut world, objects) = arena_world(&map_bytes, &settings, net.green_seed);
+        let green_seed = net.seeds.map_or(0, |s| s.0);
+        let (mut world, objects) = arena_world(&map_bytes, &settings, green_seed);
+        // Online the world counts the server's ticks, so doors and greens line up with
+        // everyone else's.
+        world.set_tick(net.session.server_ticks(net.now_ms()));
+        world.player_count = Some(net.session.players().count() as u32);
+        if let Some((_, door_seed, timestamp)) = net.seeds {
+            world.sync_doors(door_seed, timestamp);
+        }
         let me = net.session.me().cloned().ok_or("not in an arena")?;
         let me_id = me.pid as u16;
         // Spawn where the arena says (first spawn point for your team, if any).
@@ -257,6 +267,7 @@ impl Sandbox {
             atlas,
             radar: None,
             map_revision: 0,
+            slew_tick: 0,
             brick_count: 0,
             last: Instant::now(),
             acc: Duration::ZERO,
@@ -387,6 +398,7 @@ impl Sandbox {
         self.pump_network();
 
         self.acc += dt;
+        self.sync_clock();
         let mut ticks = 0;
         while self.acc >= TICK {
             let mut ship_input = if self.menu || self.spectating {
@@ -754,7 +766,12 @@ impl Sandbox {
                         self.world.fire_remote(i, w, &mut sim_events);
                     }
                 }
-                SessionEvent::Kill { killer, killed, .. } => {
+                SessionEvent::Kill {
+                    killer,
+                    killed,
+                    green,
+                    ..
+                } => {
                     let name = |pid: i16, s: &Self| {
                         s.net
                             .as_ref()
@@ -764,6 +781,17 @@ impl Sandbox {
                     };
                     let (kn, dn) = (name(killer, self), name(killed, self));
                     self.message(format!("{dn} killed by {kn}"), color::GREEN);
+                    // A kill can leave a prize where the ship died, if it was moving.
+                    if green > 0
+                        && let Some(i) = self.world.ship_index(killed as u16)
+                    {
+                        let ship = &self.world.ships[i];
+                        if ship.vel != Default::default() {
+                            let p = ship.pos.pixels();
+                            let (x, y) = ((p.x / 16).max(0) as u16, (p.y / 16).max(0) as u16);
+                            self.world.spawn_death_green(x, y, green as i32);
+                        }
+                    }
                     if killed as u16 != self.me_id {
                         self.world
                             .kill_ship(killed as u16, killer as u16, &mut sim_events);
@@ -791,7 +819,18 @@ impl Sandbox {
                 SessionEvent::Settings(cs) => {
                     self.world.settings = ArenaSettings::from_client_settings(&cs);
                 }
-                SessionEvent::Seeds { green_seed, .. } => self.world.prize_seed = green_seed,
+                SessionEvent::Seeds {
+                    green_seed,
+                    door_seed,
+                    timestamp,
+                } => {
+                    self.world.prize_seed = green_seed;
+                    self.world.reset_green_timer();
+                    sim_events.extend(self.world.sync_doors(door_seed, timestamp));
+                }
+                SessionEvent::GreenTaken { x, y, .. } => {
+                    self.world.remove_green_at(x as u16, y as u16);
+                }
                 SessionEvent::ShipReset => {
                     let i = self.me_index();
                     if self.world.ships[i].is_alive() {
@@ -823,7 +862,33 @@ impl Sandbox {
                 _ => {}
             }
         }
+        self.world.player_count = self
+            .net
+            .as_ref()
+            .map(|n| n.session.players().count() as u32);
         self.handle_events(&sim_events);
+    }
+
+    /// Online, keeps the world's tick count on the server's clock: small drift is
+    /// corrected by stepping one tick more or less (at most every 10 ticks), a large
+    /// jump (a stall, or a clock resync) by moving the clock.
+    fn sync_clock(&mut self) {
+        let Some(net) = self.net.as_ref() else { return };
+        let target = net.session.server_ticks(net.now_ms());
+        let pending = (self.acc.as_nanos() / TICK.as_nanos()) as i32;
+        let drift = target.wrapping_sub(self.world.tick) as i32 - pending;
+        if drift.unsigned_abs() > 200 {
+            log::debug!("clock: moved {drift} ticks to the server's");
+            self.world.tick = target;
+            self.acc = Duration::ZERO;
+        } else if drift.abs() > 2 && self.world.tick.wrapping_sub(self.slew_tick) >= 10 {
+            self.slew_tick = self.world.tick;
+            if drift > 0 {
+                self.acc += TICK;
+            } else {
+                self.acc = self.acc.saturating_sub(TICK);
+            }
+        }
     }
 
     /// Reports what your ship did this tick (weapons, death) to the server.
@@ -835,6 +900,11 @@ impl Sandbox {
         for e in events {
             if let Some(w) = weapon_for(e, me) {
                 net.session.send_position(now, &own_position(me, Some(w)));
+            }
+            if let Event::GreenTaken { ship, x, y, prize } = e
+                && *ship == self.me_id
+            {
+                net.session.send_take_green(now, *x, *y, *prize);
             }
             if let Event::ShipKilled { ship, killer, .. } = e
                 && *ship == self.me_id

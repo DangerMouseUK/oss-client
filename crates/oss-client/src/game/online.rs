@@ -23,7 +23,8 @@ pub struct Online {
     cache: MapCache,
     /// The arena's map once loaded: (name, `.lvl` bytes).
     pub map: Option<(String, Vec<u8>)>,
-    pub green_seed: u32,
+    /// Latest seeds from the server: (green, door, server tick they date from).
+    pub seeds: Option<(u32, u32, u32)>,
     /// Human-readable progress while connecting.
     pub status: String,
     /// Set when the session failed or closed.
@@ -54,7 +55,7 @@ impl Online {
             driver,
             cache: MapCache::new(default_cache_dir(&opts.server)),
             map: None,
-            green_seed: 0,
+            seeds: None,
             status: format!("Connecting to {}...", opts.server),
             error: None,
             freq: opts.freq,
@@ -105,7 +106,11 @@ impl Online {
                     }
                     self.map = Some((name.clone(), data.clone()));
                 }
-                SessionEvent::Seeds { green_seed, .. } => self.green_seed = *green_seed,
+                SessionEvent::Seeds {
+                    green_seed,
+                    door_seed,
+                    timestamp,
+                } => self.seeds = Some((*green_seed, *door_seed, *timestamp)),
                 SessionEvent::Closed(reason) if self.error.is_none() => {
                     self.error = Some(format!("Disconnected ({reason:?})"));
                 }

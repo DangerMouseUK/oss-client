@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::fixed::VieRng;
 use crate::fixed::{
     DIRECTION_HEADINGS, ENERGY_SCALE, Pos, ROTATION_UNITS, Rng, VEL_SCALE, Vel, isqrt, scale_unit,
 };
@@ -110,6 +111,13 @@ pub enum Event {
         ship: u16,
         prize: i32,
     },
+    /// A ship that takes damage (the local one) picked up the green on tile (x, y).
+    GreenTaken {
+        ship: u16,
+        x: u16,
+        y: u16,
+        prize: i32,
+    },
     /// Doors changed state (new door seed applied).
     DoorsChanged {
         seed: u8,
@@ -164,15 +172,26 @@ pub struct World {
     pub(crate) bricks: BTreeMap<(i32, i32), Brick>,
     /// Every door tile: (x, y, original door id 162..=169).
     doors: Vec<(i32, i32, u8)>,
-    next_door_tick: u32,
+    /// Door generator; shared with the server and other clients online.
+    door_rng: VieRng,
+    /// Tick of the last door change; doors change every `DoorDelay` ticks after it.
+    last_door_tick: u32,
+    /// Players in the arena (spectators included), for the green count and spawn
+    /// area. `None` counts the ships in the world.
+    pub player_count: Option<u32>,
     /// Top-left tiles of wormholes (for gravity).
     wormholes: Vec<(i32, i32)>,
 }
+
+/// Most door changes replayed at once when catching up.
+const MAX_DOOR_CATCH_UP: u32 = 100_000;
 
 impl World {
     pub fn new(map: TileMap, settings: ArenaSettings, seed: u32) -> Self {
         let mut rng = Rng::new(seed);
         let prize_seed = rng.next_u32() | 1;
+        let door_rng = VieRng::new(rng.next_u32());
+        let door_delay = settings.door_delay.max(1);
         let mut w = Self {
             tick: 0,
             map,
@@ -189,7 +208,10 @@ impl World {
             green_ticks: 0,
             bricks: BTreeMap::new(),
             doors: Vec::new(),
-            next_door_tick: 0,
+            door_rng,
+            // Due on the first tick.
+            last_door_tick: 0u32.wrapping_sub(door_delay),
+            player_count: None,
             wormholes: Vec::new(),
         };
         w.spawn_radius = w.settings.warp_radius_limit.clamp(3, 512) as i32;
@@ -250,29 +272,71 @@ impl World {
         }
     }
 
-    /// Picks the next door seed for the arena's `DoorMode`.
+    /// Moves the clock to `tick` (online: the server's tick count), with the next door
+    /// change due straight away.
+    pub fn set_tick(&mut self, tick: u32) {
+        self.tick = tick;
+        self.last_door_tick = tick.wrapping_sub(self.settings.door_delay.max(1));
+    }
+
+    /// Follows the server's doors: `door_seed` from the security packet, which was
+    /// current at world tick `seed_tick`. Doors catch up from then and change every
+    /// `DoorDelay` ticks, the same as every other client.
+    pub fn sync_doors(&mut self, door_seed: u32, seed_tick: u32) -> Option<Event> {
+        self.door_rng = VieRng::new(door_seed);
+        self.last_door_tick = seed_tick;
+        self.update_doors()
+    }
+
+    /// Applies any door changes due by now.
+    fn update_doors(&mut self) -> Option<Event> {
+        if self.doors.is_empty() {
+            return None;
+        }
+        let delay = self.settings.door_delay.max(1);
+        let elapsed = self.tick.wrapping_sub(self.last_door_tick) as i32;
+        if elapsed < delay as i32 {
+            return None;
+        }
+        let count = elapsed as u32 / delay;
+        // A timestamp far in the past (bad data) can't stall the game: skip ahead.
+        let skip = count.saturating_sub(MAX_DOOR_CATCH_UP);
+        self.last_door_tick = self.last_door_tick.wrapping_add(skip * delay);
+        let mut seed = 0;
+        for _ in skip..count {
+            seed = self.next_door_seed();
+            self.last_door_tick = self.last_door_tick.wrapping_add(delay);
+        }
+        self.apply_door_seed(seed);
+        Some(Event::DoorsChanged { seed })
+    }
+
+    /// Draws the next door seed for the arena's `DoorMode`.
     fn next_door_seed(&mut self) -> u8 {
         match self.settings.door_mode {
-            -2 => self.rng.next_u32() as u8,
+            -2 => self.door_rng.next_u32() as u8,
             -1 => {
                 // Weighted: each door type stays closed with its own probability
-                // (types 0 and 4 most often open, 3 and 7 least).
+                // (types 0 and 4 most often open, 3 and 7 least). The generator only
+                // returns positive values, so these are plain remainders.
                 let mut seed = 0u8;
-                let mut bit = |modulus: u32, bits: u8| {
-                    if !self.rng.next_u32().is_multiple_of(modulus) {
+                for (modulus, bits) in [
+                    (2, 0x11),
+                    (4, 0x02),
+                    (8, 0x04),
+                    (16, 0x08),
+                    (4, 0x20),
+                    (8, 0x40),
+                    (16, 0x80),
+                ] {
+                    if !self.door_rng.next_u32().is_multiple_of(modulus) {
                         seed |= bits;
                     }
-                };
-                bit(2, 0x11);
-                bit(4, 0x02);
-                bit(8, 0x04);
-                bit(16, 0x08);
-                bit(4, 0x20);
-                bit(8, 0x40);
-                bit(16, 0x80);
+                }
                 seed
             }
-            m => m.clamp(0, 255) as u8,
+            m if m >= 0 => m.min(255) as u8,
+            _ => self.door_rng.seed as u8,
         }
     }
 
@@ -423,11 +487,8 @@ impl World {
         self.step_projectiles(&mut events);
         self.step_greens(&mut events);
         self.expire_bricks();
-        if !self.doors.is_empty() && tick_reached(self.tick, self.next_door_tick) {
-            let seed = self.next_door_seed();
-            self.apply_door_seed(seed);
-            self.next_door_tick = self.tick.wrapping_add(self.settings.door_delay.max(1));
-            events.push(Event::DoorsChanged { seed });
+        if let Some(e) = self.update_doors() {
+            events.push(e);
         }
         events
     }

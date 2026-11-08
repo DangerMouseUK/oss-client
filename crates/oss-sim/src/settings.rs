@@ -166,6 +166,8 @@ pub struct ArenaSettings {
     pub prize_min_exist: u32,
     /// One prize in this many is negative (0 = never).
     pub prize_negative_factor: u32,
+    /// Lifetime (ticks) of the green a kill leaves behind.
+    pub death_prize_time: u32,
     pub multi_prize_count: u32,
     /// Random warp/spawn distance limit from the centre (tiles).
     pub warp_radius_limit: u32,
@@ -305,6 +307,7 @@ impl Default for ArenaSettings {
             prize_max_exist: 8000,
             prize_min_exist: 4000,
             prize_negative_factor: 300,
+            death_prize_time: 1000,
             multi_prize_count: 10,
             warp_radius_limit: 20,
         }
@@ -461,6 +464,7 @@ impl ArenaSettings {
             prize_max_exist: short(cs.prize_max_exist()),
             prize_min_exist: short(cs.prize_min_exist()),
             prize_negative_factor: short(cs.prize_negative_factor()),
+            death_prize_time: short(cs.death_prize_time()),
             multi_prize_count: short(cs.multi_prize_count()),
             warp_radius_limit: short(cs.warp_radius_limit()),
         }
@@ -603,6 +607,7 @@ impl ArenaSettings {
         cs.set_prize_max_exist(i16_(self.prize_max_exist));
         cs.set_prize_min_exist(i16_(self.prize_min_exist));
         cs.set_prize_negative_factor(i16_(self.prize_negative_factor));
+        cs.set_death_prize_time(i16_(self.death_prize_time));
         cs.set_multi_prize_count(i16_(self.multi_prize_count));
         cs.set_warp_radius_limit(i16_(self.warp_radius_limit));
         cs.set_send_position_delay(20);

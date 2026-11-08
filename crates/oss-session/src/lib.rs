@@ -199,6 +199,13 @@ pub enum SessionEvent {
     },
     /// The server reset your ship (respawn with initial loadout).
     ShipReset,
+    /// Another player picked up the green on tile (x, y) (S2C `0x08`).
+    GreenTaken {
+        pid: i16,
+        x: i16,
+        y: i16,
+        prize: i16,
+    },
     /// A prize from the server: `count` copies of `prize` (negative = bad).
     PrizeReceived {
         count: i16,
@@ -590,6 +597,12 @@ impl Session {
                 count: p.count,
                 prize: p.prize,
             }),
+            S2CPacket::Green(g) => self.events.push_back(SessionEvent::GreenTaken {
+                pid: g.pid,
+                x: g.x,
+                y: g.y,
+                prize: g.prize,
+            }),
             S2CPacket::KeepAlive(_) => {}
             other => self.events.push_back(SessionEvent::Other(Box::new(other))),
         }
@@ -809,6 +822,24 @@ impl Session {
     /// Asks the server to place a brick at tile (x, y) (C2S `0x1C`).
     pub fn send_brick(&mut self, x: i16, y: i16) {
         self.send(&c2s::DropBrick { x, y }, true);
+    }
+
+    /// Reports that you picked up the green on tile (x, y) (C2S `0x07`). Reliable
+    /// when the arena's `TakePrizeReliable` says so.
+    pub fn send_take_green(&mut self, now_ms: u64, x: u16, y: u16, prize: i32) {
+        let reliable = self
+            .settings()
+            .is_some_and(|cs| cs.take_prize_reliable() != 0);
+        let time = self.server_ticks(now_ms);
+        self.send(
+            &c2s::TakeGreen {
+                time,
+                x: x.min(i16::MAX as u16) as i16,
+                y: y.min(i16::MAX as u16) as i16,
+                prize: prize.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            },
+            reliable,
+        );
     }
 
     /// Reports your death (C2S `0x05`).

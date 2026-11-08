@@ -660,3 +660,103 @@ fn closing_door_moves_ship_out() {
     let p = w.ships[0].pos.pixels();
     assert!(!w.map.box_collides(p.x, p.y, 14));
 }
+
+fn all_doors_world(mode: i32, delay: u32) -> World {
+    let mut cells = vec![0u8; MAP_TILES * MAP_TILES];
+    for k in 0..8 {
+        cells[100 * MAP_TILES + 100 + k] = 162 + k as u8;
+    }
+    let mut settings = bare();
+    settings.door_mode = mode;
+    settings.door_delay = delay;
+    world_with(Some(&cells), settings)
+}
+
+fn door_tiles(w: &World) -> Vec<u8> {
+    (0..8).map(|k| w.map.get(100 + k, 100)).collect()
+}
+
+#[test]
+fn synced_doors_match_between_early_and_late_joiners() {
+    for mode in [-1, -2] {
+        // Both learn the same seed, current at tick 1000; one joined 500 ticks later.
+        let mut early = all_doors_world(mode, 100);
+        early.tick = 1000;
+        early.sync_doors(0x1234_5678, 1000);
+        let mut late = all_doors_world(mode, 100);
+        late.tick = 1500;
+        assert!(late.sync_doors(0x1234_5678, 1000).is_some());
+        for _ in 0..500 {
+            early.step(&[]);
+        }
+        assert_eq!(door_tiles(&early), door_tiles(&late), "mode {mode}");
+        for _ in 0..1234 {
+            early.step(&[]);
+            late.step(&[]);
+            assert_eq!(door_tiles(&early), door_tiles(&late), "mode {mode}");
+        }
+    }
+}
+
+#[test]
+fn door_changes_come_from_the_shared_generator() {
+    let mut w = all_doors_world(-2, 50);
+    w.tick = 70;
+    w.sync_doors(99, 70);
+    let mut rng = VieRng::new(99);
+    let mut changes = Vec::new();
+    for _ in 0..200 {
+        for e in w.step(&[]) {
+            if let Event::DoorsChanged { seed } = e {
+                changes.push((w.tick, seed));
+            }
+        }
+    }
+    let expected: Vec<_> = (1..=4)
+        .map(|i| (70 + 50 * i, rng.next_u32() as u8))
+        .collect();
+    assert_eq!(changes, expected);
+}
+
+#[test]
+fn bad_door_timestamp_does_not_stall() {
+    let mut w = all_doors_world(-1, 1);
+    w.tick = 0x7fff_0000;
+    let start = std::time::Instant::now();
+    assert!(w.sync_doors(5, 0).is_some());
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    // A timestamp in the future just waits.
+    let mut w = all_doors_world(-1, 10);
+    w.tick = 100;
+    assert!(w.sync_doors(5, 500).is_none());
+}
+
+#[test]
+fn death_greens_and_greens_taken_elsewhere() {
+    let mut w = open_world();
+    w.add_ship(0, 0, 0);
+    place(&mut w, 100 * 16, 100 * 16, 0);
+    w.spawn_death_green(512, 512, 3);
+    w.spawn_death_green(600, 600, 4);
+    assert_eq!(w.greens().len(), 2);
+    assert!(w.remove_green_at(600, 600));
+    assert!(!w.remove_green_at(600, 600));
+    // The local ship picks up the death green and reports where it was.
+    place(&mut w, 512 * 16 + 8, 512 * 16 + 8, 0);
+    let ev = w.step(&[]);
+    assert!(ev.contains(&Event::GreenTaken {
+        ship: 0,
+        x: 512,
+        y: 512,
+        prize: 3
+    }));
+    assert!(w.greens().is_empty());
+    // Unpicked death greens expire after DeathPrizeTime.
+    w.spawn_death_green(300, 300, 5);
+    hold(
+        ShipInput::default(),
+        w.settings.death_prize_time + 1,
+        &mut w,
+    );
+    assert!(w.greens().is_empty());
+}

@@ -7,7 +7,7 @@ use std::io::Write;
 use oss_net::{Config, Event, Server, VieAcceptor};
 use oss_proto::common::PlayerData;
 use oss_proto::s2c::{
-    ChatBody, EnteringArena, LoginResponse, MapData, MapFilename, PlayerEntering, PlayerId,
+    ChatBody, EnteringArena, Green, LoginResponse, MapData, MapFilename, PlayerEntering, PlayerId,
     S2CChat, Security,
 };
 use oss_proto::{C2SPacket, ClientSettings, FixedStr, Packet, checksum};
@@ -48,6 +48,7 @@ struct Zone {
     security: Option<oss_proto::c2s::SecurityResponse>,
     positions: Vec<oss_proto::C2SPosition>,
     chats: Vec<String>,
+    greens: Vec<(i16, i16, i16)>,
 }
 
 impl Zone {
@@ -118,6 +119,18 @@ impl Zone {
             }
             C2SPacket::SecurityResponse(r) => self.security = Some(r),
             C2SPacket::Position(p) => self.positions.push(p),
+            C2SPacket::TakeGreen(g) => {
+                self.greens.push((g.x, g.y, g.prize));
+                // Tell the client someone else took one too.
+                let other = Green {
+                    time: g.time,
+                    x: 40,
+                    y: 41,
+                    prize: 3,
+                    pid: 9,
+                };
+                send(server, &|o| other.encode(o));
+            }
             C2SPacket::Chat(c) => {
                 let text = String::from_utf8_lossy(&c.0.text).into_owned();
                 self.chats.push(text.clone());
@@ -199,12 +212,16 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
         }
         if client.state() == State::Playing && !sent_chat {
             client.send_chat(chat_type::PUBLIC, 0, "hello zone");
+            client.send_take_green(now, 512, 513, -7);
             sent_chat = true;
         }
         if zone.positions.len() >= 3
             && events
                 .iter()
                 .any(|e| matches!(e, SessionEvent::Chat { .. }))
+            && events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::GreenTaken { .. }))
         {
             break;
         }
@@ -247,6 +264,13 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
             .all(|w| (w[1].time.wrapping_sub(w[0].time) as i32) > 0)
     );
     assert_eq!(zone.chats, vec!["hello zone".to_string()]);
+    assert_eq!(zone.greens, vec![(512, 513, -7)]);
+    assert!(events.contains(&SessionEvent::GreenTaken {
+        pid: 9,
+        x: 40,
+        y: 41,
+        prize: 3
+    }));
     assert!(events.iter().any(|e| matches!(
         e,
         SessionEvent::Chat { pid: 9, name: Some(n), text, .. } if n == "other" && text == "hi tester"

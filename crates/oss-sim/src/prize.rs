@@ -482,6 +482,36 @@ impl World {
         &self.greens
     }
 
+    /// Restarts the green timer; done when the server sends a new seed so every
+    /// client spawns greens on the same ticks.
+    pub fn reset_green_timer(&mut self) {
+        self.green_ticks = 0;
+    }
+
+    /// Removes the green on tile (x, y), if any (another player took it).
+    pub fn remove_green_at(&mut self, x: u16, y: u16) -> bool {
+        match self.greens.iter().position(|g| g.x == x && g.y == y) {
+            Some(i) => {
+                self.greens.swap_remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Leaves prize `prize` where a ship died (tile coordinates), for `DeathPrizeTime`.
+    pub fn spawn_death_green(&mut self, x: u16, y: u16, prize: i32) {
+        if self.greens.len() >= MAX_GREENS || prize == 0 {
+            return;
+        }
+        self.greens.push(Green {
+            x: x.min(MAP_TILES as u16 - 1),
+            y: y.min(MAP_TILES as u16 - 1),
+            prize,
+            end_tick: self.tick.wrapping_add(self.settings.death_prize_time),
+        });
+    }
+
     /// Pickups, expiry and spawning of greens; runs once per tick.
     pub(crate) fn step_greens(&mut self, events: &mut Vec<Event>) {
         let tick = self.tick;
@@ -508,8 +538,14 @@ impl World {
             }
             removed[gi] = true;
             if self.ships[si].takes_damage {
-                let prize = self.greens[gi].prize;
-                self.apply_prize(si, prize, events);
+                let g = self.greens[gi];
+                events.push(Event::GreenTaken {
+                    ship: self.ships[si].id,
+                    x: g.x,
+                    y: g.y,
+                    prize: g.prize,
+                });
+                self.apply_prize(si, g.prize, events);
             }
         }
         let mut i = 0;
@@ -529,7 +565,7 @@ impl World {
         }
         self.green_ticks = 0;
         let a = &self.settings;
-        let players = self.ships.len() as u32;
+        let players = self.player_count.unwrap_or(self.ships.len() as u32);
         let max_greens = ((a.prize_factor * players) / 1000).min(MAX_GREENS as u32) as usize;
         let extent = (a.minimum_virtual + a.upgrade_virtual * players).clamp(3, MAP_TILES as u32);
         let exist_span = a.prize_max_exist.saturating_sub(a.prize_min_exist);
