@@ -65,6 +65,8 @@ pub struct Options {
     /// Accessibility settings.
     pub palette: crate::game::palette::PaletteKind,
     pub ui_scale: u32,
+    /// Gamepad buttons per action.
+    pub pad: crate::game::input::PadBindings,
     /// `--lvz`: LVZ files to show in the sandbox.
     pub lvz: Vec<PathBuf>,
     /// Player name from the settings file (the login screen's default).
@@ -161,7 +163,8 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
             None
         }
     };
-    let input = InputState::new(options.bindings.clone());
+    let mut input = InputState::new(options.bindings.clone());
+    input.set_pad_bindings(options.pad.clone());
     let mut app = App {
         options,
         dir,
@@ -402,7 +405,10 @@ impl App {
     fn frame(&mut self, event_loop: &ActiveEventLoop, draw: bool) {
         if let Some(g) = self.gilrs.as_mut() {
             while let Some(ev) = g.next_event() {
-                self.input.gamepad(ev.event);
+                let pressed = self.input.gamepad(ev.event);
+                if let (Some(b), Some(ui)) = (pressed, self.settings.as_mut()) {
+                    ui.capture_pad(b);
+                }
             }
         }
         let audio_wanted = !self.options.mute;
@@ -688,6 +694,7 @@ fn current_config(o: &Options) -> crate::config::Config {
             macros: o.macros.clone(),
             palette: o.palette,
             ui_scale: o.ui_scale,
+            pad: o.pad.clone(),
         }
     }
 }
@@ -751,7 +758,9 @@ impl App {
         o.macros = cfg.macros.clone();
         o.palette = cfg.palette;
         o.ui_scale = cfg.ui_scale;
+        o.pad = cfg.pad.clone();
         self.input.set_bindings(cfg.bindings.clone());
+        self.input.set_pad_bindings(cfg.pad.clone());
         if let Some(run) = self.running.as_mut() {
             if cfg.fullscreen != o.fullscreen {
                 run.window.set_fullscreen(

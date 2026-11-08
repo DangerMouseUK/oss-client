@@ -6,7 +6,7 @@
 //! app captures with its modifiers (see [`SettingsUi::capture`]).
 
 use crate::config::Config;
-use crate::game::input::{Action, Binding, Mods};
+use crate::game::input::{Action, Binding, Mods, PadButton};
 
 /// What the screen asks the app to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,8 @@ enum Capture {
     Replace(Action),
     Add(Action),
     Macro,
+    /// The next gamepad button for an action.
+    Pad(Action),
 }
 
 pub struct SettingsUi {
@@ -55,7 +57,22 @@ impl SettingsUi {
 
     /// Waiting for a key press to bind.
     pub fn capturing(&self) -> bool {
-        self.capture.is_some()
+        matches!(
+            self.capture,
+            Some(Capture::Replace(_) | Capture::Add(_) | Capture::Macro)
+        )
+    }
+
+    /// A gamepad button was pressed: binds it if one is being captured. Returns
+    /// whether it was used.
+    pub fn capture_pad(&mut self, button: PadButton) -> bool {
+        let Some(Capture::Pad(a)) = self.capture else {
+            return false;
+        };
+        self.capture = None;
+        self.cfg.pad.set(a, vec![button]);
+        self.status = Some(format!("{} on {}", a.name(), button.name()));
+        true
     }
 
     /// The pressed key (with Shift/Ctrl as held) for the binding being captured.
@@ -64,6 +81,13 @@ impl SettingsUi {
         let Some(what) = self.capture.take() else {
             return;
         };
+        if let Capture::Pad(_) = what {
+            // Escape cancels a gamepad capture; other keys are ignored.
+            if key != winit::keyboard::KeyCode::Escape {
+                self.capture = Some(what);
+            }
+            return;
+        }
         if key == winit::keyboard::KeyCode::Escape {
             self.status = Some("Cancelled".into());
             return;
@@ -85,6 +109,7 @@ impl SettingsUi {
             Capture::Replace(a) => self.cfg.bindings.set(a, vec![b]),
             Capture::Add(a) => self.cfg.bindings.add(a, b),
             Capture::Macro => self.cfg.macros.push((b, String::new())),
+            Capture::Pad(_) => {}
         }
         self.status = Some(format!("Bound {}", binding_label(&b)));
     }
@@ -103,13 +128,14 @@ impl SettingsUi {
                     .show(ui, |ui| self.sections(ui));
                 ui.separator();
                 if let Some(c) = self.capture {
-                    let what = match c {
-                        Capture::Replace(a) | Capture::Add(a) => a.name().to_string(),
-                        Capture::Macro => "a new macro".into(),
+                    let (device, what) = match c {
+                        Capture::Replace(a) | Capture::Add(a) => ("a key", a.name().to_string()),
+                        Capture::Macro => ("a key", "a new macro".into()),
+                        Capture::Pad(a) => ("a gamepad button", a.name().to_string()),
                     };
                     ui.colored_label(
                         egui::Color32::YELLOW,
-                        format!("Press a key for {what} (Esc cancels)"),
+                        format!("Press {device} for {what} (Esc cancels)"),
                     );
                 }
                 ui.horizontal(|ui| {
@@ -195,6 +221,30 @@ impl SettingsUi {
             });
             if ui.button("Restore Continuum defaults").clicked() {
                 self.cfg.bindings = Default::default();
+            }
+        });
+        egui::CollapsingHeader::new("Gamepad").show(ui, |ui| {
+            ui.label("The left stick always steers and thrusts.");
+            egui::Grid::new("pad").striped(true).show(ui, |ui| {
+                for a in Action::ALL {
+                    ui.label(a.name());
+                    let buttons: Vec<&str> = self.cfg.pad.get(a).iter().map(|b| b.name()).collect();
+                    ui.label(if buttons.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        buttons.join(", ")
+                    });
+                    if ui.small_button("Change").clicked() {
+                        self.capture = Some(Capture::Pad(a));
+                    }
+                    if ui.small_button("Clear").clicked() {
+                        self.cfg.pad.set(a, Vec::new());
+                    }
+                    ui.end_row();
+                }
+            });
+            if ui.button("Restore default gamepad layout").clicked() {
+                self.cfg.pad = Default::default();
             }
         });
         egui::CollapsingHeader::new("Macros").show(ui, |ui| {

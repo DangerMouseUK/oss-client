@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use winit::keyboard::KeyCode;
 
-use crate::game::input::{Action, Binding, Bindings, Mods};
+use crate::game::input::{Action, Binding, Bindings, Mods, PadBindings, PadButton};
 
 pub const FILE_NAME: &str = "oss-client.ini";
 
@@ -38,6 +38,8 @@ pub struct Config {
     /// Accessibility: colour palette, and extra integer scale for the interface.
     pub palette: crate::game::palette::PaletteKind,
     pub ui_scale: u32,
+    /// Gamepad buttons per action (the left stick always steers).
+    pub pad: PadBindings,
 }
 
 impl Default for Config {
@@ -53,6 +55,7 @@ impl Default for Config {
             macros: Vec::new(),
             palette: Default::default(),
             ui_scale: 0,
+            pad: PadBindings::default(),
         }
     }
 }
@@ -144,6 +147,18 @@ impl Config {
                         }
                     })
                 }
+                ("gamepad", action) => match Action::from_name(action) {
+                    Some(a) => value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|b| !b.is_empty())
+                        .map(|b| {
+                            PadButton::from_name(b).ok_or_else(|| format!("unknown button `{b}`"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|buttons| c.pad.set(a, buttons)),
+                    None => Err(format!("unknown action `{action}`")),
+                },
                 ("keys", action) => match Action::from_name(action) {
                     Some(a) => parse_bindings(value).map(|b| c.bindings.set(a, b)),
                     None => Err(format!("unknown action `{action}`")),
@@ -194,6 +209,15 @@ impl Config {
         for a in Action::ALL {
             let keys: Vec<String> = self.bindings.get(a).iter().map(binding_name).collect();
             s += &format!("{} = {}\n", a.name(), keys.join(", "));
+        }
+        s += "\n[gamepad]\n\
+              ; action = buttons: south east west north l1 r1 l2 r2 l3 r3 select start\n\
+              ; dpad_up dpad_down dpad_left dpad_right. The left stick always steers.\n";
+        for a in Action::ALL {
+            let buttons: Vec<&str> = self.pad.get(a).iter().map(|b| b.name()).collect();
+            if !buttons.is_empty() {
+                s += &format!("{} = {}\n", a.name(), buttons.join(", "));
+            }
         }
         s += "\n[macros]\n\
               ; key = chat line, sent when the key is pressed (not while typing). Same keys\n\
@@ -398,6 +422,11 @@ mod tests {
             name: Some("Pilot One".into()),
             palette: crate::game::palette::PaletteKind::Tritanopia,
             ui_scale: 2,
+            pad: {
+                let mut p = PadBindings::default();
+                p.set(Action::Gun, vec![PadButton::R2, PadButton::South]);
+                p
+            },
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);

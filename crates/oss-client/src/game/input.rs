@@ -263,24 +263,162 @@ fn mods_match(mods: Mods, shift: bool, ctrl: bool, key: KeyCode) -> bool {
     }
 }
 
+/// Gamepad buttons, by their position on a standard pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PadButton {
+    South,
+    East,
+    West,
+    North,
+    L1,
+    R1,
+    L2,
+    R2,
+    L3,
+    R3,
+    Select,
+    Start,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+}
+
+impl PadButton {
+    pub const ALL: [PadButton; 16] = [
+        PadButton::South,
+        PadButton::East,
+        PadButton::West,
+        PadButton::North,
+        PadButton::L1,
+        PadButton::R1,
+        PadButton::L2,
+        PadButton::R2,
+        PadButton::L3,
+        PadButton::R3,
+        PadButton::Select,
+        PadButton::Start,
+        PadButton::DPadUp,
+        PadButton::DPadDown,
+        PadButton::DPadLeft,
+        PadButton::DPadRight,
+    ];
+
+    /// Name in the settings file.
+    pub fn name(self) -> &'static str {
+        match self {
+            PadButton::South => "south",
+            PadButton::East => "east",
+            PadButton::West => "west",
+            PadButton::North => "north",
+            PadButton::L1 => "l1",
+            PadButton::R1 => "r1",
+            PadButton::L2 => "l2",
+            PadButton::R2 => "r2",
+            PadButton::L3 => "l3",
+            PadButton::R3 => "r3",
+            PadButton::Select => "select",
+            PadButton::Start => "start",
+            PadButton::DPadUp => "dpad_up",
+            PadButton::DPadDown => "dpad_down",
+            PadButton::DPadLeft => "dpad_left",
+            PadButton::DPadRight => "dpad_right",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|b| b.name().eq_ignore_ascii_case(s))
+    }
+
+    pub fn from_gilrs(b: gilrs::Button) -> Option<Self> {
+        use gilrs::Button as B;
+        Some(match b {
+            B::South => PadButton::South,
+            B::East => PadButton::East,
+            B::West => PadButton::West,
+            B::North => PadButton::North,
+            B::LeftTrigger => PadButton::L1,
+            B::RightTrigger => PadButton::R1,
+            B::LeftTrigger2 => PadButton::L2,
+            B::RightTrigger2 => PadButton::R2,
+            B::LeftThumb => PadButton::L3,
+            B::RightThumb => PadButton::R3,
+            B::Select => PadButton::Select,
+            B::Start => PadButton::Start,
+            B::DPadUp => PadButton::DPadUp,
+            B::DPadDown => PadButton::DPadDown,
+            B::DPadLeft => PadButton::DPadLeft,
+            B::DPadRight => PadButton::DPadRight,
+            _ => return None,
+        })
+    }
+}
+
+/// Action → gamepad buttons. The left stick always steers and thrusts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PadBindings {
+    map: HashMap<Action, Vec<PadButton>>,
+}
+
+impl Default for PadBindings {
+    fn default() -> Self {
+        use PadButton::*;
+        let table: &[(Action, PadButton)] = &[
+            (Action::Left, DPadLeft),
+            (Action::Right, DPadRight),
+            (Action::Forward, DPadUp),
+            (Action::Backward, DPadDown),
+            (Action::Forward, R2),
+            (Action::Backward, L2),
+            (Action::Afterburner, L1),
+            (Action::Afterburner, R1),
+            (Action::Gun, South),
+            (Action::Bomb, East),
+            (Action::Mine, West),
+            (Action::Multifire, North),
+            (Action::Warp, Select),
+            (Action::Menu, Start),
+        ];
+        let mut b = Self {
+            map: HashMap::new(),
+        };
+        for &(a, button) in table {
+            b.map.entry(a).or_default().push(button);
+        }
+        b
+    }
+}
+
+impl PadBindings {
+    pub fn get(&self, action: Action) -> &[PadButton] {
+        self.map.get(&action).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn set(&mut self, action: Action, buttons: Vec<PadButton>) {
+        self.map.insert(action, buttons);
+    }
+
+    /// Actions a button drives.
+    fn actions(&self, button: PadButton) -> impl Iterator<Item = Action> + '_ {
+        Action::ALL
+            .into_iter()
+            .filter(move |a| self.get(*a).contains(&button))
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct PadState {
     stick_x: f32,
     stick_y: f32,
-    dpad_left: bool,
-    dpad_right: bool,
-    dpad_up: bool,
-    dpad_down: bool,
-    thrust: bool,
-    reverse: bool,
-    afterburner: bool,
-    gun: bool,
-    bomb: bool,
-    mine: bool,
 }
 
 pub struct InputState {
     pub bindings: Bindings,
+    pub pad_bindings: PadBindings,
+    /// Gamepad buttons held.
+    pad_held: HashSet<PadButton>,
     held: HashSet<KeyCode>,
     /// Actions whose key went down since the last tick (edge-triggered actions).
     edges: Vec<Action>,
@@ -307,6 +445,8 @@ impl InputState {
     pub fn new(bindings: Bindings) -> Self {
         Self {
             bindings,
+            pad_bindings: PadBindings::default(),
+            pad_held: HashSet::new(),
             held: HashSet::new(),
             edges: Vec::new(),
             pressed: Vec::new(),
@@ -364,6 +504,11 @@ impl InputState {
             .get(action)
             .iter()
             .any(|b| self.held(b.key) && mods_match(b.mods, shift, ctrl, b.key))
+            || self
+                .pad_bindings
+                .get(action)
+                .iter()
+                .any(|b| self.pad_held.contains(b))
     }
 
     /// Takes the raw key presses since the last call.
@@ -382,17 +527,14 @@ impl InputState {
         let h = |a| self.action_held(a);
         let e = |a| edges.contains(&a);
         ShipInput {
-            forward: h(Action::Forward) || pad.thrust || pad.dpad_up || pad.stick_y < -DEAD_ZONE,
-            backward: h(Action::Backward)
-                || pad.reverse
-                || pad.dpad_down
-                || pad.stick_y > DEAD_ZONE,
-            left: h(Action::Left) || pad.dpad_left || pad.stick_x < -DEAD_ZONE,
-            right: h(Action::Right) || pad.dpad_right || pad.stick_x > DEAD_ZONE,
-            afterburner: h(Action::Afterburner) || pad.afterburner,
-            gun: h(Action::Gun) || pad.gun,
-            bomb: h(Action::Bomb) || pad.bomb,
-            mine: h(Action::Mine) || pad.mine,
+            forward: h(Action::Forward) || pad.stick_y < -DEAD_ZONE,
+            backward: h(Action::Backward) || pad.stick_y > DEAD_ZONE,
+            left: h(Action::Left) || pad.stick_x < -DEAD_ZONE,
+            right: h(Action::Right) || pad.stick_x > DEAD_ZONE,
+            afterburner: h(Action::Afterburner),
+            gun: h(Action::Gun),
+            bomb: h(Action::Bomb),
+            mine: h(Action::Mine),
             repel: h(Action::Repel),
             burst: h(Action::Burst),
             thor: h(Action::Thor),
@@ -421,35 +563,46 @@ impl InputState {
     }
 
     /// Applies one gamepad event.
-    pub fn gamepad(&mut self, event: gilrs::EventType) {
-        use gilrs::{Axis, Button, EventType};
-        let p = &mut self.pad;
+    /// Applies a gamepad event. Returns the button pressed, if any (the settings
+    /// screen uses it to rebind).
+    pub fn gamepad(&mut self, event: gilrs::EventType) -> Option<PadButton> {
+        use gilrs::{Axis, EventType};
         match event {
             EventType::ButtonChanged(button, value, _) => {
-                let down = value > 0.5;
-                match button {
-                    Button::DPadLeft => p.dpad_left = down,
-                    Button::DPadRight => p.dpad_right = down,
-                    Button::DPadUp => p.dpad_up = down,
-                    Button::DPadDown => p.dpad_down = down,
-                    Button::RightTrigger2 => p.thrust = down,
-                    Button::LeftTrigger2 => p.reverse = down,
-                    Button::LeftTrigger | Button::RightTrigger => p.afterburner = down,
-                    Button::South => p.gun = down,
-                    Button::East => p.bomb = down,
-                    Button::West => p.mine = down,
-                    Button::North if down => self.edges.push(Action::Multifire),
-                    Button::Select if down => self.edges.push(Action::Warp),
-                    Button::Start if down => self.edges.push(Action::Menu),
-                    _ => {}
-                }
+                return self.pad_button(PadButton::from_gilrs(button)?, value > 0.5);
             }
-            EventType::AxisChanged(Axis::LeftStickX, v, _) => p.stick_x = v,
+            EventType::AxisChanged(Axis::LeftStickX, v, _) => self.pad.stick_x = v,
             // gilrs reports up as positive; screen up is negative.
-            EventType::AxisChanged(Axis::LeftStickY, v, _) => p.stick_y = -v,
-            EventType::Disconnected => self.pad = PadState::default(),
+            EventType::AxisChanged(Axis::LeftStickY, v, _) => self.pad.stick_y = -v,
+            EventType::Disconnected => {
+                self.pad = PadState::default();
+                self.pad_held.clear();
+            }
             _ => {}
         }
+        None
+    }
+
+    /// A gamepad button went down or up; returns it when newly pressed.
+    pub fn pad_button(&mut self, b: PadButton, down: bool) -> Option<PadButton> {
+        let was = self.pad_held.contains(&b);
+        if down {
+            self.pad_held.insert(b);
+        } else {
+            self.pad_held.remove(&b);
+        }
+        if down && !was {
+            let actions: Vec<Action> = self.pad_bindings.actions(b).collect();
+            self.edges.extend(actions);
+            return Some(b);
+        }
+        None
+    }
+
+    /// Replaces the gamepad button table.
+    pub fn set_pad_bindings(&mut self, bindings: PadBindings) {
+        self.pad_bindings = bindings;
+        self.pad_held.clear();
     }
 }
 
@@ -473,6 +626,36 @@ mod tests {
         i.key(KeyCode::ShiftLeft, true);
         i.key(KeyCode::ArrowUp, true);
         assert!(i.ship_input(&[]).forward);
+    }
+
+    #[test]
+    fn gamepad_buttons_follow_the_pad_table() {
+        use PadButton as P;
+        let mut i = InputState::default();
+        // Defaults: south fires guns, north toggles multifire (an edge).
+        assert_eq!(i.pad_button(P::South, true), Some(P::South));
+        assert_eq!(
+            i.pad_button(P::South, true),
+            None,
+            "held, not pressed again"
+        );
+        assert!(i.ship_input(&[]).gun);
+        i.pad_button(P::North, true);
+        assert!(i.take_edges().contains(&Action::Multifire));
+        i.pad_button(P::South, false);
+        assert!(!i.ship_input(&[]).gun);
+        // Remapped: east fires guns, south does nothing.
+        let mut pad = PadBindings::default();
+        pad.set(Action::Gun, vec![PadButton::East]);
+        pad.set(Action::Bomb, vec![]);
+        i.set_pad_bindings(pad);
+        i.pad_button(P::South, true);
+        assert!(!i.ship_input(&[]).gun);
+        i.pad_button(P::East, true);
+        let input = i.ship_input(&[]);
+        assert!(input.gun && !input.bomb);
+        assert_eq!(P::from_name("DPAD_UP"), Some(P::DPadUp));
+        assert_eq!(P::from_gilrs(gilrs::Button::LeftTrigger2), Some(P::L2));
     }
 
     #[test]
