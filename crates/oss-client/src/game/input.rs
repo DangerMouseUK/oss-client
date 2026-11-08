@@ -53,10 +53,12 @@ pub enum Action {
     Attach,
     /// Shake off ships attached to you.
     DetachTurrets,
+    /// Save a screenshot.
+    Screenshot,
 }
 
 impl Action {
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 32] = [
         Action::Forward,
         Action::Backward,
         Action::Left,
@@ -88,6 +90,7 @@ impl Action {
         Action::ZoomOut,
         Action::Attach,
         Action::DetachTurrets,
+        Action::Screenshot,
     ];
 
     /// Name used in the config file.
@@ -124,6 +127,7 @@ impl Action {
             Action::ZoomOut => "zoom_out",
             Action::Attach => "attach",
             Action::DetachTurrets => "detach_turrets",
+            Action::Screenshot => "screenshot",
         }
     }
 
@@ -200,6 +204,8 @@ impl Default for Bindings {
             (Action::ZoomOut, K::NumpadSubtract, Ctrl),
             (Action::Attach, K::F7, None),
             (Action::DetachTurrets, K::F7, Ctrl),
+            (Action::Screenshot, K::PrintScreen, Any),
+            (Action::Screenshot, K::F11, Any),
         ];
         let mut b = Bindings {
             map: HashMap::new(),

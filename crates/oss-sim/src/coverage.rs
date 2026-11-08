@@ -162,7 +162,10 @@ pub const COVERAGE: &[(&str, Use)] = &[
     ),
     (
         "Misc:DisableScreenshot",
-        Use::NotYet("in-game screenshot key (planned)"),
+        Use::Client(
+            "crates/oss-client/src/game/sandbox.rs",
+            "disable_screenshot()",
+        ),
     ),
     (
         "Misc:ExtraPositionData",

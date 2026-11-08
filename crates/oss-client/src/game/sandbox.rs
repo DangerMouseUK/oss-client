@@ -138,6 +138,8 @@ pub struct Sandbox {
     pub quit: bool,
     /// The player chose Options in the menu; the app opens the settings screen.
     pub open_settings: bool,
+    /// The player asked for a screenshot; the app saves the next frame.
+    pub screenshot_request: bool,
     /// Integer pixel scale (game pixel → physical pixels).
     pub scale: u32,
     audio: Option<Audio>,
@@ -356,6 +358,7 @@ impl Sandbox {
             fps: FpsCounter::default(),
             quit: false,
             open_settings: false,
+            screenshot_request: false,
             scale: scale.max(1),
             audio,
             net,
@@ -793,6 +796,19 @@ impl Sandbox {
         for e in edges.iter() {
             match e {
                 Action::ShowFps => self.show_fps = !self.show_fps,
+                Action::Screenshot => {
+                    // Misc:DisableScreenshot: the arena forbids them.
+                    let forbidden = self
+                        .net
+                        .as_ref()
+                        .and_then(|n| n.session.settings())
+                        .is_some_and(|s| s.disable_screenshot() != 0);
+                    if forbidden {
+                        self.message("This arena doesn't allow screenshots.", color::YELLOW);
+                    } else {
+                        self.screenshot_request = true;
+                    }
+                }
                 Action::StatBox => self.statbox.cycle(),
                 Action::Attach => self.toggle_attach(),
                 Action::DetachTurrets => {
@@ -1981,7 +1997,8 @@ impl Sandbox {
             "Shift+End antiwarp, F3 rocket, F4 brick, F5 decoy,",
             "F6 thor, Alt big radar, Ctrl +/- scale, F12 fps",
             "F2 stat box, PgUp/PgDn select, /text to selected,",
-            "F7 attach to selected (again: detach), Ctrl+F7 shake off",
+            "F7 attach to selected (again: detach), Ctrl+F7 shake off,",
+            "Print Screen or F11 saves a screenshot",
         ]);
         let w = 54.0 * 8.0;
         let h = lines.len() as f32 * 14.0 + 16.0;

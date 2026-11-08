@@ -4,7 +4,7 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 
 | Read | Client code | Server only | Not yet | Not settings |
 |---|---|---|---|---|
-| 171 | 17 | 8 | 33 | 9 |
+| 171 | 18 | 8 | 32 | 9 |
 
 ## Not used yet
 
@@ -24,7 +24,6 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 | `Misc:ActivateAppShutdownTime` | engine shutdown after switching back to the game |
 | `Misc:AllowSavedShips` | saved-ship option |
 | `Misc:DisableBallKilling` | ball-killing rule |
-| `Misc:DisableScreenshot` | in-game screenshot key (planned) |
 | `Misc:ExtraPositionData` | sending extra position data |
 | `Misc:FrequencyShift` | meaning not confirmed |
 | `Misc:MaxTimerDrift` | timer drift check (anti-cheat) |
@@ -97,6 +96,7 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 | `Misc:BounceFactor` | `bounce_factor` |
 | `Misc:DecoyAliveTime` | `decoy_alive_time` |
 | `Misc:DisableBallThroughWalls` | `disable_ball_through_walls` |
+| `Misc:DisableScreenshot` | `disable_screenshot()` in `crates/oss-client/src/game/sandbox.rs` |
 | `Misc:SendPositionDelay` | `send_position_delay()` in `crates/oss-session/src/lib.rs` |
 | `Misc:WarpPointDelay` | `warp_point_delay` |
 | `Misc:WarpRadiusLimit` | `warp_radius_limit` |
