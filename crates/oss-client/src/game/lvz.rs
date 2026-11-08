@@ -333,8 +333,17 @@ impl Lvz {
         self.objects.iter().filter(|o| o.shown_at.is_some())
     }
 
-    /// Draws the visible objects on `layer`.
-    pub fn draw(&self, layer: u8, c: &Canvas, r: &mut Renderer, clock: f32, refs: &ScreenRefs) {
+    /// Draws the visible objects on `layer`: map objects on the world canvas `c`,
+    /// screen objects on the interface canvas `ui`.
+    pub fn draw(
+        &self,
+        layer: u8,
+        c: &Canvas,
+        ui: &Canvas,
+        r: &mut Renderer,
+        clock: f32,
+        refs: &ScreenRefs,
+    ) {
         for o in self.shown().filter(|o| o.layer == layer) {
             let Some(img) = self.images.get(o.image) else {
                 continue;
@@ -357,7 +366,7 @@ impl Lvz {
             } else {
                 let rx = refs.get(o.x_ref as usize).map_or(0.0, |p| p.0);
                 let ry = refs.get(o.y_ref as usize).map_or(0.0, |p| p.1);
-                c.ui_tex(
+                ui.ui_tex(
                     r,
                     texture,
                     region,

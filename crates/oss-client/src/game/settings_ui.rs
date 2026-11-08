@@ -147,6 +147,21 @@ impl SettingsUi {
                 ui.checkbox(&mut self.cfg.mute, "Mute (applies next start)");
                 ui.add(egui::Slider::new(&mut self.cfg.volume, 0..=100).text("volume"));
             });
+        egui::CollapsingHeader::new("Accessibility")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ComboBox::from_label("colour palette")
+                    .selected_text(self.cfg.palette.name())
+                    .show_ui(ui, |ui| {
+                        for p in crate::game::palette::PaletteKind::ALL {
+                            ui.selectable_value(&mut self.cfg.palette, p, p.name());
+                        }
+                    });
+                ui.add(
+                    egui::Slider::new(&mut self.cfg.ui_scale, 0..=4)
+                        .text("larger interface (text, HUD)"),
+                );
+            });
         egui::CollapsingHeader::new("Player")
             .default_open(true)
             .show(ui, |ui| {

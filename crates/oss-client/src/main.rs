@@ -186,6 +186,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             settings_path: None,
             open_settings,
             macros: Vec::new(),
+            palette: Default::default(),
+            ui_scale: 0,
             lvz,
             player_name: None,
             login_file: None,
@@ -232,6 +234,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         settings_path: None,
         open_settings,
         macros: Vec::new(),
+        palette: Default::default(),
+        ui_scale: 0,
         lvz,
         player_name: None,
         login_file: None,
@@ -268,6 +272,8 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     opts.volume = cfg.volume;
     opts.bindings = cfg.bindings;
     opts.macros = cfg.macros;
+    opts.palette = cfg.palette;
+    opts.ui_scale = cfg.ui_scale;
     opts.player_name = cfg.name.clone();
     if let app::Mode::Zone(z) = &mut opts.mode
         && z.name.is_empty()

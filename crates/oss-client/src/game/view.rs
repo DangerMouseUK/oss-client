@@ -34,6 +34,9 @@ pub struct Canvas {
     /// View size in game pixels.
     pub view_w: f32,
     pub view_h: f32,
+    /// Text colours from an accessibility palette (tinting the font's white row);
+    /// `None` uses the font's own coloured rows.
+    pub tints: Option<[[f32; 4]; 8]>,
 }
 
 impl Canvas {
@@ -58,6 +61,7 @@ impl Canvas {
             ),
             view_w: screen.0 as f32 / scale,
             view_h: screen.1 as f32 / scale,
+            tints: None,
         }
     }
 
@@ -177,8 +181,12 @@ impl Canvas {
             if !(32..128).contains(&c) {
                 continue;
             }
-            let glyph = self.font.frame(8, 12, (color % 8) * 96 + (c - 32));
-            self.ui(r, glyph, x + i as f32 * 8.0, y, None, [1.0; 4]);
+            let (row, tint) = match self.tints {
+                Some(t) => (0, t[(color % 8) as usize]),
+                None => (color % 8, [1.0; 4]),
+            };
+            let glyph = self.font.frame(8, 12, row * 96 + (c - 32));
+            self.ui(r, glyph, x + i as f32 * 8.0, y, None, tint);
         }
     }
 
@@ -217,7 +225,7 @@ pub fn lerp_direction(prev: u32, cur: u32, t: f32) -> u8 {
 }
 
 /// Draws everything in world space.
-pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
+pub fn draw_world(s: &Sandbox, c: &Canvas, ui: &Canvas, r: &mut Renderer, alpha: f32) {
     let a = &s.art;
     let t = s.clock;
     let world = &s.world;
@@ -225,7 +233,7 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
 
     // LVZ below everything (the starfield is drawn separately, underneath).
     for layer in [layer::BELOW_ALL, layer::AFTER_BACKGROUND] {
-        s.lvz.draw(layer, c, r, t, &s.screen_refs);
+        s.lvz.draw(layer, c, ui, r, t, &s.screen_refs);
     }
 
     // --- Tiles -------------------------------------------------------------------------
@@ -319,7 +327,7 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         c.world(r, region, (f.x * 16) as f32, (f.y * 16) as f32);
     }
 
-    s.lvz.draw(layer::AFTER_TILES, c, r, t, &s.screen_refs);
+    s.lvz.draw(layer::AFTER_TILES, c, ui, r, t, &s.screen_refs);
 
     // --- Greens ------------------------------------------------------------------------
     let prize_frames = a.prizes.frame_count(16, 16);
@@ -422,7 +430,8 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         }
     }
 
-    s.lvz.draw(layer::AFTER_WEAPONS, c, r, t, &s.screen_refs);
+    s.lvz
+        .draw(layer::AFTER_WEAPONS, c, ui, r, t, &s.screen_refs);
 
     // --- Exhaust (under ships) -----------------------------------------------------------
     for e in s
@@ -508,5 +517,5 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         }
     }
 
-    s.lvz.draw(layer::AFTER_SHIPS, c, r, t, &s.screen_refs);
+    s.lvz.draw(layer::AFTER_SHIPS, c, ui, r, t, &s.screen_refs);
 }

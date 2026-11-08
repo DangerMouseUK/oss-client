@@ -62,6 +62,9 @@ pub struct Options {
     pub open_settings: bool,
     /// Macro keys from the settings file.
     pub macros: Vec<(crate::game::input::Binding, String)>,
+    /// Accessibility settings.
+    pub palette: crate::game::palette::PaletteKind,
+    pub ui_scale: u32,
     /// `--lvz`: LVZ files to show in the sandbox.
     pub lvz: Vec<PathBuf>,
     /// Player name from the settings file (the login screen's default).
@@ -243,6 +246,8 @@ impl ApplicationHandler for App {
                             }
                         }
                         s.macros = self.options.macros.clone();
+                        s.palette = self.options.palette;
+                        s.ui_scale_extra = self.options.ui_scale;
                         Screen::Game(Box::new(s))
                     }
                     Err(e) => return self.fail(event_loop, e),
@@ -427,6 +432,8 @@ impl App {
                     match Sandbox::new(&mut run.renderer, &self.dir, &level, 0, run.scale, audio) {
                         Ok(mut s) => {
                             s.macros = self.options.macros.clone();
+                            s.palette = self.options.palette;
+                            s.ui_scale_extra = self.options.ui_scale;
                             run.screen = Screen::Game(Box::new(s));
                         }
                         Err(e) => return self.fail(event_loop, e),
@@ -508,6 +515,8 @@ impl App {
                 Ok(mut s) => {
                     s.aim_bot = self.options.autopilot;
                     s.macros = self.options.macros.clone();
+                    s.palette = self.options.palette;
+                    s.ui_scale_extra = self.options.ui_scale;
                     run.screen = Screen::Game(Box::new(s));
                 }
                 Err(e) => return self.fail(event_loop, e),
@@ -677,6 +686,8 @@ fn current_config(o: &Options) -> crate::config::Config {
             name: o.player_name.clone(),
             bindings: o.bindings.clone(),
             macros: o.macros.clone(),
+            palette: o.palette,
+            ui_scale: o.ui_scale,
         }
     }
 }
@@ -738,6 +749,8 @@ impl App {
         o.player_name = cfg.name.clone();
         o.bindings = cfg.bindings.clone();
         o.macros = cfg.macros.clone();
+        o.palette = cfg.palette;
+        o.ui_scale = cfg.ui_scale;
         self.input.set_bindings(cfg.bindings.clone());
         if let Some(run) = self.running.as_mut() {
             if cfg.fullscreen != o.fullscreen {
@@ -750,7 +763,13 @@ impl App {
                 run.scale = s;
             }
             if let Screen::Game(game) = &mut run.screen {
-                game.apply_settings(cfg.scale, cfg.volume, cfg.macros.clone());
+                game.apply_settings(
+                    cfg.scale,
+                    cfg.volume,
+                    cfg.macros.clone(),
+                    cfg.palette,
+                    cfg.ui_scale,
+                );
             }
         }
         self.options.fullscreen = cfg.fullscreen;

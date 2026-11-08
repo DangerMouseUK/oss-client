@@ -35,6 +35,9 @@ pub struct Config {
     pub bindings: Bindings,
     /// Macro keys: binding and the chat line they send.
     pub macros: Vec<(Binding, String)>,
+    /// Accessibility: colour palette, and extra integer scale for the interface.
+    pub palette: crate::game::palette::PaletteKind,
+    pub ui_scale: u32,
 }
 
 impl Default for Config {
@@ -48,6 +51,8 @@ impl Default for Config {
             name: None,
             bindings: Bindings::default(),
             macros: Vec::new(),
+            palette: Default::default(),
+            ui_scale: 0,
         }
     }
 }
@@ -122,6 +127,10 @@ impl Config {
                 ("video", "fullscreen") => flag(value).map(|b| c.fullscreen = b),
                 ("audio", "mute") => flag(value).map(|b| c.mute = b),
                 ("audio", "volume") => number(value, 0, 100).map(|n| c.volume = n),
+                ("accessibility", "palette") => crate::game::palette::PaletteKind::from_name(value)
+                    .map(|p| c.palette = p)
+                    .ok_or_else(|| format!("unknown palette `{value}`")),
+                ("accessibility", "ui_scale") => number(value, 0, 4).map(|n| c.ui_scale = n),
                 ("player", "name") => {
                     c.name = (!value.is_empty()).then(|| value.to_string());
                     Ok(())
@@ -165,6 +174,13 @@ impl Config {
         s += &format!(
             "[audio]\nmute = {}\nvolume = {}         ; 0-100\n\n",
             self.mute, self.volume
+        );
+        s += &format!(
+            "[accessibility]\n\
+             palette = {}  ; standard, deuteranopia, protanopia, tritanopia, high_contrast\n\
+             ui_scale = {}        ; 0-4: draw the interface (text, HUD) this much larger\n\n",
+            self.palette.name(),
+            self.ui_scale
         );
         s += &format!(
             "[player]\nname = {}\n\n",
@@ -380,6 +396,8 @@ mod tests {
             mute: true,
             volume: 25,
             name: Some("Pilot One".into()),
+            palette: crate::game::palette::PaletteKind::Tritanopia,
+            ui_scale: 2,
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);

@@ -112,6 +112,9 @@ pub struct Sandbox {
     completing: Option<(String, usize)>,
     /// Macro keys: binding and the line they send.
     pub macros: Vec<(super::input::Binding, String)>,
+    /// Accessibility: colour palette and extra interface scale.
+    pub palette: super::palette::PaletteKind,
+    pub ui_scale_extra: u32,
     /// The ship you're attached to as a turret.
     attached_to: Option<u16>,
     /// Players wearing a crown (king of the hill).
@@ -337,6 +340,8 @@ impl Sandbox {
             last_private: None,
             completing: None,
             macros: Vec::new(),
+            palette: Default::default(),
+            ui_scale_extra: 0,
             crowned: Default::default(),
             crown_deadline: None,
             ball_rules: net
@@ -1418,7 +1423,11 @@ impl Sandbox {
         scale: Option<u32>,
         volume: u32,
         macros: Vec<(super::input::Binding, String)>,
+        palette: super::palette::PaletteKind,
+        ui_scale_extra: u32,
     ) {
+        self.palette = palette;
+        self.ui_scale_extra = ui_scale_extra.min(4);
         if let Some(s) = scale {
             self.scale = s.clamp(1, 8);
         }
@@ -1818,26 +1827,36 @@ impl Sandbox {
     pub fn draw(&mut self, r: &mut Renderer) -> StarParams {
         let alpha = self.acc.as_secs_f32() / TICK.as_secs_f32();
         let cam = self.camera(alpha);
-        let c = Canvas::new(&self.art, self.atlas, r.size(), self.scale, cam);
+        let tints = self.palette.text_tints();
+        let mut c = Canvas::new(&self.art, self.atlas, r.size(), self.scale, cam);
+        c.tints = tints;
+        // The interface (HUD, text, stat box, LVZ screen objects) can be drawn larger
+        // than the world for readability.
+        let mut ui = Canvas::new(
+            &self.art,
+            self.atlas,
+            r.size(),
+            self.scale + self.ui_scale_extra,
+            cam,
+        );
+        ui.tints = tints;
         self.lvz.upload(r);
         if self.lvz.art_changed {
             self.lvz.art_changed = false;
             self.rebuild_art(r);
         }
-        let chat_top = c.view_h - 16.0 - LOG_LINES as f32 * 12.0;
-        self.screen_refs = hud::screen_refs(&c, self.statbox_corner, chat_top, self.spectating);
-        view::draw_world(self, &c, r, alpha);
-        hud::draw(self, &c, r);
-        self.lvz
-            .draw(layer::AFTER_GAUGES, &c, r, self.clock, &self.screen_refs);
-        self.draw_statbox(&c, r);
-        self.draw_log(&c, r);
-        self.lvz
-            .draw(layer::AFTER_CHAT, &c, r, self.clock, &self.screen_refs);
-        self.lvz
-            .draw(layer::TOP_MOST, &c, r, self.clock, &self.screen_refs);
+        let chat_top = ui.view_h - 16.0 - LOG_LINES as f32 * 12.0;
+        self.screen_refs = hud::screen_refs(&ui, self.statbox_corner, chat_top, self.spectating);
+        view::draw_world(self, &c, &ui, r, alpha);
+        hud::draw(self, &ui, r);
+        let (clock, refs) = (self.clock, self.screen_refs);
+        self.lvz.draw(layer::AFTER_GAUGES, &c, &ui, r, clock, &refs);
+        self.draw_statbox(&ui, r);
+        self.draw_log(&ui, r);
+        self.lvz.draw(layer::AFTER_CHAT, &c, &ui, r, clock, &refs);
+        self.lvz.draw(layer::TOP_MOST, &c, &ui, r, clock, &refs);
         if self.menu {
-            self.draw_menu(&c, r);
+            self.draw_menu(&ui, r);
         }
         StarParams {
             camera: [cam.0, cam.1],

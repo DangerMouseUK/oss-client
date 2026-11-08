@@ -443,12 +443,13 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
             continue;
         }
         let (x, y) = ship.pos.to_f32();
+        let marks = s.palette.marks();
         let rgba = if s.radar_flagger(ship.id) {
-            [1.0, 0.25, 0.25, 1.0]
+            marks.flagger
         } else if ship.freq == me.freq {
-            [1.0, 1.0, 0.0, 1.0]
+            marks.team
         } else {
-            [0.3, 0.5, 1.0, 1.0]
+            marks.enemy
         };
         dot(x, y, 2.0, rgba);
     }
@@ -457,7 +458,7 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
         for b in s.balls.balls.iter().flatten() {
             if b.state != super::balls::BallState::Carried {
                 let (x, y) = b.pixels();
-                dot(x as f32, y as f32, 2.0, [1.0, 0.6, 0.1, 1.0]);
+                dot(x as f32, y as f32, 2.0, s.palette.marks().ball);
             }
         }
     }

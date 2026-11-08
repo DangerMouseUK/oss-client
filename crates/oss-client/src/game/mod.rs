@@ -10,6 +10,7 @@ pub mod input;
 pub mod login;
 pub mod lvz;
 pub mod online;
+pub mod palette;
 pub mod sandbox;
 pub mod settings_ui;
 pub mod statbox;
