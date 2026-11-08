@@ -191,6 +191,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         volume: 60,
         config,
         bindings: Default::default(),
+        macros: Vec::new(),
         lvz,
         player_name: None,
         login_file: None,
@@ -225,6 +226,7 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     opts.mute |= cfg.mute;
     opts.volume = cfg.volume;
     opts.bindings = cfg.bindings;
+    opts.macros = cfg.macros;
     opts.player_name = cfg.name.clone();
     if let app::Mode::Zone(z) = &mut opts.mode
         && z.name.is_empty()

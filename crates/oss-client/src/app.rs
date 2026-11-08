@@ -53,6 +53,8 @@ pub struct Options {
     /// `--config`: the settings file, if not the default one.
     pub config: Option<PathBuf>,
     pub bindings: crate::game::input::Bindings,
+    /// Macro keys from the settings file.
+    pub macros: Vec<(crate::game::input::Binding, String)>,
     /// `--lvz`: LVZ files to show in the sandbox.
     pub lvz: Vec<PathBuf>,
     /// Player name from the settings file (the login screen's default).
@@ -224,6 +226,7 @@ impl ApplicationHandler for App {
                                 Err(e) => log::warn!("{e}"),
                             }
                         }
+                        s.macros = self.options.macros.clone();
                         Screen::Game(Box::new(s))
                     }
                     Err(e) => return self.fail(event_loop, e),
@@ -357,7 +360,10 @@ impl App {
                         .then(|| Audio::new(&self.dir, self.options.volume))
                         .flatten();
                     match Sandbox::new(&mut run.renderer, &self.dir, &level, 0, run.scale, audio) {
-                        Ok(s) => run.screen = Screen::Game(Box::new(s)),
+                        Ok(mut s) => {
+                            s.macros = self.options.macros.clone();
+                            run.screen = Screen::Game(Box::new(s));
+                        }
                         Err(e) => return self.fail(event_loop, e),
                     }
                 }
@@ -436,6 +442,7 @@ impl App {
             match Sandbox::new_online(&mut run.renderer, &self.dir, conn.net, run.scale, audio) {
                 Ok(mut s) => {
                     s.aim_bot = self.options.autopilot;
+                    s.macros = self.options.macros.clone();
                     run.screen = Screen::Game(Box::new(s));
                 }
                 Err(e) => return self.fail(event_loop, e),

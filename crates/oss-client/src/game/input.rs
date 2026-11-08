@@ -236,6 +236,13 @@ impl Bindings {
     }
 }
 
+impl Mods {
+    /// Whether this modifier requirement holds for `key` with Shift/Ctrl as given.
+    pub fn matches(self, shift: bool, ctrl: bool, key: KeyCode) -> bool {
+        mods_match(self, shift, ctrl, key)
+    }
+}
+
 fn mods_match(mods: Mods, shift: bool, ctrl: bool, key: KeyCode) -> bool {
     // A modifier key never counts as its own modifier (Ctrl alone is not "Ctrl+Ctrl").
     let is_shift = matches!(key, KeyCode::ShiftLeft | KeyCode::ShiftRight);

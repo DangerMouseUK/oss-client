@@ -18,8 +18,10 @@ ship; F5 there starts the offline sandbox), or skip it:
 cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --ship 1
 ```
 
-Enter opens the chat box (`'text` team chat, `:name:text` private, `/text` private to
-the player selected in the stat box, `=N` change team, `?command` goes to the server).
+Enter opens the chat box: `'text` or `//text` team, `"text` the selected player's team,
+`:name:text` private (Tab completes the name; remote players and `:#squad:` go through
+the biller), `::text` reply, `/text` private to the player selected in the stat box,
+`;text` or `;N;text` chat channels, `=N` change team, `?command` goes to the server.
 F2 cycles the stat box views, Page Up/Down select a player. Esc opens the menu: 1-8
 change ship, S spectate, Q quit. Maps you download are cached per server.
 
@@ -27,7 +29,7 @@ change ship, S spectate, Q quit. Maps you download are cached per server.
 
 `oss-client.ini` in your settings folder (`%APPDATA%\OpenSubSpace` on Windows,
 `~/.config/open-subspace` elsewhere, or `--config <file>`) holds video, audio, your
-player name and every key binding. It is written with the defaults on first run;
+player name, every key binding and macro keys (`[macros]`, e.g. `Ctrl+F1 = 'help at base`). It is written with the defaults on first run;
 command-line flags override it.
 
 ## Try the sandbox

@@ -20,6 +20,7 @@ use winit::keyboard::KeyCode;
 
 use super::art::{self, Art};
 use super::balls::{BallAction, BallPlayer, BallRules, Balls};
+use super::chat::{self, ChatContext, ChatPlayer, Line};
 use super::flags::{Flags, Toucher};
 use super::hud::{self, RadarCache};
 use super::input::{Action, InputState};
@@ -105,6 +106,12 @@ pub struct Sandbox {
     pub(super) lvz: Lvz,
     pub(super) flags: Flags,
     pub(super) balls: Balls,
+    /// Who last messaged you privately (for `::` replies).
+    last_private: Option<String>,
+    /// Tab completion in progress: the line as typed and how many Tabs so far.
+    completing: Option<(String, usize)>,
+    /// Macro keys: binding and the line they send.
+    pub macros: Vec<(super::input::Binding, String)>,
     /// The ship you're attached to as a turret.
     attached_to: Option<u16>,
     /// Players wearing a crown (king of the hill).
@@ -313,6 +320,9 @@ impl Sandbox {
             flag_deadline: None,
             balls: Balls::default(),
             attached_to: None,
+            last_private: None,
+            completing: None,
+            macros: Vec::new(),
             crowned: Default::default(),
             crown_deadline: None,
             ball_rules: net
@@ -469,7 +479,8 @@ impl Sandbox {
         let mut edges = input.take_edges();
         let pressed = input.take_pressed();
         let typed = std::mem::take(&mut input.typed);
-        self.ui_input(&mut edges, &pressed, &typed);
+        let mods = (input.shift(), input.ctrl());
+        self.ui_input(&mut edges, &pressed, &typed, mods);
         self.big_radar = !self.menu && input.action_held(Action::BigRadar);
         if self.spectating && !self.menu && self.typing.is_none() {
             let step = SPEC_SPEED * dt.as_secs_f32() * if input.shift() { 3.0 } else { 1.0 };
@@ -545,7 +556,12 @@ impl Sandbox {
             let mut ship_input = if self.menu || self.spectating {
                 ShipInput::default()
             } else {
-                input.ship_input(&edges)
+                let mut i = input.ship_input(&edges);
+                if self.typing.is_some() {
+                    // Tab completes names while typing rather than firing.
+                    (i.bomb, i.mine) = (false, false);
+                }
+                i
             };
             if self.aim_bot
                 && let Some(aimed) = self.aim_input()
@@ -677,11 +693,21 @@ impl Sandbox {
     }
 
     /// Menu, chat box and other non-flying keys.
-    fn ui_input(&mut self, edges: &mut Vec<Action>, pressed: &[KeyCode], typed: &str) {
+    fn ui_input(
+        &mut self,
+        edges: &mut Vec<Action>,
+        pressed: &[KeyCode],
+        typed: &str,
+        (shift, ctrl): (bool, bool),
+    ) {
+        if self.typing.is_some() && pressed.contains(&KeyCode::Tab) {
+            self.complete_name();
+        }
         if let Some(line) = self.typing.as_mut() {
             for c in typed.chars() {
                 if !c.is_control() && line.chars().count() < MAX_CHAT {
                     line.push(c);
+                    self.completing = None;
                 }
             }
             let mut send = false;
@@ -690,6 +716,7 @@ impl Sandbox {
                 match key {
                     KeyCode::Backspace => {
                         line.pop();
+                        self.completing = None;
                     }
                     KeyCode::Enter | KeyCode::NumpadEnter => send = true,
                     KeyCode::Escape => cancel = true,
@@ -738,6 +765,7 @@ impl Sandbox {
             self.typing = Some(String::new());
             return;
         }
+        self.run_macros(pressed, shift, ctrl);
         for e in edges.iter() {
             match e {
                 Action::ShowFps => self.show_fps = !self.show_fps,
@@ -758,91 +786,107 @@ impl Sandbox {
         }
     }
 
-    /// Sends (or, offline, handles) a typed chat line: `'text` team, `:name:text`
-    /// private, `?command` commands, anything else public.
+    /// Sends (or, offline, handles) a typed chat line; see [`chat`] for the prefixes.
     fn send_chat_line(&mut self, line: &str) {
+        self.send_chat_as(line, false);
+    }
+
+    /// Sends a chat line; `macro_key` sends public text as a public macro, as
+    /// Continuum does for macro keys.
+    fn send_chat_as(&mut self, line: &str, macro_key: bool) {
         if line.is_empty() {
             return;
         }
-        let Some(net) = self.net.as_mut() else {
+        let Some(net) = self.net.as_ref() else {
             self.local_command(line);
             return;
         };
-        // "=N" changes team, as in Continuum.
-        if let Some(freq) = line
-            .strip_prefix('=')
-            .and_then(|f| f.trim().parse::<i16>().ok())
-        {
-            net.session.set_freq(freq);
-            net.flush();
-            return;
-        }
+        let players: Vec<ChatPlayer> = net
+            .session
+            .players()
+            .map(|p| ChatPlayer {
+                pid: p.pid,
+                name: p.name.clone(),
+                freq: p.freq,
+            })
+            .collect();
         let me_name = net.session.me().map(|p| p.name.clone()).unwrap_or_default();
-        let selected = self
-            .statbox
-            .selected()
-            .filter(|&pid| pid != self.me_id as i16);
-        let (kind, target, text, shown, colour) = if let Some(t) = line.strip_prefix('/') {
-            // "/text": private message to the player selected in the stat box.
-            match selected {
-                Some(pid) => (
-                    chat_type::PRIVATE,
-                    pid,
-                    t.to_string(),
-                    format!("{me_name}> {t}"),
-                    color::GREEN,
-                ),
-                None => {
-                    self.message(
-                        "Select a player in the stat box first (Page Up/Down).",
-                        color::YELLOW,
-                    );
-                    return;
-                }
-            }
-        } else if let Some(t) = line.strip_prefix('\'') {
-            (
-                chat_type::FREQ,
-                0,
-                t.to_string(),
-                format!("{me_name}> {t}"),
-                color::YELLOW,
-            )
-        } else if let Some(rest) = line.strip_prefix(':')
-            && let Some((name, t)) = rest.split_once(':')
-        {
-            let pid = net
-                .session
-                .players()
-                .find(|p| p.name.eq_ignore_ascii_case(name))
-                .map(|p| p.pid);
-            match pid {
-                Some(pid) => (
-                    chat_type::PRIVATE,
-                    pid,
-                    t.to_string(),
-                    format!("{me_name}> {t}"),
-                    color::GREEN,
-                ),
-                None => {
-                    self.message(format!("No player named {name} here."), color::YELLOW);
-                    return;
-                }
-            }
-        } else {
-            (
-                chat_type::PUBLIC,
-                0,
-                line.to_string(),
-                format!("{me_name}> {line}"),
-                color::WHITE,
-            )
+        let ctx = ChatContext {
+            players: &players,
+            selected: self
+                .statbox
+                .selected()
+                .filter(|&pid| pid != self.me_id as i16),
+            last_private: self.last_private.as_deref(),
         };
-        net.session.send_chat(kind, target, &text);
-        net.flush();
-        // Servers don't echo your own messages; commands get their reply instead.
-        if !line.starts_with('?') && !line.starts_with('*') {
-            self.message(shown, colour);
+        let parsed = chat::parse(line, &ctx);
+        let Some(net) = self.net.as_mut() else { return };
+        match parsed {
+            Line::SetFreq(freq) => {
+                net.session.set_freq(freq);
+                net.flush();
+            }
+            Line::Problem(why) => self.message(why, color::YELLOW),
+            Line::Chat {
+                kind,
+                target,
+                text,
+                echo,
+            } => {
+                let kind = if macro_key && kind == chat_type::PUBLIC {
+                    chat_type::PUBLIC_MACRO
+                } else {
+                    kind
+                };
+                net.session.send_chat(kind, target, &text);
+                net.flush();
+                // Servers don't echo your own messages; commands get their reply.
+                if let Some(echo) = echo {
+                    let colour = match kind {
+                        chat_type::FREQ => color::YELLOW,
+                        chat_type::PRIVATE | chat_type::REMOTE_PRIVATE => color::GREEN,
+                        chat_type::ENEMY_FREQ | chat_type::CHANNEL => color::PINK,
+                        _ => color::WHITE,
+                    };
+                    let shown = if kind == chat_type::CHANNEL {
+                        echo
+                    } else {
+                        format!("{me_name}> {echo}")
+                    };
+                    self.message(shown, colour);
+                }
+            }
+        }
+    }
+
+    /// Tab while typing `:partial`: completes the player name, cycling on repeats.
+    fn complete_name(&mut self) {
+        let Some(line) = self.typing.clone() else {
+            return;
+        };
+        let Some(net) = self.net.as_ref() else { return };
+        let names: Vec<String> = net.session.players().map(|p| p.name.clone()).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (base, n) = match self.completing.take() {
+            Some((base, n)) => (base, n + 1),
+            None => (line, 0),
+        };
+        if let Some(done) = chat::complete(&base, &refs, n) {
+            self.typing = Some(done);
+            self.completing = Some((base, n));
+        }
+    }
+
+    /// Macro keys (from the settings file): send their line when pressed.
+    fn run_macros(&mut self, pressed: &[KeyCode], shift: bool, ctrl: bool) {
+        let lines: Vec<String> = self
+            .macros
+            .iter()
+            .filter(|(b, _)| pressed.contains(&b.key) && b.mods.matches(shift, ctrl, b.key))
+            .map(|(_, text)| text.clone())
+            .collect();
+        for line in lines {
+            self.send_chat_as(&line, true);
         }
     }
 
@@ -1024,6 +1068,9 @@ impl Sandbox {
                 SessionEvent::Chat {
                     kind, name, text, ..
                 } => {
+                    if let Some(from) = chat::private_sender(kind, name.as_deref(), &text) {
+                        self.last_private = Some(from);
+                    }
                     let colour = match kind {
                         chat_type::ARENA | chat_type::PRIVATE | chat_type::REMOTE_PRIVATE => {
                             color::GREEN

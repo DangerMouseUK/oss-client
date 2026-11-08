@@ -33,6 +33,8 @@ pub struct Config {
     /// Default player name online.
     pub name: Option<String>,
     pub bindings: Bindings,
+    /// Macro keys: binding and the chat line they send.
+    pub macros: Vec<(Binding, String)>,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             volume: 60,
             name: None,
             bindings: Bindings::default(),
+            macros: Vec::new(),
         }
     }
 }
@@ -90,7 +93,16 @@ impl Config {
         let mut warnings = Vec::new();
         let mut section = String::new();
         for (n, raw) in text.lines().enumerate() {
-            let line = strip_comment(raw).trim();
+            let whole = raw.trim();
+            if whole.is_empty() || whole.starts_with(';') || whole.starts_with('#') {
+                continue;
+            }
+            // Macro lines are chat text, where ';' and '#' mean channels and squads.
+            let line = if section == "macros" && !whole.starts_with('[') {
+                whole
+            } else {
+                strip_comment(raw).trim()
+            };
             if line.is_empty() {
                 continue;
             }
@@ -113,6 +125,15 @@ impl Config {
                 ("player", "name") => {
                     c.name = (!value.is_empty()).then(|| value.to_string());
                     Ok(())
+                }
+                ("macros", _) => {
+                    // The key keeps its case-insensitive name; the text keeps its case.
+                    let key_text = line.split_once('=').map_or("", |(k, _)| k.trim());
+                    parse_binding(key_text).map(|b| {
+                        if !value.is_empty() {
+                            c.macros.push((b, value.to_string()));
+                        }
+                    })
                 }
                 ("keys", action) => match Action::from_name(action) {
                     Some(a) => parse_bindings(value).map(|b| c.bindings.set(a, b)),
@@ -157,6 +178,13 @@ impl Config {
         for a in Action::ALL {
             let keys: Vec<String> = self.bindings.get(a).iter().map(binding_name).collect();
             s += &format!("{} = {}\n", a.name(), keys.join(", "));
+        }
+        s += "\n[macros]\n\
+              ; key = chat line, sent when the key is pressed (not while typing). Same keys\n\
+              ; and prefixes as [keys], e.g. `Ctrl+F1 = 'need help at base` or\n\
+              ; `F9 = ;2;hello channel 2`. Comments here must be on their own line.\n";
+        for (b, text) in &self.macros {
+            s += &format!("{} = {text}\n", binding_name(b));
         }
         s
     }
@@ -395,6 +423,33 @@ loud = yes
         );
         assert_eq!(warnings.len(), 4, "{warnings:?}");
         assert!(warnings[0].starts_with("line 3:"));
+    }
+
+    #[test]
+    fn macros_keep_semicolons_and_round_trip() {
+        let text = "[macros]\n; a comment line\nCtrl+F1 = 'need help ; now\nF9 = ;2;hi #squad\nbadkey = x\n";
+        let (c, warnings) = Config::parse(text);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            c.macros,
+            vec![
+                (
+                    Binding {
+                        key: KeyCode::F1,
+                        mods: Mods::Ctrl
+                    },
+                    "'need help ; now".to_string()
+                ),
+                (
+                    Binding {
+                        key: KeyCode::F9,
+                        mods: Mods::Any
+                    },
+                    ";2;hi #squad".to_string()
+                ),
+            ]
+        );
+        assert_eq!(Config::parse(&c.to_text()).0.macros, c.macros);
     }
 
     #[test]
