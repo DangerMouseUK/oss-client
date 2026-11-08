@@ -140,7 +140,7 @@ impl Bot {
             match ev {
                 SessionEvent::Connected => {
                     let cipher = self.session.cipher_name().unwrap_or("?");
-                    self.log(&format!("connected ({cipher})"));
+                    self.log(format!("connected ({cipher})"));
                 }
                 SessionEvent::LoginFailed { message, .. } => {
                     log::warn!("[{}] login failed: {message}", self.label)
