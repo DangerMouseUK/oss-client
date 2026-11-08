@@ -169,7 +169,9 @@ pub const COVERAGE: &[(&str, Use)] = &[
     ),
     (
         "Misc:ExtraPositionData",
-        Use::NotYet("sending extra position data"),
+        Use::NotYet(
+            "whether other (non-staff) players receive your extra position data (energy, items, timers); mostly the receive side",
+        ),
     ),
     ("Misc:FrequencyShift", Use::NotYet("meaning not confirmed")),
     (
@@ -177,7 +179,10 @@ pub const COVERAGE: &[(&str, Use)] = &[
         Use::NotYet("timer drift check (anti-cheat)"),
     ),
     ("Misc:NearDeathLevel", Use::NotYet("low-energy warning")),
-    ("Misc:SafetyLimit", Use::NotYet("meaning not confirmed")),
+    (
+        "Misc:SafetyLimit",
+        Use::NotYet("ticks a ship may spend in a safe zone"),
+    ),
     (
         "Misc:SendPositionDelay",
         Use::Client("crates/oss-session/src/lib.rs", "send_position_delay()"),
@@ -243,7 +248,12 @@ pub const COVERAGE: &[(&str, Use)] = &[
         "Radar:MapZoomFactor",
         Use::NotYet("radar zoom is fixed at 10"),
     ),
-    ("Radar:RadarMode", Use::NotYet("team radar modes")),
+    (
+        "Radar:RadarMode",
+        Use::NotYet(
+            "radar layout: 0 normal, 1 half/half, 2 quarters, 3 half/half seeing teammates, 4 quarters seeing teammates",
+        ),
+    ),
     (
         "Radar:RadarNeutralSize",
         Use::NotYet("neutral zone on the radar"),
@@ -278,7 +288,12 @@ pub const COVERAGE: &[(&str, Use)] = &[
     ("Ship:BurstSpeed", Use::Read("burst_speed")),
     ("Ship:CloakEnergy", Use::Read("cloak_energy")),
     ("Ship:CloakStatus", Use::Read("cloak_status")),
-    ("Ship:DamageFactor", Use::NotYet("per-ship damage factor")),
+    (
+        "Ship:DamageFactor",
+        Use::NotYet(
+            "how likely a hit makes the ship lose a prize: 0 = never, 1 = very likely, 5000 = almost never (higher is safer; not a damage multiplier)",
+        ),
+    ),
     ("Ship:DecoyMax", Use::Read("decoy_max")),
     (
         "Ship:DisableFastShooting",
@@ -323,17 +338,14 @@ pub const COVERAGE: &[(&str, Use)] = &[
     ("Ship:PortalMax", Use::Read("portal_max")),
     (
         "Ship:PrizeShareLimit",
-        Use::NotYet("prize sharing with turrets"),
+        Use::NotYet("highest bounty at which the ship still receives team prizes"),
     ),
     ("Ship:Radius", Use::Read("radius")),
     ("Ship:RepelMax", Use::Read("repel_max")),
     ("Ship:RocketMax", Use::Read("rocket_max")),
     ("Ship:RocketTime", Use::Read("rocket_time")),
-    (
-        "Ship:SeeBombLevel",
-        Use::NotYet("bombs on radar from this level"),
-    ),
-    ("Ship:SeeMines", Use::NotYet("mines on radar")),
+    ("Ship:SeeBombLevel", Use::Read("see_bomb_level")),
+    ("Ship:SeeMines", Use::Read("see_mines")),
     ("Ship:ShieldsTime", Use::Read("shields_time")),
     ("Ship:ShrapnelMax", Use::Read("shrapnel_max")),
     ("Ship:ShrapnelRate", Use::Read("shrapnel_rate")),
@@ -352,13 +364,10 @@ pub const COVERAGE: &[(&str, Use)] = &[
         "Ship:TurretLimit",
         Use::Server("the server checks the turret count"),
     ),
-    (
-        "Ship:TurretSpeedPenalty",
-        Use::NotYet("hosts slowed by turrets"),
-    ),
+    ("Ship:TurretSpeedPenalty", Use::Read("turret_speed_penalty")),
     (
         "Ship:TurretThrustPenalty",
-        Use::NotYet("hosts slowed by turrets"),
+        Use::Read("turret_thrust_penalty"),
     ),
     ("Ship:Unused1", Use::Unused),
     ("Ship:UpgradeEnergy", Use::Read("upgrade_energy")),

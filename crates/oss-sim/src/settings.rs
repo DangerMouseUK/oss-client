@@ -93,6 +93,15 @@ pub struct ShipSettings {
     pub soccer_ball_friction: u32,
     pub soccer_ball_proximity: u32,
     pub soccer_ball_speed: u32,
+    /// Thrust and top speed lost while one or more turrets ride on the ship (once,
+    /// not per turret, as nullspace applies them).
+    pub turret_thrust_penalty: u32,
+    pub turret_speed_penalty: u32,
+    /// Radar vision: mines, and bombs from this level up (0 = none, 1 = all,
+    /// 2 = L2 and up, 3 = L3 and up). ASSS documents 4 = L4 only, but the packet
+    /// field is 2 bits wide.
+    pub see_mines: bool,
+    pub see_bomb_level: u8,
 }
 
 /// `Flag:Flagger*`: adjustments for players carrying flags (and ball carriers when
@@ -306,6 +315,10 @@ pub const STOCK_SHIP: ShipSettings = ShipSettings {
     soccer_ball_friction: 12,
     soccer_ball_proximity: 64,
     soccer_ball_speed: 2500,
+    turret_thrust_penalty: 0,
+    turret_speed_penalty: 0,
+    see_mines: false,
+    see_bomb_level: 0,
 };
 
 /// Stock flagger settings (ASSS public arena).
@@ -500,6 +513,10 @@ impl ShipSettings {
             soccer_ball_friction: s.soccer_ball_friction() as u32,
             soccer_ball_proximity: s.soccer_ball_proximity() as u32,
             soccer_ball_speed: s.soccer_ball_speed() as u32,
+            turret_thrust_penalty: (s.turret_thrust_penalty() as i32).max(0) as u32,
+            turret_speed_penalty: (s.turret_speed_penalty() as i32).max(0) as u32,
+            see_mines: s.see_mines() != 0,
+            see_bomb_level: s.see_bomb_level().min(3),
         }
     }
 }
@@ -669,6 +686,11 @@ impl ShipSettings {
         s.set_soccer_ball_friction(u16_(self.soccer_ball_friction));
         s.set_soccer_ball_proximity(u16_(self.soccer_ball_proximity));
         s.set_soccer_ball_speed(u16_(self.soccer_ball_speed));
+        s.set_turret_thrust_penalty(self.turret_thrust_penalty.min(i16::MAX as u32) as i16);
+        s.set_turret_speed_penalty(self.turret_speed_penalty.min(i16::MAX as u32) as i16);
+        s.set_see_mines(self.see_mines as u8);
+        // A 2-bit field: ASSS's documented 4 (L4 only) can't be sent.
+        s.set_see_bomb_level(self.see_bomb_level.min(3));
     }
 }
 

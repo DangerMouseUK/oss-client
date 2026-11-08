@@ -92,24 +92,28 @@ impl PaletteKind {
                 enemy: [0.3, 0.5, 1.0, 1.0],
                 flagger: [1.0, 0.25, 0.25, 1.0],
                 ball: [1.0, 0.6, 0.1, 1.0],
+                weapon: [0.85, 0.85, 0.85, 1.0],
             },
             PaletteKind::Deuteranopia | PaletteKind::Protanopia => Marks {
                 team: c(240, 228, 66),
                 enemy: c(0, 114, 178),
                 flagger: c(230, 159, 0),
                 ball: c(255, 255, 255),
+                weapon: c(190, 190, 190),
             },
             PaletteKind::Tritanopia => Marks {
                 team: c(213, 94, 0),
                 enemy: c(0, 158, 115),
                 flagger: c(204, 121, 167),
                 ball: c(255, 255, 255),
+                weapon: c(190, 190, 190),
             },
             PaletteKind::HighContrast => Marks {
                 team: c(255, 255, 0),
                 enemy: c(0, 200, 255),
                 flagger: c(255, 0, 255),
                 ball: c(255, 255, 255),
+                weapon: c(190, 190, 190),
             },
         }
     }
@@ -122,6 +126,8 @@ pub struct Marks {
     pub enemy: [f32; 4],
     pub flagger: [f32; 4],
     pub ball: [f32; 4],
+    /// Bombs and mines on the radar.
+    pub weapon: [f32; 4],
 }
 
 #[cfg(test)]

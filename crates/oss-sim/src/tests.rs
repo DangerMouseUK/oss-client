@@ -929,3 +929,33 @@ fn wormhole_destination_holds_for_switch_time() {
     }
     assert!(changed, "a new destination after SwitchTime");
 }
+
+#[test]
+fn turrets_slow_their_host() {
+    let mut settings = bare();
+    settings.ships[0].turret_speed_penalty = 1000;
+    settings.ships[0].turret_thrust_penalty = 5;
+    let run = |turrets: u8| {
+        let mut w = world_with(None, settings.clone());
+        w.add_ship(0, 0, 0);
+        place(&mut w, 8000, 8000, 0);
+        w.ships[0].turrets = turrets;
+        let thrust = key(|i| i.forward = true);
+        hold(thrust, 1, &mut w);
+        let one_tick = w.ships[0].vel.length();
+        hold(thrust, 2000, &mut w);
+        (one_tick, w.ships[0].vel.length())
+    };
+    let (free_accel, free_top) = run(0);
+    let (towed_accel, towed_top) = run(2);
+    assert!(
+        towed_accel < free_accel,
+        "less thrust: {towed_accel} vs {free_accel}"
+    );
+    let s = settings.ships[0];
+    assert_eq!(free_top / VEL_SCALE as i64, s.initial_speed as i64);
+    assert_eq!(
+        towed_top / VEL_SCALE as i64,
+        s.initial_speed.saturating_sub(1000) as i64
+    );
+}

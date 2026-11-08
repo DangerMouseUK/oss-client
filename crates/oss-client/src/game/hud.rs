@@ -453,6 +453,23 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
         };
         dot(x, y, 2.0, rgba);
     }
+    // Ship:SeeBombLevel / SeeMines: bombs and mines your ship can see on radar.
+    if !s.spectating {
+        let ship = &s.world.settings.ships[me.kind as usize % 8];
+        for pr in &s.world.projectiles {
+            let seen = match pr.kind {
+                oss_sim::ProjectileKind::Bomb => {
+                    ship.see_bomb_level > 0 && pr.level + 1 >= ship.see_bomb_level
+                }
+                oss_sim::ProjectileKind::Mine => ship.see_mines,
+                _ => false,
+            };
+            if seen {
+                let (x, y) = pr.pos.to_f32();
+                dot(x, y, 2.0, s.palette.marks().weapon);
+            }
+        }
+    }
     // Soccer:BallLocation: free balls always show.
     if s.world.settings.soccer.ball_location {
         for b in s.balls.balls.iter().flatten() {

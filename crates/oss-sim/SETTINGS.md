@@ -4,7 +4,7 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 
 | Read | Client code | Server only | Not yet | Not settings |
 |---|---|---|---|---|
-| 171 | 18 | 8 | 32 | 9 |
+| 175 | 18 | 8 | 28 | 9 |
 
 ## Not used yet
 
@@ -24,23 +24,19 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 | `Misc:ActivateAppShutdownTime` | engine shutdown after switching back to the game |
 | `Misc:AllowSavedShips` | saved-ship option |
 | `Misc:DisableBallKilling` | ball-killing rule |
-| `Misc:ExtraPositionData` | sending extra position data |
+| `Misc:ExtraPositionData` | whether other (non-staff) players receive your extra position data (energy, items, timers); mostly the receive side |
 | `Misc:FrequencyShift` | meaning not confirmed |
 | `Misc:MaxTimerDrift` | timer drift check (anti-cheat) |
 | `Misc:NearDeathLevel` | low-energy warning |
-| `Misc:SafetyLimit` | meaning not confirmed |
+| `Misc:SafetyLimit` | ticks a ship may spend in a safe zone |
 | `Misc:SlowFrameCheck` | frame-rate check (anti-cheat) |
 | `Misc:TickerDelay` | ticker text scrolling |
 | `Misc:VictoryMusic` | victory music |
 | `Radar:MapZoomFactor` | radar zoom is fixed at 10 |
-| `Radar:RadarMode` | team radar modes |
+| `Radar:RadarMode` | radar layout: 0 normal, 1 half/half, 2 quarters, 3 half/half seeing teammates, 4 quarters seeing teammates |
 | `Radar:RadarNeutralSize` | neutral zone on the radar |
-| `Ship:DamageFactor` | per-ship damage factor |
-| `Ship:PrizeShareLimit` | prize sharing with turrets |
-| `Ship:SeeBombLevel` | bombs on radar from this level |
-| `Ship:SeeMines` | mines on radar |
-| `Ship:TurretSpeedPenalty` | hosts slowed by turrets |
-| `Ship:TurretThrustPenalty` | hosts slowed by turrets |
+| `Ship:DamageFactor` | how likely a hit makes the ship lose a prize: 0 = never, 1 = very likely, 5000 = almost never (higher is safer; not a damage multiplier) |
+| `Ship:PrizeShareLimit` | highest bounty at which the ship still receives team prizes |
 | `Spectator:NoXRadar` | spectators' x-radar |
 
 ## Server only
@@ -203,6 +199,8 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 | `Ship:RepelMax` | `repel_max` |
 | `Ship:RocketMax` | `rocket_max` |
 | `Ship:RocketTime` | `rocket_time` |
+| `Ship:SeeBombLevel` | `see_bomb_level` |
+| `Ship:SeeMines` | `see_mines` |
 | `Ship:ShieldsTime` | `shields_time` |
 | `Ship:ShrapnelMax` | `shrapnel_max` |
 | `Ship:ShrapnelRate` | `shrapnel_rate` |
@@ -214,6 +212,8 @@ Generated from `crates/oss-sim/src/coverage.rs` by its tests (`OSS_UPDATE_SETTIN
 | `Ship:StealthStatus` | `stealth_status` |
 | `Ship:SuperTime` | `super_time` |
 | `Ship:ThorMax` | `thor_max` |
+| `Ship:TurretSpeedPenalty` | `turret_speed_penalty` |
+| `Ship:TurretThrustPenalty` | `turret_thrust_penalty` |
 | `Ship:UpgradeEnergy` | `upgrade_energy` |
 | `Ship:UpgradeRecharge` | `upgrade_recharge` |
 | `Ship:UpgradeRotation` | `upgrade_rotation` |

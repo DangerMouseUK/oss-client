@@ -563,6 +563,12 @@ impl World {
         } else {
             ship.stats.thrust
         };
+        // Turrets riding on the ship cost thrust (rockets override it, as in nullspace).
+        let thrust = if ship.turrets > 0 && !shutdown && !rocket {
+            thrust.saturating_sub(s.turret_thrust_penalty)
+        } else {
+            thrust
+        };
         let thrust = if ship.flagger && !shutdown {
             (thrust as i64 + self.settings.flagger.thrust_adjustment as i64).max(0) as u32
         } else {
@@ -641,6 +647,9 @@ impl World {
             speed = (speed as i64 + self.settings.flagger.speed_adjustment as i64).max(0) as u32;
         }
         speed = speed.max(gravity_speed);
+        if ship.turrets > 0 {
+            speed = speed.saturating_sub(s.turret_speed_penalty);
+        }
         if active(tick, ship.repelled_end_tick) {
             speed = speed.max(self.settings.repel_speed);
         }

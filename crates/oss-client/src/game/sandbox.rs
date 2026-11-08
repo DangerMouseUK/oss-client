@@ -117,6 +117,8 @@ pub struct Sandbox {
     pub ui_scale_extra: u32,
     /// The ship you're attached to as a turret.
     attached_to: Option<u16>,
+    /// Every turret in the arena: rider → host.
+    attachments: std::collections::BTreeMap<u16, u16>,
     /// Players wearing a crown (king of the hill).
     crowned: std::collections::BTreeSet<u16>,
     /// When your crown runs out (world tick).
@@ -337,6 +339,7 @@ impl Sandbox {
             flag_deadline: None,
             balls: Balls::default(),
             attached_to: None,
+            attachments: Default::default(),
             last_private: None,
             completing: None,
             macros: Vec::new(),
@@ -613,6 +616,11 @@ impl Sandbox {
                 || (self.balls.carrying().is_some() && self.world.settings.soccer.use_flagger);
             if let Some(i) = self.world.ship_index(self.me_id) {
                 self.world.ships[i].flagger = flagger;
+            }
+            // Ship:Turret*Penalty: hosts carrying turrets.
+            for ship in &mut self.world.ships {
+                let riders = self.attachments.values().filter(|h| **h == ship.id).count();
+                ship.turrets = riders.min(u8::MAX as usize) as u8;
             }
             let events = self.world.step(&inputs);
             self.turret_and_crown();
@@ -1020,6 +1028,9 @@ impl Sandbox {
                     }
                 }
                 SessionEvent::PlayerLeft(pid) => {
+                    let id = pid as u16;
+                    self.attachments
+                        .retain(|rider, host| *rider != id && *host != id);
                     if pid as u16 != self.me_id {
                         self.world.remove_ship(pid as u16);
                     }
@@ -1201,6 +1212,11 @@ impl Sandbox {
                     balls.report(&p, now, &me, ball_rules, carrier, &solid);
                 }
                 SessionEvent::Attached { pid, host } => {
+                    if host >= 0 {
+                        self.attachments.insert(pid as u16, host as u16);
+                    } else {
+                        self.attachments.remove(&(pid as u16));
+                    }
                     if pid as u16 == self.me_id {
                         self.attached_to = (host >= 0).then_some(host as u16);
                         let msg = match self.attached_to {
@@ -1211,6 +1227,7 @@ impl Sandbox {
                     }
                 }
                 SessionEvent::TurretsDetached { pid } => {
+                    self.attachments.retain(|_, host| *host != pid as u16);
                     if self.attached_to == Some(pid as u16) {
                         self.attached_to = None;
                         self.message("Detached", color::GREEN);
