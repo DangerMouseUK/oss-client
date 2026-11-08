@@ -760,6 +760,12 @@ impl Session {
         self.request_download(0);
     }
 
+    /// A map or file transfer is running or queued. Servers put a player who
+    /// requests a file into spectator mode, so take a ship only after this is false.
+    pub fn downloads_pending(&self) -> bool {
+        self.downloading || !self.downloads.is_empty()
+    }
+
     /// The extra files (LVZ) the arena listed.
     pub fn files(&self) -> &[ArenaFile] {
         &self.files

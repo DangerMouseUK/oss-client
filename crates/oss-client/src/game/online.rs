@@ -98,7 +98,7 @@ impl Online {
                     }
                 }
                 SessionEvent::MapProgress { received, total } if *total > 0 => {
-                    self.status = format!("Downloading map... {}%", received * 100 / total);
+                    self.status = format!("Downloading... {}%", received * 100 / total);
                 }
                 SessionEvent::MapReady {
                     name,
@@ -147,10 +147,14 @@ impl Online {
     }
 
     /// Whether the arena is ready to play (entered, settings and map loaded).
+    /// The arena is entered and every file is in. Downloads must finish before you
+    /// take a ship: ASSS-style servers put anyone who requests a file into spectator
+    /// mode (Continuum downloads everything before it plays).
     pub fn ready(&self) -> bool {
         self.session.state() == State::Playing
             && self.map.is_some()
             && self.session.settings().is_some()
+            && !self.session.downloads_pending()
     }
 
     pub fn flush(&mut self) {

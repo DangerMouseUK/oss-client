@@ -295,6 +295,7 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
     assert_eq!(zone.chats, vec!["hello zone".to_string()]);
     // The map first, then the LVZ, one transfer at a time.
     assert_eq!(zone.requests, vec![0, 1]);
+    assert!(!client.downloads_pending());
     assert!(events.iter().any(|e| matches!(
         e,
         SessionEvent::FileReady { name, data, downloaded: true } if name == "art.lvz" && data == LVZ
