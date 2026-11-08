@@ -403,7 +403,7 @@ fn frequency(l: &mut Layout, order: &[&Entry], my_freq: i16, selected: Option<i1
 /// Continuum's orders: you first, then your team by name, then everyone else by name
 /// (Names, Points, Full) or by team then name (Team Sort, Frequency); Point Sort is by
 /// points, highest first.
-fn sorted<'a>(view: View, me: i16, my_freq: i16, players: &'a [Entry]) -> Vec<&'a Entry> {
+fn sorted(view: View, me: i16, my_freq: i16, players: &[Entry]) -> Vec<&Entry> {
     let by_name = |a: &&Entry, b: &&Entry| {
         a.name
             .to_ascii_lowercase()
