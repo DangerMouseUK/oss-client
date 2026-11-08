@@ -225,6 +225,7 @@ impl Login {
             record: None,
             security: Default::default(),
             known_servers: None,
+            identities: None,
         })))
     }
 }

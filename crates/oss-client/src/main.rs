@@ -206,6 +206,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             directories: directories.clone(),
             security: security.unwrap_or_default(),
             security_from_cli: security.is_some(),
+            identity: true,
             open_zones,
             pad: Default::default(),
             lvz,
@@ -222,7 +223,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             }
             app::Mode::Sandbox { map, ship }
         }
-        (false, Some(server)) => app::Mode::Zone(ServerOptions {
+        (false, Some(server)) => app::Mode::Zone(Box::new(ServerOptions {
             server,
             // Filled from the settings file if not given; checked in `apply_config`.
             name: name.unwrap_or_default(),
@@ -235,7 +236,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             record,
             security: security.unwrap_or_default(),
             known_servers: None,
-        }),
+            identities: None,
+        })),
         // No --server or --sandbox: the login screen.
         (false, None) => app::Mode::Login { server: None },
     };
@@ -261,6 +263,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         directories,
         security: security.unwrap_or_default(),
         security_from_cli: security.is_some(),
+        identity: true,
         open_zones,
         pad: Default::default(),
         lvz,
@@ -307,6 +310,7 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     if !opts.security_from_cli {
         opts.security = cfg.security;
     }
+    opts.identity = cfg.identity;
     opts.player_name = cfg.name.clone();
     if let app::Mode::Zone(z) = &mut opts.mode
         && z.name.is_empty()

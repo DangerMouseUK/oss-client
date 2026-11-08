@@ -44,6 +44,8 @@ pub struct Config {
     pub directories: Vec<String>,
     /// Connection encryption (auto = OpenSec, falling back to VIE).
     pub security: oss_session::security::SecurityMode,
+    /// Offer zones an OpenSec identity key (one per zone) they can use for bans.
+    pub identity: bool,
 }
 
 impl Default for Config {
@@ -62,6 +64,7 @@ impl Default for Config {
             pad: PadBindings::default(),
             directories: Vec::new(),
             security: Default::default(),
+            identity: true,
         }
     }
 }
@@ -140,6 +143,7 @@ impl Config {
                     .map(|p| c.palette = p)
                     .ok_or_else(|| format!("unknown palette `{value}`")),
                 ("accessibility", "ui_scale") => number(value, 0, 4).map(|n| c.ui_scale = n),
+                ("network", "identity") => flag(value).map(|b| c.identity = b),
                 ("network", "security") => oss_session::security::SecurityMode::from_name(value)
                     .map(|m| c.security = m)
                     .ok_or_else(|| format!("expected auto, opensec or vie, got `{value}`")),
@@ -219,8 +223,12 @@ impl Config {
             "[network]\n\
              ; auto: OpenSec, falling back to VIE for servers without it (never once a\n\
              ; server's key is on record); opensec or vie to force one.\n\
-             security = {}\n\n",
-            self.security.name()
+             security = {}\n\
+             ; Offer each zone an OpenSec identity key of its own (kept in\n\
+             ; identities.txt), which zones may use for bans.\n\
+             identity = {}\n\n",
+            self.security.name(),
+            self.identity
         );
         s += &format!(
             "[directory]\n\
@@ -461,6 +469,7 @@ mod tests {
             },
             directories: vec!["127.0.0.1:4990".into(), "localhost:4991".into()],
             security: oss_session::security::SecurityMode::OpenSec,
+            identity: false,
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);

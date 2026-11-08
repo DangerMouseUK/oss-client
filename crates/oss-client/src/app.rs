@@ -27,7 +27,7 @@ pub enum Mode {
     /// Offline, on a local map (or the built-in one).
     Sandbox { map: Option<PathBuf>, ship: u8 },
     /// Online, in a zone.
-    Zone(ServerOptions),
+    Zone(Box<ServerOptions>),
     /// The login screen, optionally with the zone filled in.
     Login { server: Option<String> },
     /// Playing a replay file back.
@@ -68,6 +68,8 @@ pub struct Options {
     pub security: oss_session::security::SecurityMode,
     /// `--security` was given (it wins over the settings file).
     pub security_from_cli: bool,
+    /// Offer zones an OpenSec identity key.
+    pub identity: bool,
     /// `--zones`: start on the zone browser.
     pub open_zones: bool,
     /// Accessibility settings.
@@ -267,9 +269,10 @@ impl ApplicationHandler for App {
                 }
             }
             Mode::Zone(z) => {
-                let mut z = z.clone();
+                let mut z = (**z).clone();
                 z.security = self.options.security;
                 z.known_servers = known_servers_path(&self.options);
+                z.identities = identities_path(&self.options);
                 let z = &z;
                 let size = window.inner_size();
                 let res = ((size.width / scale) as u16, (size.height / scale) as u16);
@@ -500,6 +503,7 @@ impl App {
                 Some(Choice::Connect(mut opts)) => {
                     opts.security = self.options.security;
                     opts.known_servers = known_servers_path(&self.options);
+                    opts.identities = identities_path(&self.options);
                     if let Some(path) = &self.options.login_file {
                         ls.login.save(path);
                     }
@@ -761,6 +765,7 @@ fn current_config(o: &Options) -> crate::config::Config {
             pad: o.pad.clone(),
             directories: o.directories.clone(),
             security: o.security,
+            identity: o.identity,
         }
     }
 }
@@ -953,6 +958,13 @@ fn draw_browser(
         color::WHITE,
         "Up/Down choose   Enter use   Esc back",
     );
+}
+
+/// `identities.txt` beside the settings file for your OpenSec identity keys, unless
+/// identities are off.
+fn identities_path(o: &Options) -> Option<PathBuf> {
+    let dir = o.settings_path.as_deref()?.parent()?;
+    o.identity.then(|| dir.join("identities.txt"))
 }
 
 /// `known_servers.txt` beside the settings file, for OpenSec keys.

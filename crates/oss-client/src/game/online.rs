@@ -6,7 +6,9 @@ use std::time::Instant;
 
 use oss_session::map::{MapCache, default_cache_dir};
 use oss_session::replay::{Player as ReplayPlayer, Recorder};
-use oss_session::security::{KnownServers, SecurityMode, client_handshake};
+use oss_session::security::{
+    Identities, KnownServers, SecurityMode, client_handshake, fingerprint,
+};
 use oss_session::udp::UdpDriver;
 use oss_session::{Session, SessionConfig, SessionEvent, State};
 
@@ -42,6 +44,8 @@ pub struct ServerOptions {
     pub security: SecurityMode,
     /// Where OpenSec server keys are remembered (trust on first use).
     pub known_servers: Option<PathBuf>,
+    /// Your OpenSec identity keys, one per zone; `None` offers no identity.
+    pub identities: Option<PathBuf>,
 }
 
 pub struct Online {
@@ -94,7 +98,23 @@ impl Online {
             .map(KnownServers::load)
             .unwrap_or_default();
         let pin = known.get(&opts.server);
-        let handshake = client_handshake(opts.security, pin, seed);
+        let identity = opts.identities.as_deref().and_then(|path| {
+            match Identities::load(path).for_server(&opts.server) {
+                Ok(id) => {
+                    log::info!(
+                        "offering OpenSec identity {} to {}",
+                        fingerprint(&id.public()),
+                        opts.server
+                    );
+                    Some(id)
+                }
+                Err(e) => {
+                    log::warn!("couldn't save an identity key, offering none: {e}");
+                    None
+                }
+            }
+        });
+        let handshake = client_handshake(opts.security, pin, identity, seed);
         let mut session = Session::with_handshake(cfg, now, handshake);
         if let Some(path) = &opts.record {
             let started = std::time::SystemTime::now()

@@ -4,7 +4,7 @@
 //! answers security checks, and either sits in spectator mode or flies a simulated ship
 //! around, sending positions (and optionally firing). Many bots can run in one process.
 
-use oss_session::security::{SecurityMode, client_handshake};
+use oss_session::security::{Identities, SecurityMode, client_handshake, fingerprint};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -26,11 +26,15 @@ Options:
   --ship <1-8|spec>      Ship to fly (default spec)
   --count <n>            Run n bots (default 1)
   --fly                  Fly around (needs a ship): thrust, turn and shoot at random
-  --chat <text>          Say this in public chat once in the arena
+  --chat <text>          Say this in public chat once in the arena; :name:text
+                         sends it privately to that player once they're here
   --duration <secs>      Disconnect after this long (default: run until Ctrl+C)
   --map-cache <dir>      Where downloaded maps are kept
   --security <mode>      vie (default), opensec, or auto (OpenSec, falling back
                          to VIE); bots don't pin server keys
+  --identity <file>      Offer an OpenSec identity key, one per bot number and
+                         zone, kept in <file> (made if missing); a renamed bot
+                         keeps its key
   -v, --verbose          Log every bot's events (default: bot 1 only)
   -h, --help             Show this help";
 
@@ -47,6 +51,7 @@ struct Options {
     map_cache: Option<PathBuf>,
     verbose: bool,
     security: SecurityMode,
+    identity: Option<PathBuf>,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>, String> {
@@ -63,6 +68,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
         map_cache: None,
         verbose: false,
         security: SecurityMode::Vie,
+        identity: None,
     };
     while let Some(a) = args.next() {
         let mut value = |n: &str| args.next().ok_or_else(|| format!("{n} needs a value"));
@@ -96,6 +102,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
                 o.security = SecurityMode::from_name(&value("--security")?)
                     .ok_or("--security must be vie, opensec or auto")?
             }
+            "--identity" => o.identity = Some(value("--identity")?.into()),
             "--chat" => o.chat = Some(value("--chat")?),
             "--duration" => {
                 let s: f64 = value("--duration")?
@@ -318,7 +325,20 @@ fn main() {
             .map(|d| d.subsec_nanos())
             .unwrap_or(1)
             .wrapping_add(i as u32 * 7919);
-        let handshake = client_handshake(opts.security, None, seed);
+        // One identity per bot number and zone, kept across runs and renames.
+        let identity = opts.identity.as_deref().map(|path| {
+            let id = Identities::load(path)
+                .for_server(&format!("bot{}@{}", i + 1, opts.server))
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {}: {e}", path.display());
+                    std::process::exit(1);
+                });
+            if i == 0 || opts.verbose {
+                println!("[{name}] identity {}", fingerprint(&id.public()));
+            }
+            id
+        });
+        let handshake = client_handshake(opts.security, None, identity, seed);
         let session = Session::with_handshake(cfg, driver.now_ms(), handshake);
         bots.push(Bot {
             label: name,
@@ -354,8 +374,24 @@ fn main() {
             }
             if bot.session.state() == State::Playing {
                 if let Some(text) = opts.chat.as_ref().filter(|_| !bot.chatted) {
-                    bot.session.send_chat(chat_type::PUBLIC, 0, text);
-                    bot.chatted = true;
+                    match private_chat(text) {
+                        // :name:text waits until that player is in the arena.
+                        Some((to, msg)) => {
+                            let pid = bot
+                                .session
+                                .players()
+                                .find(|p| p.name.eq_ignore_ascii_case(to))
+                                .map(|p| p.pid);
+                            if let Some(pid) = pid {
+                                bot.session.send_chat(chat_type::PRIVATE, pid, msg);
+                                bot.chatted = true;
+                            }
+                        }
+                        None => {
+                            bot.session.send_chat(chat_type::PUBLIC, 0, text);
+                            bot.chatted = true;
+                        }
+                    }
                 }
                 if bot.world.is_some() {
                     bot.fly(now);
@@ -382,6 +418,12 @@ fn main() {
     }
 }
 
+/// `:name:text` → (name, text), Continuum's private-message syntax.
+fn private_chat(text: &str) -> Option<(&str, &str)> {
+    let (to, msg) = text.strip_prefix(':')?.split_once(':')?;
+    (!to.is_empty()).then_some((to, msg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +446,14 @@ mod tests {
         assert!(parse("--ship 2").is_err());
         assert!(parse("--server x:1 --ship 9").is_err());
         assert!(parse("--help").unwrap().is_none());
+    }
+
+    #[test]
+    fn private_chat_syntax() {
+        assert_eq!(private_chat(":Bob:?ban -t 5"), Some(("Bob", "?ban -t 5")));
+        assert_eq!(private_chat("hello :there:"), None);
+        assert_eq!(private_chat("::x"), None);
+        let o = parse("--server x:1 --identity ids.txt").unwrap().unwrap();
+        assert_eq!(o.identity, Some(PathBuf::from("ids.txt")));
     }
 }
