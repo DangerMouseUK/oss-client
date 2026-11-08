@@ -154,6 +154,10 @@ pub struct Ship {
     /// Driven by network updates rather than local input: never respawns, warps or
     /// picks up prizes on its own.
     pub remote: bool,
+    /// Remote ships: a correction blended in over the next `lerp_ticks` ticks (added to
+    /// the position each tick) instead of jumping to the reported position.
+    pub lerp: Vel,
+    pub lerp_ticks: u32,
     /// Afterburners were burning energy on the last tick.
     pub afterburning: bool,
     /// -1 reverse, 0 none, 1 forward thrust on the last tick (for exhaust effects).
@@ -200,6 +204,8 @@ impl Ship {
             bounty: 0,
             takes_damage: true,
             remote: false,
+            lerp: Vel::default(),
+            lerp_ticks: 0,
             afterburning: false,
             thrusting: 0,
             next_gun_tick: 0,

@@ -6,9 +6,16 @@
 //! they fire are recreated from weapon packets so every client sees the same shots.
 
 use crate::fixed::{DIRECTION_HEADINGS, POS_SCALE, Pos, VEL_SCALE, Vec2, Vel, heading, scale_unit};
-use crate::ship::{Ship, ShipState};
+use crate::ship::{Ship, ShipState, toggle};
 use crate::weapons::{ProjectileKind, shrap_seed, vel};
-use crate::world::{Event, World};
+use crate::world::{Event, World, move_axis};
+
+/// Longest a reported position is carried forward (1 s).
+const MAX_EXTRAPOLATION: u32 = 100;
+/// Ticks over which a small correction is blended in (Continuum uses 200 ms).
+const LERP_TICKS: u32 = 20;
+/// Corrections of four tiles or more on either axis jump instead of gliding.
+const SNAP_DISTANCE: i64 = 64 * POS_SCALE;
 
 /// What a weapon packet says was fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,22 +86,43 @@ impl World {
     /// Places a remote ship from a position report; `age_ticks` is how old the report
     /// is, and the ship is moved forward along its velocity by that much.
     pub fn set_remote_state(&mut self, index: usize, st: &RemoteState, age_ticks: u32) {
-        let Some(ship) = self.ships.get_mut(index) else {
+        let Some(ship) = self.ships.get(index) else {
             return;
         };
-        let age = age_ticks.min(100) as i64;
-        let v = Vel::from_wire(st.x_speed, st.y_speed);
-        let pos = Pos::new(
-            st.x as i64 * POS_SCALE + v.x as i64 * age,
-            st.y as i64 * POS_SCALE + v.y as i64 * age,
-        );
+        // Where the ship is now: the reported state carried forward `age` ticks,
+        // bouncing off walls on the way.
+        let radius = self.settings.ships[ship.kind as usize % 8].radius_pixels();
+        let bounce = self.settings.bounce_factor.max(1) as i64;
+        let mut probe = ship.clone();
+        probe.pos = Pos::new(st.x as i64 * POS_SCALE, st.y as i64 * POS_SCALE);
+        probe.vel = Vel::from_wire(st.x_speed, st.y_speed);
+        probe.lerp_ticks = 0;
+        let terrain = self.terrain();
+        for _ in 0..age_ticks.min(MAX_EXTRAPOLATION) {
+            move_axis(&terrain, &mut probe, radius, 0, bounce);
+            move_axis(&terrain, &mut probe, radius, 1, bounce);
+        }
+        let (pos, v) = (probe.pos, probe.vel);
+
+        let ship = &mut self.ships[index];
         let was_alive = ship.is_alive();
         ship.state = ShipState::Alive;
-        ship.pos = pos;
-        if !was_alive {
-            ship.prev_pos = pos;
-        }
         ship.vel = v;
+        let (dx, dy) = (pos.x - ship.pos.x, pos.y - ship.pos.y);
+        let far = dx.abs() >= SNAP_DISTANCE || dy.abs() >= SNAP_DISTANCE;
+        if !was_alive || far || st.toggles & toggle::FLASH != 0 {
+            // Just spawned, warped or badly out of step: jump there.
+            ship.pos = pos;
+            ship.prev_pos = pos;
+            ship.lerp_ticks = 0;
+        } else {
+            // Close: glide the difference in over the next 200 ms.
+            ship.lerp = Vel {
+                x: (dx / LERP_TICKS as i64) as i32,
+                y: (dy / LERP_TICKS as i64) as i32,
+            };
+            ship.lerp_ticks = LERP_TICKS;
+        }
         ship.rotation = (st.direction as u32 % 40) * 1000;
         ship.toggles = st.toggles;
         ship.bounty = st.bounty;

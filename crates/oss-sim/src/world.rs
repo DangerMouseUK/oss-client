@@ -656,6 +656,12 @@ impl World {
         let radius = s.radius_pixels();
         let bx = move_axis(&terrain, ship, radius, 0, bounce);
         let by = move_axis(&terrain, ship, radius, 1, bounce);
+        if ship.lerp_ticks > 0 {
+            ship.lerp_ticks -= 1;
+            if bx || by {
+                ship.lerp_ticks = 0;
+            }
+        }
         if bx || by {
             events.push(Event::WallBounce {
                 ship: ship.id,
@@ -718,22 +724,34 @@ fn clamp_speed(vel: &mut Vel, max: i64) {
 
 /// Moves a ship along one axis (0 = x, 1 = y); on hitting a wall restores the axis,
 /// reverses and damps it, and damps the other axis. Returns whether it bounced.
-fn move_axis(terrain: &Terrain, ship: &mut Ship, radius: i32, axis: usize, bounce: i64) -> bool {
+pub(crate) fn move_axis(
+    terrain: &Terrain,
+    ship: &mut Ship,
+    radius: i32,
+    axis: usize,
+    bounce: i64,
+) -> bool {
     let v = if axis == 0 { ship.vel.x } else { ship.vel.y };
-    if v == 0 {
+    let lerp = match (ship.lerp_ticks, axis) {
+        (0, _) => 0,
+        (_, 0) => ship.lerp.x,
+        _ => ship.lerp.y,
+    };
+    let d = v as i64 + lerp as i64;
+    if d == 0 {
         return false;
     }
     let previous = ship.pos;
     if axis == 0 {
-        ship.pos.x += v as i64;
+        ship.pos.x += d;
     } else {
-        ship.pos.y += v as i64;
+        ship.pos.y += d;
     }
     let p = ship.pos.pixels();
     let (along, across) = if axis == 0 { (p.x, p.y) } else { (p.y, p.x) };
     // Only the leading edge is tested, so a ship already overlapping a wall behind it
     // can still move away.
-    let edge = if v > 0 {
+    let edge = if d > 0 {
         (along + radius).div_euclid(16)
     } else {
         (along - radius).div_euclid(16)

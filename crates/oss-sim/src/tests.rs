@@ -760,3 +760,56 @@ fn death_greens_and_greens_taken_elsewhere() {
     );
     assert!(w.greens().is_empty());
 }
+
+// --- Remote ships ---------------------------------------------------------------------
+
+fn report(x: i32, y: i32, x_speed: i32) -> RemoteState {
+    RemoteState {
+        x,
+        y,
+        x_speed,
+        y_speed: 0,
+        direction: 0,
+        toggles: 0,
+        bounty: 0,
+        energy: None,
+    }
+}
+
+#[test]
+fn remote_ship_glides_to_small_corrections_and_jumps_big_ones() {
+    let mut w = open_world();
+    let i = w.add_remote_ship(7, 0, 1);
+    w.set_remote_state(i, &report(8000, 8000, 0), 0);
+    assert_eq!(w.ships[i].pos.pixels().x, 8000);
+    // 20 px off: no jump, but there after 200 ms.
+    w.set_remote_state(i, &report(8020, 8000, 0), 0);
+    assert_eq!(w.ships[i].pos.pixels().x, 8000);
+    hold(ShipInput::default(), 10, &mut w);
+    let x = w.ships[i].pos.pixels().x;
+    assert!((8008..=8012).contains(&x), "{x}");
+    hold(ShipInput::default(), 15, &mut w);
+    assert_eq!(w.ships[i].pos.pixels().x, 8020);
+    // 100 px off: jump.
+    w.set_remote_state(i, &report(8120, 8000, 0), 0);
+    assert_eq!(w.ships[i].pos.pixels().x, 8120);
+    // Warping (flash) always jumps.
+    let mut warped = report(8130, 8000, 0);
+    warped.toggles = toggle::FLASH;
+    w.set_remote_state(i, &warped, 0);
+    assert_eq!(w.ships[i].pos.pixels().x, 8130);
+}
+
+#[test]
+fn remote_ship_is_carried_forward_off_walls() {
+    // Wall at x = 520 tiles; the ship flies right at 1600 px/10s (1.6 px/tick).
+    let mut w = world_with(Some(&wall_column(520)), bare());
+    let i = w.add_remote_ship(7, 0, 1);
+    let x0 = 520 * 16 - 60;
+    w.set_remote_state(i, &report(x0, 8000, 1600), 0);
+    // Reported 1 s ago: 160 px of travel would cross the wall, so it bounced back.
+    w.set_remote_state(i, &report(x0, 8000, 1600), 100);
+    let ship = &w.ships[i];
+    assert!(ship.pos.pixels().x < 520 * 16, "{:?}", ship.pos.pixels());
+    assert!(ship.vel.x < 0);
+}
