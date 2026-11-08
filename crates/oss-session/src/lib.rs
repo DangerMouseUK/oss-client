@@ -10,6 +10,7 @@
 //! mervbot clients.
 
 pub mod map;
+pub mod replay;
 pub mod sim;
 pub mod test_zone;
 pub mod udp;
@@ -338,6 +339,12 @@ pub struct Session {
     pending_security: Option<u32>,
     last_now_ms: u64,
     buf: Vec<u8>,
+    /// Records the session to a replay file.
+    recorder: Option<replay::Recorder>,
+    /// Playing a replay back: no network, the clock comes from the recording.
+    playback: bool,
+    /// Playback clock: (session time, server ticks then).
+    replay_clock: Option<(u64, u32)>,
 }
 
 impl Session {
@@ -368,6 +375,89 @@ impl Session {
             pending_security: None,
             last_now_ms: now_ms,
             buf: Vec::with_capacity(512),
+            recorder: None,
+            playback: false,
+            replay_clock: None,
+        }
+    }
+
+    /// A session that plays a replay back: it sends nothing, and the records given to
+    /// [`Session::feed`] drive it as packets from a server would.
+    pub fn playback(cfg: SessionConfig, now_ms: u64) -> Self {
+        let mut s = Self::new(cfg, now_ms, 0);
+        s.playback = true;
+        s.state = State::LoggingIn;
+        s
+    }
+
+    pub fn is_playback(&self) -> bool {
+        self.playback
+    }
+
+    /// Records everything from now on into `rec` (start before connecting to record
+    /// a whole visit; a recording started later lacks what came before).
+    pub fn record_to(&mut self, mut rec: replay::Recorder, now_ms: u64) {
+        rec.meta(
+            now_ms,
+            "server_ticks",
+            &self.server_ticks(now_ms).to_string(),
+        );
+        self.recorder = Some(rec);
+    }
+
+    /// Stops recording (the file is flushed and closed).
+    pub fn stop_recording(&mut self) {
+        self.recorder = None;
+    }
+
+    pub fn recording(&self) -> bool {
+        self.recorder.as_ref().is_some_and(|r| !r.failed())
+    }
+
+    /// Adds a bookmark to the recording.
+    pub fn mark(&mut self, now_ms: u64, text: &str) {
+        if let Some(r) = self.recorder.as_mut() {
+            r.marker(now_ms, text);
+        }
+    }
+
+    /// Playback: applies one replay record at session time `now_ms`.
+    pub fn feed(&mut self, now_ms: u64, rec: &oss_formats::replay::Record) {
+        use oss_formats::replay::RecordKind;
+        self.last_now_ms = now_ms;
+        match rec.kind {
+            RecordKind::ServerPacket => self.handle_packet(now_ms, &rec.data),
+            RecordKind::Meta => {
+                if let Some(("server_ticks", v)) = rec.as_meta()
+                    && let Ok(ticks) = v.parse::<u32>()
+                {
+                    self.replay_clock = Some((now_ms, ticks));
+                }
+            }
+            // The recorder's own movement and shots, shown like anyone else's.
+            RecordKind::ClientPacket => {
+                if let Ok(oss_proto::C2SPacket::Position(p)) =
+                    oss_proto::C2SPacket::decode(&rec.data)
+                    && let Some(pid) = self.pid
+                {
+                    self.update_position(
+                        pid,
+                        RemotePosition {
+                            x: p.x,
+                            y: p.y,
+                            x_speed: p.x_speed,
+                            y_speed: p.y_speed,
+                            rotation: (p.rotation as u8) % 40,
+                            status: p.status,
+                            bounty: p.bounty,
+                            energy: Some(p.energy.max(0) as u16),
+                            server_ticks: p.time,
+                            weapon: (p.weapon.kind() != 0).then_some(p.weapon),
+                        },
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -400,9 +490,15 @@ impl Session {
         self.settings.as_deref()
     }
 
-    /// Server time in ticks (1/100 s), from the transport's clock sync.
+    /// Server time in ticks (1/100 s), from the transport's clock sync (or, playing
+    /// a replay, from the recording's clock).
     pub fn server_ticks(&self, now_ms: u64) -> u32 {
-        self.conn.server_ticks(now_ms)
+        match self.replay_clock {
+            Some((base_ms, ticks)) => {
+                ticks.wrapping_add((now_ms.saturating_sub(base_ms) / 10) as u32)
+            }
+            None => self.conn.server_ticks(now_ms),
+        }
     }
 
     pub fn rtt_ms(&self) -> u64 {
@@ -430,6 +526,9 @@ impl Session {
     /// Packs anything queued into datagrams now (call after sending game packets).
     pub fn flush(&mut self, now_ms: u64) {
         self.conn.flush(now_ms);
+        if let Some(r) = self.recorder.as_mut() {
+            r.flush();
+        }
     }
 
     pub fn poll_transmit(&mut self) -> Option<Vec<u8>> {
@@ -445,9 +544,15 @@ impl Session {
     }
 
     fn send(&mut self, packet: &impl Packet, reliable: bool) {
+        if self.playback {
+            return;
+        }
         self.buf.clear();
         packet.encode(&mut self.buf);
         let data = std::mem::take(&mut self.buf);
+        if let Some(r) = self.recorder.as_mut() {
+            r.client_packet(self.last_now_ms, &data);
+        }
         self.conn.send(&data, reliable);
         self.buf = data;
     }
@@ -513,6 +618,9 @@ impl Session {
     }
 
     fn handle_packet(&mut self, now_ms: u64, data: &[u8]) {
+        if let Some(r) = self.recorder.as_mut() {
+            r.server_packet(now_ms, data);
+        }
         let packet = match S2CPacket::decode(data) {
             Ok(p) => p,
             Err(e) => {
@@ -708,7 +816,7 @@ impl Session {
             }
             S2CPacket::Security(s) => self.on_security(now_ms, &s),
             S2CPacket::Position(p) => {
-                let now_ticks = self.conn.server_ticks(now_ms);
+                let now_ticks = self.server_ticks(now_ms);
                 let pid = p.player_id as i16;
                 let energy = match p.tail {
                     oss_proto::PositionTail::Energy(e) => Some(e),
@@ -733,7 +841,7 @@ impl Session {
             }
             S2CPacket::Weapon(w) => {
                 self.weapons_received = self.weapons_received.wrapping_add(1);
-                let now_ticks = self.conn.server_ticks(now_ms);
+                let now_ticks = self.server_ticks(now_ms);
                 self.update_position(
                     w.player_id as i16,
                     RemotePosition {
@@ -915,6 +1023,9 @@ impl Session {
             return false;
         }
         let name = f.name.clone();
+        if let Some(r) = self.recorder.as_mut() {
+            r.file(self.last_now_ms, &name, data);
+        }
         self.events.push_back(SessionEvent::FileReady {
             name,
             data: data.to_vec(),
@@ -956,6 +1067,9 @@ impl Session {
                 file.name
             );
         }
+        if let Some(r) = self.recorder.as_mut() {
+            r.file(self.last_now_ms, &file.name, &data);
+        }
         self.events.push_back(SessionEvent::FileReady {
             name: file.name.clone(),
             data,
@@ -994,6 +1108,9 @@ impl Session {
         };
         if let Some(info) = self.map.as_mut() {
             info.tiles = Some(tiles);
+        }
+        if let Some(r) = self.recorder.as_mut() {
+            r.file(self.last_now_ms, &name, &data);
         }
         self.events.push_back(SessionEvent::MapReady {
             name,

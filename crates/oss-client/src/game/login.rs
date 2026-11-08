@@ -219,6 +219,7 @@ impl Login {
             freq: None,
             follow: None,
             attach: None,
+            record: None,
         }))
     }
 }

@@ -215,7 +215,9 @@ impl Sandbox {
             world.sync_doors(door_seed, timestamp);
         }
         let me = net.session.me().cloned().ok_or("not in an arena")?;
-        let me_id = me.pid as u16;
+        // Playing a replay you're a spectator; the recorder is one of the remote ships.
+        let replay = net.is_replay();
+        let me_id = if replay { REPLAY_VIEWER } else { me.pid as u16 };
         // Spawn where the arena says (first spawn point for your team, if any).
         let spawns: Vec<_> = settings
             .spawns
@@ -228,25 +230,26 @@ impl Sandbox {
             world.spawn_radius = sp.radius() as i32;
         }
         for p in net.session.players() {
-            if p.pid != me.pid && p.ship != SPECTATOR {
+            if (replay || p.pid != me.pid) && p.ship != SPECTATOR {
                 world.add_remote_ship(p.pid as u16, p.ship, p.freq as u16);
             }
         }
-        add_own_ship(&mut world, me_id, me.ship, me.freq as u16);
+        let own_ship = if replay { SPECTATOR } else { me.ship };
+        add_own_ship(&mut world, me_id, own_ship, me.freq as u16);
         let level = oss_formats::Level::parse(&map_bytes).ok();
         let tileset = level
             .as_ref()
             .and_then(|l| l.tileset.as_ref())
             .map(|t| t.bytes.as_slice());
-        let spectating = me.ship == SPECTATOR;
+        let spectating = own_ship == SPECTATOR;
         // ASSS-style servers start everyone as a spectator and ignore the ship in the
         // arena request; ask for the one we want. The ship appears when the server
         // confirms with a ship change.
         let wanted = net.session.config().ship;
-        if wanted != SPECTATOR && me.ship != wanted {
+        if !replay && wanted != SPECTATOR && me.ship != wanted {
             net.session.set_ship(wanted);
         }
-        if let Some(freq) = net.freq.filter(|&f| f != me.freq) {
+        if let Some(freq) = net.freq.filter(|&f| f != me.freq && !replay) {
             net.session.set_freq(freq);
         }
         let arena = net
@@ -273,10 +276,17 @@ impl Sandbox {
         }
         s.spectating = spectating;
         s.spec_cam = (8192.0, 8192.0);
-        s.message(
-            format!("Entered arena {arena}. Enter to chat, Esc for the menu."),
-            color::GREEN,
-        );
+        if s.is_replay() {
+            s.message(
+                "Playing a replay. Arrows move the camera, Ctrl follows the stat box selection.",
+                color::GREEN,
+            );
+        } else {
+            s.message(
+                format!("Entered arena {arena}. Enter to chat, Esc for the menu."),
+                color::GREEN,
+            );
+        }
         Ok(s)
     }
 
@@ -1264,6 +1274,9 @@ impl Sandbox {
             .net
             .as_ref()
             .map(|n| n.session.players().count() as u32);
+        if self.net.as_mut().is_some_and(|n| n.replay_just_ended()) {
+            self.message("End of the replay. Esc then Q to quit.", color::YELLOW);
+        }
         let files = self
             .net
             .as_mut()
@@ -1771,6 +1784,28 @@ impl Sandbox {
         }
     }
 
+    /// Whose point of view the stat box takes: yours, or the recorder's in a replay.
+    fn viewer_pid(&self) -> i16 {
+        if self.me_id == REPLAY_VIEWER {
+            self.net
+                .as_ref()
+                .and_then(|n| n.session.pid())
+                .unwrap_or(-1)
+        } else {
+            self.me_id as i16
+        }
+    }
+
+    /// Whether this is a replay being played back.
+    pub(super) fn is_replay(&self) -> bool {
+        self.me_id == REPLAY_VIEWER
+    }
+
+    /// Recording the visit to a replay file.
+    pub(super) fn recording(&self) -> bool {
+        self.net.as_ref().is_some_and(|n| n.session.recording())
+    }
+
     /// The players the stat box lists: everyone in the arena online, just you offline.
     fn statbox_entries(&self) -> Vec<statbox::Entry> {
         let Some(net) = self.net.as_ref() else {
@@ -1802,7 +1837,7 @@ impl Sandbox {
 
     fn draw_statbox(&mut self, c: &Canvas, r: &mut Renderer) {
         let entries = self.statbox_entries();
-        let Some(l) = self.statbox.layout(self.me_id as i16, &entries) else {
+        let Some(l) = self.statbox.layout(self.viewer_pid(), &entries) else {
             return;
         };
         let (x, y, w, h) = l.rect;
@@ -1920,6 +1955,9 @@ impl Sandbox {
         }
     }
 }
+
+/// `me_id` while playing a replay: no real player, so everyone is a remote ship.
+const REPLAY_VIEWER: u16 = u16::MAX - 1;
 
 /// Adds your own ship to an online world; as a spectator it is a hidden placeholder.
 fn add_own_ship(world: &mut World, id: u16, ship: u8, freq: u16) {

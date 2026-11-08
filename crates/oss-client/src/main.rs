@@ -24,6 +24,10 @@ Play online:
   --freq <n>                Team to join (in game: type =n)
   --follow <name>           Spectate, following this player
   --attach <name>           Attach to this teammate as a turret once in play
+  --record <file.ossr>      Record the visit to a replay file
+
+Watch a replay:
+  --replay <file.ossr>      Play a recording back (spectating, following its player)
 
 Play offline:
   --sandbox [map.lvl]       Fly around a map (default: a built-in arena) with stock
@@ -88,6 +92,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut lvz = Vec::new();
     let mut follow = None;
     let mut attach = None;
+    let mut record = None;
+    let mut replay = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -151,8 +157,34 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--lvz" => lvz.push(PathBuf::from(value("--lvz")?)),
             "--follow" => follow = Some(value("--follow")?),
             "--attach" => attach = Some(value("--attach")?),
+            "--record" => record = Some(PathBuf::from(value("--record")?)),
+            "--replay" => replay = Some(PathBuf::from(value("--replay")?)),
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if let Some(path) = replay {
+        if sandbox || server.is_some() {
+            return Err("--replay can't be combined with --sandbox or --server".into());
+        }
+        return Ok(Some(app::Options {
+            mode: app::Mode::Replay(path),
+            assets_dir,
+            continuum_dir,
+            scale,
+            vsync,
+            fullscreen,
+            screenshot,
+            screenshot_at,
+            autopilot,
+            mute,
+            volume: 60,
+            config,
+            bindings: Default::default(),
+            macros: Vec::new(),
+            lvz,
+            player_name: None,
+            login_file: None,
+        }));
     }
     let mode = match (sandbox, server) {
         (true, Some(_)) => return Err("use either --sandbox or --server, not both".into()),
@@ -173,6 +205,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             freq,
             follow,
             attach,
+            record,
         }),
         // No --server or --sandbox: the login screen.
         (false, None) => app::Mode::Login { server: None },

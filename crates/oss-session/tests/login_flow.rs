@@ -11,6 +11,7 @@ use oss_proto::s2c::{
     PlayerId, S2CChat, Security,
 };
 use oss_proto::{C2SPacket, ClientSettings, FixedStr, Packet, checksum};
+use oss_session::replay::{Player as ReplayPlayer, Recorder};
 use oss_session::{OwnPosition, Session, SessionConfig, SessionEvent, State, chat_type};
 
 const ADDR: u32 = 1;
@@ -181,6 +182,12 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
         ..Default::default()
     };
     let mut client = Session::new(cfg, now, 0xBEEF);
+    // Record the whole visit into memory, to play it back afterwards.
+    let recording = Shared::default();
+    client.record_to(
+        Recorder::new(Box::new(recording.clone()), now, &[("player", "tester")]).unwrap(),
+        now,
+    );
     let mut zone = Zone::default();
     let mut events = Vec::new();
     let mut map_ready = false;
@@ -311,6 +318,68 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
         e,
         SessionEvent::Chat { pid: 9, name: Some(n), text, .. } if n == "other" && text == "hi tester"
     )));
+
+    // Play the recording back: same arena, players, files and chat, and the
+    // recorder's own movement shows up as position updates.
+    client.flush(now);
+    drop(client);
+    let bytes = recording.0.lock().unwrap().clone();
+    let mut player = ReplayPlayer::from_bytes(&bytes).unwrap();
+    assert_eq!(player.replay.meta_value("player"), Some("tester"));
+    assert_eq!(player.file("TINY.LVL"), Some(&map_bytes()[..]));
+    assert_eq!(player.file("art.lvz"), Some(LVZ));
+    let mut replayed = Session::playback(SessionConfig::default(), 0);
+    let mut seen = Vec::new();
+    let mut t = 0u32;
+    while !player.finished() {
+        t += 10;
+        let due: Vec<_> = player.due(t).to_vec();
+        for r in &due {
+            replayed.feed(t as u64, r);
+        }
+        while let Some(ev) = replayed.poll_event() {
+            if let SessionEvent::MapNeeded { name, .. } = &ev {
+                assert!(replayed.use_cached_map(player.file(name).unwrap()));
+            }
+            if let SessionEvent::FilesListed(files) = &ev {
+                for f in files {
+                    assert!(replayed.use_cached_file(&f.name, player.file(&f.name).unwrap()));
+                }
+            }
+            seen.push(ev);
+        }
+    }
+    assert_eq!(replayed.state(), State::Playing);
+    assert_eq!(replayed.pid(), Some(5));
+    assert_eq!(replayed.player(9).map(|p| p.name.as_str()), Some("other"));
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, SessionEvent::PlayerMoved(5)))
+    );
+    assert_eq!(
+        replayed.me().and_then(|p| p.position).map(|p| (p.x, p.y)),
+        Some((8200, 8100))
+    );
+    assert!(seen.iter().any(|e| matches!(
+        e,
+        SessionEvent::Chat { pid: 9, text, .. } if text == "hi tester"
+    )));
+    // The replay's clock follows the recorded server time.
+    assert!(replayed.server_ticks(t as u64) > 0);
+}
+
+/// A `Write` the test can read back after the session is gone.
+#[derive(Clone, Default)]
+struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for Shared {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]

@@ -25,6 +25,12 @@ the biller), `::text` reply, `/text` private to the player selected in the stat 
 F2 cycles the stat box views, Page Up/Down select a player. Esc opens the menu: 1-8
 change ship, S spectate, Q quit. Maps you download are cached per server.
 
+## Replays
+
+`--record visit.ossr` records a visit (everything the server sent and the client sent,
+plus the map and LVZ files), and `--replay visit.ossr` plays it back without a server,
+spectating and following the player who recorded it. A recording cut short still plays.
+
 ## Settings
 
 `oss-client.ini` in your settings folder (`%APPDATA%\OpenSubSpace` on Windows,

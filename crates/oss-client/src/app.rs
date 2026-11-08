@@ -29,6 +29,8 @@ pub enum Mode {
     Zone(ServerOptions),
     /// The login screen, optionally with the zone filled in.
     Login { server: Option<String> },
+    /// Playing a replay file back.
+    Replay(PathBuf),
 }
 
 pub struct Options {
@@ -135,7 +137,7 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
             oss_assets::locate::read_file(map).map_err(|e| e.to_string())?
         }
         Mode::Sandbox { map: None, .. } => crate::game::default_map::default_map(),
-        Mode::Zone(_) | Mode::Login { .. } => Vec::new(),
+        Mode::Zone(_) | Mode::Login { .. } | Mode::Replay(_) => Vec::new(),
     };
 
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
@@ -189,6 +191,7 @@ impl ApplicationHandler for App {
             Mode::Sandbox { .. } => "Open SubSpace — sandbox".to_string(),
             Mode::Zone(z) => format!("Open SubSpace — {}", z.server),
             Mode::Login { .. } => "Open SubSpace".to_string(),
+            Mode::Replay(p) => format!("Open SubSpace — replay {}", p.display()),
         };
         let mut attrs = Window::default_attributes()
             .with_title(title)
@@ -236,6 +239,22 @@ impl ApplicationHandler for App {
                 let size = window.inner_size();
                 let res = ((size.width / scale) as u16, (size.height / scale) as u16);
                 let net = match Online::connect(z, res) {
+                    Ok(n) => n,
+                    Err(e) => return self.fail(event_loop, e),
+                };
+                let (art, atlas) = match load_art(&self.dir, &mut renderer) {
+                    Ok(a) => a,
+                    Err(e) => return self.fail(event_loop, e),
+                };
+                Screen::Connecting(Box::new(Connecting {
+                    net,
+                    art,
+                    atlas,
+                    login: None,
+                }))
+            }
+            Mode::Replay(path) => {
+                let net = match Online::open_replay(path) {
                     Ok(n) => n,
                     Err(e) => return self.fail(event_loop, e),
                 };
