@@ -50,6 +50,12 @@ The first time a server proves an OpenSec key, the key is remembered in
 the same key over OpenSec, with no fallback. `--security auto|opensec|vie` or
 `[network] security` changes the policy.
 
+Over OpenSec the client also offers the zone an identity key, which zones can use
+for bans. Each zone gets its own key, so zones can't link your sessions. The keys
+are kept in `identities.txt` beside the settings file. Keep it private: anyone
+with a copy can use your identity at those zones. `[network] identity = false`
+turns this off.
+
 ## Settings
 
 `oss-client.ini` in your settings folder (`%APPDATA%\OpenSubSpace` on Windows,
