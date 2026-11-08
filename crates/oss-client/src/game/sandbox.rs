@@ -19,6 +19,7 @@ use oss_sim::{
 use winit::keyboard::KeyCode;
 
 use super::art::{self, Art};
+use super::balls::{BallAction, BallPlayer, BallRules, Balls};
 use super::flags::{Flags, Toucher};
 use super::hud::{self, RadarCache};
 use super::input::{Action, InputState};
@@ -103,6 +104,8 @@ pub struct Sandbox {
     statbox_corner: (f32, f32),
     pub(super) lvz: Lvz,
     pub(super) flags: Flags,
+    pub(super) balls: Balls,
+    pub(super) ball_rules: BallRules,
     /// When your carried flags will be dropped (game clock), if timed.
     flag_deadline: Option<f32>,
     /// LVZ screen anchors for this frame.
@@ -302,6 +305,12 @@ impl Sandbox {
             lvz: Lvz::default(),
             flags: Flags::new(flag_tiles),
             flag_deadline: None,
+            balls: Balls::default(),
+            ball_rules: net
+                .as_ref()
+                .and_then(|n| n.session.settings())
+                .map(BallRules::from_settings)
+                .unwrap_or_default(),
             screen_refs: [(0.0, 0.0); 12],
             slew_tick: 0,
             brick_count: 0,
@@ -516,6 +525,17 @@ impl Sandbox {
             {
                 ship_input = aimed;
             }
+            // Carrying a ball: Ctrl/Tab shoot it instead of weapons (unless allowed).
+            if self.balls.carrying().is_some() && (ship_input.gun || ship_input.bomb) {
+                let me = self.ball_player();
+                let now = self.world.tick;
+                let (gun, bomb) = (ship_input.gun, ship_input.bomb);
+                if let Some(shot) = self.balls.fire(&me, &self.ball_rules, gun, bomb, now) {
+                    self.send_ball_actions(vec![shot]);
+                }
+                ship_input.gun &= self.ball_rules.allow_guns;
+                ship_input.bomb &= self.ball_rules.allow_bombs;
+            }
             // Edge-triggered actions apply to one tick only.
             edges.clear();
             let mut inputs = vec![ShipInput::default(); self.world.ships.len()];
@@ -524,6 +544,7 @@ impl Sandbox {
                 *slot = ship_input;
             }
             let events = self.world.step(&inputs);
+            self.step_balls();
             self.handle_events(&events);
             self.report(&events);
             self.spawn_exhaust();
@@ -565,16 +586,52 @@ impl Sandbox {
             return None;
         }
         let (mx, my) = me.pos.to_f32();
-        let target = self
-            .world
-            .ships
-            .iter()
-            .filter(|s| s.is_alive() && s.freq != me.freq)
-            .map(|s| {
-                let (x, y) = s.pos.to_f32();
-                (x - mx, y - my)
-            })
-            .min_by(|a, b| (a.0.hypot(a.1)).total_cmp(&b.0.hypot(b.1)))?;
+        let nearest = |points: &mut dyn Iterator<Item = (f32, f32)>| {
+            points
+                .map(|(x, y)| (x - mx, y - my))
+                .min_by(|a, b| (a.0.hypot(a.1)).total_cmp(&b.0.hypot(b.1)))
+        };
+        let enemy = nearest(
+            &mut self
+                .world
+                .ships
+                .iter()
+                .filter(|s| s.is_alive() && s.freq != me.freq)
+                .map(|s| s.pos.to_f32()),
+        );
+        // No one to fight: chase a free ball, and shoot it once carried.
+        if enemy.is_none() {
+            if self.balls.carrying().is_some() {
+                return Some(ShipInput {
+                    gun: self.world.tick.is_multiple_of(200),
+                    forward: true,
+                    ..Default::default()
+                });
+            }
+            let ball = nearest(
+                &mut self
+                    .balls
+                    .balls
+                    .iter()
+                    .flatten()
+                    .filter(|b| b.state == super::balls::BallState::World)
+                    .map(|b| {
+                        let (x, y) = b.pixels();
+                        (x as f32, y as f32)
+                    }),
+            )?;
+            let want =
+                (ball.0.atan2(-ball.1).to_degrees().rem_euclid(360.0) / 9.0).round() as i32 % 40;
+            let diff = (want - me.direction() as i32).rem_euclid(40);
+            return Some(ShipInput {
+                right: (1..20).contains(&diff),
+                left: diff >= 20,
+                forward: diff <= 3 || diff >= 37,
+                backward: diff > 10 && diff < 30 && ball.0.hypot(ball.1) < 60.0,
+                ..Default::default()
+            });
+        }
+        let target = enemy?;
         let dist = target.0.hypot(target.1);
         // Direction 0 is up, clockwise, 40 steps per turn.
         let want =
@@ -949,6 +1006,7 @@ impl Sandbox {
                     }
                 }
                 SessionEvent::Settings(cs) => {
+                    self.ball_rules = BallRules::from_settings(&cs);
                     self.world.settings = ArenaSettings::from_client_settings(&cs);
                 }
                 SessionEvent::Seeds {
@@ -995,6 +1053,32 @@ impl Sandbox {
                     if let Some(&(_, points)) = rewards.iter().find(|r| r.0 == mine) {
                         self.message(format!("Flag reward: {points} points"), color::GREEN);
                     }
+                }
+                SessionEvent::Ball(p) => {
+                    log::debug!("ball report {p:?} at tick {}", self.world.tick);
+                    let me = self.ball_player();
+                    let now = self.world.tick;
+                    let Self {
+                        balls,
+                        ball_rules,
+                        world,
+                        net,
+                        ..
+                    } = self;
+                    let carrier = |pid: i16| {
+                        net.as_ref()
+                            .and_then(|n| n.session.player(pid))
+                            .map(|p| (p.freq as u16, p.ship))
+                    };
+                    let solid = |x: i32, y: i32, f: u16| world.solid_for(x, y, f);
+                    balls.report(&p, now, &me, ball_rules, carrier, &solid);
+                }
+                SessionEvent::Goal { freq, points } => {
+                    self.message(
+                        format!("Team {freq} scored a goal: {points} points"),
+                        color::GREEN,
+                    );
+                    self.sound("goal", 1.0, None);
                 }
                 SessionEvent::Bricks(bricks) => {
                     if bricks.is_empty() {
@@ -1084,6 +1168,60 @@ impl Sandbox {
             }
             Err(e) => log::warn!("couldn't apply LVZ graphics: {e}"),
         }
+    }
+
+    /// Your ship as the ball code needs it.
+    fn ball_player(&self) -> BallPlayer {
+        let me = self.me();
+        let p = me.pos.pixels();
+        let v = me.vel.to_wire();
+        BallPlayer {
+            pid: self.me_id as i16,
+            ship: if self.spectating { 8 } else { me.kind },
+            freq: me.freq,
+            x: p.x,
+            y: p.y,
+            vx: v.x,
+            vy: v.y,
+            direction: me.direction(),
+            can_play: me.is_alive() && !self.spectating,
+        }
+    }
+
+    /// Sends what the ball code decided (pickups, shots, goals).
+    fn send_ball_actions(&mut self, actions: Vec<BallAction>) {
+        let Some(net) = self.net.as_mut() else { return };
+        if actions.is_empty() {
+            return;
+        }
+        let now = net.now_ms();
+        for a in actions {
+            match a {
+                BallAction::Pickup { id, time } => net.session.pickup_ball(id, time),
+                BallAction::Fire { id, pos, vel } => net.session.shoot_ball(now, id, pos, vel),
+                BallAction::Goal { id, x, y } => net.session.goal(id, x, y),
+            }
+        }
+        net.flush();
+    }
+
+    /// One tick of the balls: movement, pickups, goals, the carry timer.
+    fn step_balls(&mut self) {
+        if self.net.is_none() {
+            return;
+        }
+        let me = self.ball_player();
+        let now = self.world.tick;
+        let Self {
+            balls,
+            ball_rules,
+            world,
+            ..
+        } = self;
+        let solid = |x: i32, y: i32, f: u16| world.solid_for(x, y, f);
+        let goal = |x: i32, y: i32| world.map.get(x, y) == oss_sim::tile::GOAL;
+        let actions = balls.step(now, &me, ball_rules, &solid, &goal);
+        self.send_ball_actions(actions);
     }
 
     /// A player's team (yours if unknown).

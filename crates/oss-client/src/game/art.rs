@@ -49,6 +49,8 @@ pub struct Art {
     pub icondoor: Region,
     pub empburst: Region,
     pub rocket: Region,
+    /// Powerball: normal, phased and trail frames, a third each.
+    pub powerb: Region,
     /// Per-ship replacement sheets from LVZ files (`ship1`..`ship8`): region and
     /// frame side (40 square frames).
     pub ship_sheets: [Option<(Region, u32)>; 8],
@@ -59,7 +61,7 @@ pub struct Art {
 pub const OVERRIDABLE: &[&str] = &[
     "ships", "bullets", "bombs", "mines", "explode0", "explode1", "explode2", "warp", "exhaust",
     "goal", "flag", "prizes", "shrapnel", "warppnt", "repel", "shield", "super", "empburst",
-    "rocket", "over1", "over2", "over3", "over4", "over5", "wall",
+    "rocket", "powerb", "over1", "over2", "over3", "over4", "over5", "wall",
 ];
 
 /// Whether an LVZ file named `stem` (no extension, lowercase) replaces a standard sheet.
@@ -216,6 +218,7 @@ pub fn load_with(
     art.icondoor = sheet("icondoor", false)?;
     art.empburst = sheet("empburst", false)?;
     art.rocket = sheet("rocket", false)?;
+    art.powerb = sheet("powerb", false)?;
     drop(sheet);
     for (k, slot) in art.ship_sheets.iter_mut().enumerate() {
         if let Some(img) = overrides.get(&format!("ship{}", k + 1)) {

@@ -378,6 +378,11 @@ impl World {
         }
     }
 
+    /// Whether tile (x, y) blocks things of team `freq` (your team's bricks don't).
+    pub fn solid_for(&self, x: i32, y: i32, freq: u16) -> bool {
+        self.terrain().is_solid(x, y, freq)
+    }
+
     /// Removes every brick (the server's empty brick list).
     pub fn clear_bricks(&mut self) {
         let tiles: Vec<(i32, i32)> = self.bricks.keys().copied().collect();

@@ -401,6 +401,27 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         c.world_centered(r, region, x, y);
     }
 
+    // --- Balls ---------------------------------------------------------------------------
+    let ball_frames = a.powerb.frame_count(16, 16) / 3;
+    if ball_frames > 0 {
+        let ship_at = |pid: i16| {
+            world
+                .ships
+                .iter()
+                .find(|sh| sh.id == pid as u16 && sh.is_alive())
+                .map(|sh| {
+                    let (x, y) = lerp_pos(sh.prev_pos, sh.pos, alpha);
+                    let radius = world.settings.ships[sh.kind as usize % 8].radius_pixels();
+                    (x, y, sh.direction(), radius)
+                })
+        };
+        for (_, (x, y), phased) in s.balls.visible(world.tick, &s.ball_rules, ship_at) {
+            let first = if phased { ball_frames } else { 0 };
+            let region = anim_frame(a.powerb, 16, 16, first, ball_frames, 1.0, t);
+            c.world_centered(r, region, x, y);
+        }
+    }
+
     s.lvz.draw(layer::AFTER_WEAPONS, c, r, t, &s.screen_refs);
 
     // --- Exhaust (under ships) -----------------------------------------------------------

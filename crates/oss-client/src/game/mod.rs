@@ -1,6 +1,7 @@
 //! Game-side code: art loading, input mapping, drawing and the offline sandbox.
 
 pub mod art;
+pub mod balls;
 pub mod default_map;
 pub mod flags;
 pub mod hud;
