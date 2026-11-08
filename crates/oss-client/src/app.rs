@@ -45,6 +45,11 @@ pub struct Options {
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
     pub mute: bool,
+    /// Master volume 0-100.
+    pub volume: u32,
+    /// `--config`: the settings file, if not the default one.
+    pub config: Option<PathBuf>,
+    pub bindings: crate::game::input::Bindings,
 }
 
 /// Waiting for the zone: shows progress until the arena is ready.
@@ -95,7 +100,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let dir = AssetDirs::locate(&search).map_err(|e| {
         format!(
             "{e}
-Put the game graphics in assets/classic beside the program, or point              --assets-dir ({}) or --continuum-dir at a folder that has them.",
+Put the game graphics in assets/classic beside the program, or point --assets-dir ({}) or --continuum-dir at a folder that has them.",
             oss_assets::ASSETS_ENV_VAR
         )
     })?;
@@ -122,12 +127,13 @@ Put the game graphics in assets/classic beside the program, or point            
             None
         }
     };
+    let input = InputState::new(options.bindings.clone());
     let mut app = App {
         options,
         dir,
         level,
         running: None,
-        input: InputState::default(),
+        input,
         gilrs,
         error: None,
     };
@@ -149,7 +155,7 @@ impl App {
         if self.options.mute {
             None
         } else {
-            Audio::new(&self.dir)
+            Audio::new(&self.dir, self.options.volume)
         }
     }
 }
@@ -309,7 +315,7 @@ impl App {
                     unreachable!()
                 };
                 let audio = if audio_wanted {
-                    Audio::new(&self.dir)
+                    Audio::new(&self.dir, self.options.volume)
                 } else {
                     None
                 };

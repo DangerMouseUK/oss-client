@@ -85,7 +85,6 @@ impl Action {
     ];
 
     /// Name used in the config file.
-    #[allow(dead_code)] // read by the settings file loader
     pub fn name(self) -> &'static str {
         match self {
             Action::Forward => "forward",
@@ -120,7 +119,6 @@ impl Action {
         }
     }
 
-    #[allow(dead_code)] // read by the settings file loader
     pub fn from_name(name: &str) -> Option<Action> {
         Self::ALL
             .into_iter()
@@ -219,7 +217,6 @@ impl Bindings {
     }
 
     /// Replaces all bindings for `action`.
-    #[allow(dead_code)] // read by the settings file loader
     pub fn set(&mut self, action: Action, bindings: Vec<Binding>) {
         self.map.insert(action, bindings);
     }

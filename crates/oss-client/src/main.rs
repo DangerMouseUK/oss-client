@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod config;
 mod game;
 mod gfx;
 
@@ -15,7 +16,7 @@ Usage: oss-client --server <host:port> --name <name> [options]
 
 Play online:
   --server <host:port>      Zone to join
-  --name <name>             Player name
+  --name <name>             Player name (default: from the settings file)
   --password <pw>           Password (default empty)
   --arena <name>            Arena to enter (default: any public arena)
   --ship <1-8|spec>         Ship to enter in (default spec online, 1 offline)
@@ -34,6 +35,8 @@ Options:
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
   --mute                    No sound
+  --config <file>           Settings file (default: oss-client.ini in the user's
+                            settings folder, created on first run)
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
   --screenshot-at <secs>    When to take that screenshot
   --autopilot               Fly and shoot automatically (testing)
@@ -46,8 +49,8 @@ fn main() {
     .init();
     match parse_args(std::env::args().skip(1)) {
         Ok(None) => println!("oss-client {}\n\n{USAGE}", env!("CARGO_PKG_VERSION")),
-        Ok(Some(opts)) => {
-            if let Err(e) = app::run(opts) {
+        Ok(Some(mut opts)) => {
+            if let Err(e) = apply_config(&mut opts).and_then(|()| app::run(opts)) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -77,6 +80,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut screenshot_at = 2.0f32;
     let mut autopilot = false;
     let mut mute = false;
+    let mut config = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -136,6 +140,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             }
             "--autopilot" => autopilot = true,
             "--mute" => mute = true,
+            "--config" => config = Some(PathBuf::from(value("--config")?)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -150,7 +155,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         }
         (false, Some(server)) => app::Mode::Zone(ServerOptions {
             server,
-            name: name.ok_or("--name is required online")?,
+            // Filled from the settings file if not given; checked in `apply_config`.
+            name: name.unwrap_or_default(),
             password,
             arena,
             ship: ship.unwrap_or(oss_session::SPECTATOR),
@@ -171,7 +177,47 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         screenshot_at,
         autopilot,
         mute,
+        volume: 60,
+        config,
+        bindings: Default::default(),
     }))
+}
+
+/// Reads the settings file and fills in what the command line didn't set.
+fn apply_config(opts: &mut app::Options) -> Result<(), String> {
+    let path = match &opts.config {
+        Some(p) => p.clone(),
+        None => match config::default_dir() {
+            Some(dir) => dir.join(config::FILE_NAME),
+            None => {
+                log::warn!("no settings folder found; using defaults");
+                return finish_options(opts, config::Config::default());
+            }
+        },
+    };
+    let (cfg, warnings) = config::Config::load(&path, opts.config.is_some())?;
+    for w in warnings {
+        log::warn!("{}: {w}", path.display());
+    }
+    log::info!("settings: {}", path.display());
+    finish_options(opts, cfg)
+}
+
+fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), String> {
+    opts.scale = opts.scale.or(cfg.scale);
+    opts.vsync |= cfg.vsync;
+    opts.fullscreen |= cfg.fullscreen;
+    opts.mute |= cfg.mute;
+    opts.volume = cfg.volume;
+    opts.bindings = cfg.bindings;
+    if let app::Mode::Zone(z) = &mut opts.mode
+        && z.name.is_empty()
+    {
+        z.name = cfg
+            .name
+            .ok_or("--name is required online (or set name in the settings file)")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -198,7 +244,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(&o.mode, app::Mode::Zone(z) if z.name == "Bob" && z.ship == 3));
-        assert!(parse("--server x:1").is_err(), "name required");
+        let mut o = parse("--server x:1").unwrap().unwrap();
+        assert!(
+            finish_options(&mut o, config::Config::default()).is_err(),
+            "name required"
+        );
+        let cfg = config::Config {
+            name: Some("Ace".into()),
+            scale: Some(3),
+            vsync: true,
+            ..Default::default()
+        };
+        let mut o = parse("--server x:1 --scale 2").unwrap().unwrap();
+        finish_options(&mut o, cfg).unwrap();
+        assert!(matches!(&o.mode, app::Mode::Zone(z) if z.name == "Ace"));
+        assert_eq!((o.scale, o.vsync), (Some(2), true), "flags win");
         assert!(parse("--ship 9 --sandbox m.lvl").is_err());
         assert!(parse("--sandbox m.lvl --ship spec").is_err());
         assert!(parse("").is_err());

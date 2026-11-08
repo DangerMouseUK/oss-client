@@ -139,7 +139,7 @@ pub struct Audio {
 impl Audio {
     /// Opens the default output device. Returns `None` (with a log line) when there is
     /// no usable audio device, so the game runs silently.
-    pub fn new(dir: &AssetDirs) -> Option<Self> {
+    pub fn new(dir: &AssetDirs, volume: u32) -> Option<Self> {
         let host = cpal::default_host();
         let device = host.default_output_device().or_else(|| {
             log::warn!("no audio output device; sound disabled");
@@ -158,7 +158,7 @@ impl Audio {
             rx,
             voices: Vec::new(),
             loops: Default::default(),
-            volume: 0.6,
+            volume: volume.min(100) as f32 / 100.0,
         };
         let stream = match format {
             cpal::SampleFormat::F32 => build::<f32>(&device, config, mixer, channels),
