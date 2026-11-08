@@ -4,6 +4,7 @@
 //! answers security checks, and either sits in spectator mode or flies a simulated ship
 //! around, sending positions (and optionally firing). Many bots can run in one process.
 
+use oss_session::security::{SecurityMode, client_handshake};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,8 @@ Options:
   --chat <text>          Say this in public chat once in the arena
   --duration <secs>      Disconnect after this long (default: run until Ctrl+C)
   --map-cache <dir>      Where downloaded maps are kept
+  --security <mode>      vie (default), opensec, or auto (OpenSec, falling back
+                         to VIE); bots don't pin server keys
   -v, --verbose          Log every bot's events (default: bot 1 only)
   -h, --help             Show this help";
 
@@ -43,6 +46,7 @@ struct Options {
     duration: Option<Duration>,
     map_cache: Option<PathBuf>,
     verbose: bool,
+    security: SecurityMode,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>, String> {
@@ -58,6 +62,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
         duration: None,
         map_cache: None,
         verbose: false,
+        security: SecurityMode::Vie,
     };
     while let Some(a) = args.next() {
         let mut value = |n: &str| args.next().ok_or_else(|| format!("{n} needs a value"));
@@ -87,6 +92,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
                     .ok_or("--count must be 1-1000")?
             }
             "--fly" => o.fly = true,
+            "--security" => {
+                o.security = SecurityMode::from_name(&value("--security")?)
+                    .ok_or("--security must be vie, opensec or auto")?
+            }
             "--chat" => o.chat = Some(value("--chat")?),
             "--duration" => {
                 let s: f64 = value("--duration")?
@@ -129,7 +138,10 @@ impl Bot {
     fn handle_events(&mut self, opts: &Options, cache: &MapCache) {
         while let Some(ev) = self.session.poll_event() {
             match ev {
-                SessionEvent::Connected => self.log("connected"),
+                SessionEvent::Connected => {
+                    let cipher = self.session.cipher_name().unwrap_or("?");
+                    self.log(&format!("connected ({cipher})"));
+                }
                 SessionEvent::LoginFailed { message, .. } => {
                     log::warn!("[{}] login failed: {message}", self.label)
                 }
@@ -306,7 +318,8 @@ fn main() {
             .map(|d| d.subsec_nanos())
             .unwrap_or(1)
             .wrapping_add(i as u32 * 7919);
-        let session = Session::new(cfg, driver.now_ms(), seed);
+        let handshake = client_handshake(opts.security, None, seed);
+        let session = Session::with_handshake(cfg, driver.now_ms(), handshake);
         bots.push(Bot {
             label: name,
             session,
