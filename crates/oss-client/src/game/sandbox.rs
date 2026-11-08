@@ -126,6 +126,10 @@ pub struct Sandbox {
     pub(super) ball_rules: BallRules,
     /// When your carried flags will be dropped (game clock), if timed.
     flag_deadline: Option<f32>,
+    /// Flags were dropped because the server went quiet (once per silence).
+    dropped_for_silence: bool,
+    /// Screen shake after a bomb hit you (`Bomb:JitterTime`): seconds left.
+    jitter_left: f32,
     /// LVZ screen anchors for this frame.
     pub(super) screen_refs: ScreenRefs,
     /// World tick of the last clock correction (online).
@@ -337,6 +341,8 @@ impl Sandbox {
             lvz: Lvz::default(),
             flags: Flags::new(flag_tiles),
             flag_deadline: None,
+            dropped_for_silence: false,
+            jitter_left: 0.0,
             balls: Balls::default(),
             attached_to: None,
             attachments: Default::default(),
@@ -419,7 +425,30 @@ impl Sandbox {
             return self.spec_cam;
         }
         let me = self.me();
-        view::lerp_pos(me.prev_pos, me.pos, alpha)
+        let (x, y) = view::lerp_pos(me.prev_pos, me.pos, alpha);
+        let (dx, dy) = self.jitter();
+        (x + dx, y + dy)
+    }
+
+    /// `Bomb:JitterTime` screen shake: as in nullspace, up to 2 tiles, fading over
+    /// the jitter time.
+    fn jitter(&self) -> (f32, f32) {
+        let total = self.jitter_time();
+        if self.jitter_left <= 0.0 || total <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let strength = self.jitter_left / total;
+        let reach = total.min(2.0) * 16.0 * strength;
+        let t = self.world.tick as f32;
+        ((t * 0.75).sin() * reach, (t * 0.63).sin() * reach)
+    }
+
+    /// `Bomb:JitterTime` in seconds (0 offline).
+    fn jitter_time(&self) -> f32 {
+        self.net
+            .as_ref()
+            .and_then(|n| n.session.settings())
+            .map_or(0.0, |cs| cs.jitter_time().max(0) as f32 / 100.0)
     }
 
     /// The ship being followed while spectating, if it's in play.
@@ -656,6 +685,7 @@ impl Sandbox {
         let clock = self.clock;
         self.effects.retain(|e| clock - e.start < e.kind.params().2);
         self.lvz.expire(clock);
+        self.jitter_left = (self.jitter_left - dt.as_secs_f32()).max(0.0);
         self.update_engine_sound();
     }
 
@@ -1516,6 +1546,12 @@ impl Sandbox {
             .map_or(self.me().freq, |p| p.freq as u16)
     }
 
+    /// `Radar:MapZoomFactor`, online.
+    pub(super) fn map_zoom(&self) -> Option<u32> {
+        let z = self.net.as_ref()?.session.settings()?.map_zoom_factor();
+        (z > 0).then_some(z as u32)
+    }
+
     /// `Flag:HideFlags`: spectators don't see dropped flags.
     pub(super) fn hide_flags(&self) -> bool {
         self.net
@@ -1553,10 +1589,51 @@ impl Sandbox {
         self.flag_deadline.map(|d| (d - self.clock).max(0.0))
     }
 
+    /// Whether flags show and can be taken: not during `Flag:EnterGameFlaggingDelay`
+    /// after entering, nor while the server has been silent for `Flag:FlagBlankDelay`.
+    pub(super) fn flags_visible(&self) -> bool {
+        let Some(net) = self.net.as_ref() else {
+            return true;
+        };
+        let Some(cs) = net.session.settings() else {
+            return true;
+        };
+        let enter = cs.enter_game_flagging_delay().max(0) as f32 / 100.0;
+        let blank = cs.flag_blank_delay().max(0) as u64 * 10;
+        let quiet = net.session.ms_since_data(net.now_ms());
+        self.clock >= enter && (blank == 0 || quiet < blank)
+    }
+
+    /// `Flag:NoDataFlagDropDelay`: drop carried flags once the server has been
+    /// silent that long (once per silence).
+    fn drop_flags_on_silence(&mut self) {
+        let Some(net) = self.net.as_mut() else { return };
+        let Some(delay) = net
+            .session
+            .settings()
+            .map(|cs| cs.no_data_flag_drop_delay())
+        else {
+            return;
+        };
+        let quiet = net.session.ms_since_data(net.now_ms());
+        if delay <= 0 || quiet < delay as u64 * 10 {
+            self.dropped_for_silence = false;
+            return;
+        }
+        let carried = net.session.me().is_some_and(|p| p.flags > 0);
+        if carried && !self.dropped_for_silence {
+            self.dropped_for_silence = true;
+            self.flag_deadline = None;
+            net.session.drop_flags();
+            net.flush();
+        }
+    }
+
     /// Asks for flags your ship touches, and drops carried flags when their time
     /// runs out.
     fn check_flags(&mut self) {
-        if self.net.is_none() || self.spectating {
+        self.drop_flags_on_silence();
+        if self.net.is_none() || self.spectating || !self.flags_visible() {
             return;
         }
         let me = self.me();
@@ -1683,6 +1760,23 @@ impl Sandbox {
 
     fn handle_events(&mut self, events: &[Event]) {
         let me = self.me_id;
+        // A bomb went off this tick and you took damage: a bomb hit you.
+        let bomb = events.iter().any(|e| {
+            matches!(
+                e,
+                Event::Explosion {
+                    kind: ProjectileKind::Bomb | ProjectileKind::Mine | ProjectileKind::Thor,
+                    ..
+                }
+            )
+        });
+        if bomb
+            && events
+                .iter()
+                .any(|e| matches!(e, Event::ShipHit { ship, .. } if *ship == me))
+        {
+            self.jitter_left = self.jitter_time();
+        }
         let ship_pos = |w: &World, id: u16| w.ships.iter().find(|s| s.id == id).map(|s| s.pos);
         for e in events {
             match e {

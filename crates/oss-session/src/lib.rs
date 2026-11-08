@@ -347,6 +347,8 @@ pub struct Session {
     playback: bool,
     /// Playback clock: (session time, server ticks then).
     replay_clock: Option<(u64, u32)>,
+    /// When the server last sent anything (session ms).
+    last_data_ms: u64,
 }
 
 impl Session {
@@ -380,6 +382,7 @@ impl Session {
             recorder: None,
             playback: false,
             replay_clock: None,
+            last_data_ms: now_ms,
         }
     }
 
@@ -427,6 +430,7 @@ impl Session {
     pub fn feed(&mut self, now_ms: u64, rec: &oss_formats::replay::Record) {
         use oss_formats::replay::RecordKind;
         self.last_now_ms = now_ms;
+        self.last_data_ms = now_ms;
         match rec.kind {
             RecordKind::ServerPacket => self.handle_packet(now_ms, &rec.data),
             RecordKind::Meta => {
@@ -503,6 +507,11 @@ impl Session {
         }
     }
 
+    /// Milliseconds since the server last sent anything.
+    pub fn ms_since_data(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(self.last_data_ms)
+    }
+
     /// The connection's encryption ("opensec", "vie", ...) once connected.
     pub fn cipher_name(&self) -> Option<&'static str> {
         self.conn.cipher_name()
@@ -524,6 +533,7 @@ impl Session {
     /// Feeds one received datagram.
     pub fn handle_datagram(&mut self, now_ms: u64, data: &[u8]) {
         self.last_now_ms = now_ms;
+        self.last_data_ms = now_ms;
         self.conn.handle_datagram(now_ms, data);
         self.drain_net(now_ms);
     }
@@ -1410,6 +1420,14 @@ pub fn login_message(code: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracks_server_silence() {
+        let mut s = Session::new(SessionConfig::default(), 1_000, 1);
+        assert_eq!(s.ms_since_data(1_500), 500);
+        s.handle_datagram(1_600, &[0, 0]);
+        assert_eq!(s.ms_since_data(1_650), 50);
+    }
 
     #[test]
     fn extends_small_timestamps() {

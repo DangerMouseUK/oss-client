@@ -11,7 +11,8 @@ use super::view::{Canvas, color};
 use crate::gfx::{Region, Renderer, TextureId};
 
 /// Continuum's default `Radar:MapZoomFactor`.
-const MAP_ZOOM: u32 = 10;
+/// Radar zoom when the arena doesn't say (`Radar:MapZoomFactor`).
+const DEFAULT_MAP_ZOOM: u32 = 10;
 const RADAR_MARGIN: f32 = 6.0;
 
 /// The whole-map radar image, rebuilt when the view width (and so its zoom) changes.
@@ -322,13 +323,15 @@ fn draw_items(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
 
 fn ensure_radar(s: &mut Sandbox, r: &mut Renderer, view_w: u32) {
     let revision = s.map_revision;
-    if s.radar
-        .as_ref()
-        .is_some_and(|rd| rd.built_for == view_w && rd.revision == revision)
-    {
+    // Radar:MapZoomFactor: the whole map is (screen width * 8 / zoom) pixels across,
+    // as in nullspace.
+    let zoom = s.map_zoom().unwrap_or(DEFAULT_MAP_ZOOM).max(1);
+    let full_dim = (view_w * 8 / zoom).clamp(64, 4096);
+    if s.radar.as_ref().is_some_and(|rd| {
+        rd.built_for == view_w && rd.revision == revision && rd.full_dim == full_dim
+    }) {
         return;
     }
-    let full_dim = (view_w * 8 / MAP_ZOOM).clamp(64, 4096);
     let pixels = radar_image(&s.world.map, full_dim);
     match &mut s.radar {
         Some(rd) if rd.full_dim == full_dim => {

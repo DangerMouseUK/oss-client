@@ -311,7 +311,7 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, ui: &Canvas, r: &mut Renderer, alpha:
     }
 
     // --- Flags (yours in the sheet's second half) -------------------------------------
-    let hide_flags = s.spectating && s.hide_flags();
+    let hide_flags = (s.spectating && s.hide_flags()) || !s.flags_visible();
     let flag_frames = a.flag.frame_count(16, 16) / 2;
     for f in s
         .flags
