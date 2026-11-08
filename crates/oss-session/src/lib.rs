@@ -85,6 +85,8 @@ pub struct Player {
     pub flag_points: i32,
     pub wins: i16,
     pub losses: i16,
+    /// Flags carried.
+    pub flags: i16,
     /// Last position received (pixels, pixels/10 s), if any.
     pub position: Option<RemotePosition>,
 }
@@ -463,6 +465,7 @@ impl Session {
                         flag_points: d.flag_points,
                         wins: d.wins,
                         losses: d.losses,
+                        flags: d.flags_carried,
                         position: None,
                     };
                     let pid = p.pid;
@@ -566,12 +569,42 @@ impl Session {
                     freq: c.freq,
                 });
             }
-            S2CPacket::Kill(k) => self.events.push_back(SessionEvent::Kill {
-                killer: k.killer,
-                killed: k.killed,
-                bounty: k.bounty,
-                green: k.green,
-            }),
+            S2CPacket::Kill(k) => {
+                // Score the kill the way Continuum clients do: the killer gets the
+                // bounty as points and a win, the killed a loss and drops its flags.
+                if let Some(p) = self.players.get_mut(&k.killed) {
+                    p.losses = p.losses.saturating_add(1);
+                    p.flags = 0;
+                }
+                if let Some(p) = self.players.get_mut(&k.killer) {
+                    p.wins = p.wins.saturating_add(1);
+                    p.kill_points = p.kill_points.saturating_add(k.bounty.max(0) as i32);
+                    if k.killer != k.killed {
+                        p.flags = p.flags.saturating_add(k.flags.max(0));
+                    }
+                }
+                self.events.push_back(SessionEvent::Kill {
+                    killer: k.killer,
+                    killed: k.killed,
+                    bounty: k.bounty,
+                    green: k.green,
+                })
+            }
+            S2CPacket::ScoreUpdate(u) => {
+                if let Some(p) = self.players.get_mut(&u.pid) {
+                    p.kill_points = u.kill_points;
+                    p.flag_points = u.flag_points;
+                    p.wins = u.kills;
+                    p.losses = u.deaths;
+                }
+            }
+            S2CPacket::ScoreReset(r) => {
+                for p in self.players.values_mut() {
+                    if r.pid == -1 || r.pid == p.pid {
+                        (p.kill_points, p.flag_points, p.wins, p.losses) = (0, 0, 0, 0);
+                    }
+                }
+            }
             S2CPacket::Chat(c) => {
                 let ChatBody {
                     kind,

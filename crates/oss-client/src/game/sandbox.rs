@@ -21,6 +21,7 @@ use super::art::{self, Art};
 use super::hud::{self, RadarCache};
 use super::input::{Action, InputState};
 use super::online::Online;
+use super::statbox::{self, StatBox};
 use super::view::{self, Canvas, color};
 use crate::audio::Audio;
 use crate::gfx::{Renderer, StarParams, TextureId};
@@ -91,6 +92,7 @@ pub struct Sandbox {
     pub(super) radar: Option<RadarCache>,
     /// Bumped whenever doors or bricks change, so the radar image is rebuilt.
     pub(super) map_revision: u64,
+    statbox: StatBox,
     /// World tick of the last clock correction (online).
     slew_tick: u32,
     brick_count: usize,
@@ -267,6 +269,7 @@ impl Sandbox {
             atlas,
             radar: None,
             map_revision: 0,
+            statbox: StatBox::default(),
             slew_tick: 0,
             brick_count: 0,
             last: Instant::now(),
@@ -549,6 +552,9 @@ impl Sandbox {
         for e in edges.iter() {
             match e {
                 Action::ShowFps => self.show_fps = !self.show_fps,
+                Action::StatBox => self.statbox.cycle(),
+                Action::StatBoxUp => self.statbox.move_selection(false),
+                Action::StatBoxDown => self.statbox.move_selection(true),
                 Action::ZoomIn => self.scale = (self.scale + 1).min(8),
                 Action::ZoomOut => self.scale = self.scale.saturating_sub(1).max(1),
                 _ => {}
@@ -576,7 +582,29 @@ impl Sandbox {
             return;
         }
         let me_name = net.session.me().map(|p| p.name.clone()).unwrap_or_default();
-        let (kind, target, text, shown, colour) = if let Some(t) = line.strip_prefix('\'') {
+        let selected = self
+            .statbox
+            .selected()
+            .filter(|&pid| pid != self.me_id as i16);
+        let (kind, target, text, shown, colour) = if let Some(t) = line.strip_prefix('/') {
+            // "/text": private message to the player selected in the stat box.
+            match selected {
+                Some(pid) => (
+                    chat_type::PRIVATE,
+                    pid,
+                    t.to_string(),
+                    format!("{me_name}> {t}"),
+                    color::GREEN,
+                ),
+                None => {
+                    self.message(
+                        "Select a player in the stat box first (Page Up/Down).",
+                        color::YELLOW,
+                    );
+                    return;
+                }
+            }
+        } else if let Some(t) = line.strip_prefix('\'') {
             (
                 chat_type::FREQ,
                 0,
@@ -1115,6 +1143,7 @@ impl Sandbox {
         let c = Canvas::new(&self.art, self.atlas, r.size(), self.scale, cam);
         view::draw_world(self, &c, r, alpha);
         hud::draw(self, &c, r);
+        self.draw_statbox(&c, r);
         self.draw_log(&c, r);
         if self.menu {
             self.draw_menu(&c, r);
@@ -1122,6 +1151,62 @@ impl Sandbox {
         StarParams {
             camera: [cam.0, cam.1],
             scale: c.scale,
+        }
+    }
+
+    /// The players the stat box lists: everyone in the arena online, just you offline.
+    fn statbox_entries(&self) -> Vec<statbox::Entry> {
+        let Some(net) = self.net.as_ref() else {
+            let me = self.me();
+            return vec![statbox::Entry {
+                pid: self.me_id as i16,
+                name: "You".into(),
+                freq: me.freq as i16,
+                kill_points: me.bounty.min(i32::MAX as u32) as i32,
+                ..Default::default()
+            }];
+        };
+        net.session
+            .players()
+            .map(|p| statbox::Entry {
+                pid: p.pid,
+                name: p.name.clone(),
+                squad: p.squad.clone(),
+                spectator: p.ship == SPECTATOR,
+                freq: p.freq,
+                kill_points: p.kill_points,
+                flag_points: p.flag_points,
+                wins: p.wins,
+                losses: p.losses,
+                flags: p.flags,
+            })
+            .collect()
+    }
+
+    fn draw_statbox(&mut self, c: &Canvas, r: &mut Renderer) {
+        let entries = self.statbox_entries();
+        let Some(l) = self.statbox.layout(self.me_id as i16, &entries) else {
+            return;
+        };
+        let (x, y, w, h) = l.rect;
+        c.rect(r, x, y, w + 3.0, h, [0.0, 0.0, 0.0, 0.75]);
+        c.rect(r, x, l.separator, w + 3.0, 1.0, [0.45, 0.45, 0.55, 1.0]);
+        for &(mx, my, m) in &l.markers {
+            let colour = match m {
+                statbox::Marker::Selected => [0.95, 0.85, 0.2, 1.0],
+                statbox::Marker::Spectator => [0.5, 0.5, 0.5, 1.0],
+                statbox::Marker::SelectedSpectator => [0.95, 0.55, 0.2, 1.0],
+            };
+            c.rect(r, mx + 1.0, my + 1.0, 5.0, 5.0, colour);
+        }
+        for t in &l.texts {
+            let width = t.text.chars().count() as f32 * 8.0;
+            let x = match t.align {
+                statbox::Align::Left => t.x,
+                statbox::Align::Right => t.x - width,
+                statbox::Align::Center => (t.x - width / 2.0).floor(),
+            };
+            c.text(r, x, t.y, t.color, &t.text);
         }
     }
 
@@ -1182,6 +1267,7 @@ impl Sandbox {
             "Home stealth, Shift+Home cloak, End x-radar,",
             "Shift+End antiwarp, F3 rocket, F4 brick, F5 decoy,",
             "F6 thor, Alt big radar, Ctrl +/- scale, F12 fps",
+            "F2 stat box, PgUp/PgDn select, /text to selected",
         ]);
         let w = 54.0 * 8.0;
         let h = lines.len() as f32 * 14.0 + 16.0;
