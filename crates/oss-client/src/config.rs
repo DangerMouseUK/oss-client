@@ -42,6 +42,8 @@ pub struct Config {
     pub pad: PadBindings,
     /// Directory servers for the zone browser ("host:port"); none by default.
     pub directories: Vec<String>,
+    /// Connection encryption (auto = OpenSec, falling back to VIE).
+    pub security: oss_session::security::SecurityMode,
 }
 
 impl Default for Config {
@@ -59,6 +61,7 @@ impl Default for Config {
             ui_scale: 0,
             pad: PadBindings::default(),
             directories: Vec::new(),
+            security: Default::default(),
         }
     }
 }
@@ -137,6 +140,9 @@ impl Config {
                     .map(|p| c.palette = p)
                     .ok_or_else(|| format!("unknown palette `{value}`")),
                 ("accessibility", "ui_scale") => number(value, 0, 4).map(|n| c.ui_scale = n),
+                ("network", "security") => oss_session::security::SecurityMode::from_name(value)
+                    .map(|m| c.security = m)
+                    .ok_or_else(|| format!("expected auto, opensec or vie, got `{value}`")),
                 ("directory", "servers") => {
                     c.directories = value
                         .split(',')
@@ -208,6 +214,13 @@ impl Config {
              ui_scale = {}        ; 0-4: draw the interface (text, HUD) this much larger\n\n",
             self.palette.name(),
             self.ui_scale
+        );
+        s += &format!(
+            "[network]\n\
+             ; auto: OpenSec, falling back to VIE for servers without it (never once a\n\
+             ; server's key is on record); opensec or vie to force one.\n\
+             security = {}\n\n",
+            self.security.name()
         );
         s += &format!(
             "[directory]\n\
@@ -447,6 +460,7 @@ mod tests {
                 p
             },
             directories: vec!["127.0.0.1:4990".into(), "localhost:4991".into()],
+            security: oss_session::security::SecurityMode::OpenSec,
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);

@@ -47,7 +47,7 @@ impl Field {
 /// What the player chose.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Choice {
-    Connect(ServerOptions),
+    Connect(Box<ServerOptions>),
     Sandbox,
     /// Open the zone browser.
     Browse,
@@ -213,7 +213,7 @@ impl Login {
             return None;
         }
         self.error = None;
-        Some(Choice::Connect(ServerOptions {
+        Some(Choice::Connect(Box::new(ServerOptions {
             server: server.to_string(),
             name: self.name.trim().to_string(),
             password: self.password.clone(),
@@ -223,7 +223,9 @@ impl Login {
             follow: None,
             attach: None,
             record: None,
-        }))
+            security: Default::default(),
+            known_servers: None,
+        })))
     }
 }
 

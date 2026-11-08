@@ -47,6 +47,7 @@ Options:
   --directory <host:port>   A directory server for the zone browser (F3 on the
                             login screen; repeatable; adds to the settings file's)
   --zones                   Start on the zone browser
+  --security <mode>         auto (OpenSec, falling back to VIE), opensec or vie
   --config <file>           Settings file (default: oss-client.ini in the user's
                             settings folder, created on first run)
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
@@ -101,6 +102,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut open_settings = false;
     let mut directories = Vec::new();
     let mut open_zones = false;
+    let mut security = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -169,6 +171,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--settings" => open_settings = true,
             "--directory" => directories.push(value("--directory")?),
             "--zones" => open_zones = true,
+            "--security" => {
+                security = Some(
+                    oss_session::security::SecurityMode::from_name(&value("--security")?)
+                        .ok_or("--security must be auto, opensec or vie")?,
+                )
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -196,6 +204,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             palette: Default::default(),
             ui_scale: 0,
             directories: directories.clone(),
+            security: security.unwrap_or_default(),
+            security_from_cli: security.is_some(),
             open_zones,
             pad: Default::default(),
             lvz,
@@ -223,6 +233,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             follow,
             attach,
             record,
+            security: security.unwrap_or_default(),
+            known_servers: None,
         }),
         // No --server or --sandbox: the login screen.
         (false, None) => app::Mode::Login { server: None },
@@ -247,6 +259,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         palette: Default::default(),
         ui_scale: 0,
         directories,
+        security: security.unwrap_or_default(),
+        security_from_cli: security.is_some(),
         open_zones,
         pad: Default::default(),
         lvz,
@@ -289,6 +303,10 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     opts.ui_scale = cfg.ui_scale;
     opts.pad = cfg.pad;
     opts.directories.extend(cfg.directories);
+    // The command line wins over the settings file.
+    if !opts.security_from_cli {
+        opts.security = cfg.security;
+    }
     opts.player_name = cfg.name.clone();
     if let app::Mode::Zone(z) = &mut opts.mode
         && z.name.is_empty()

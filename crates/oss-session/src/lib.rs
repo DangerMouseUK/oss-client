@@ -12,6 +12,7 @@
 pub mod directory;
 pub mod map;
 pub mod replay;
+pub mod security;
 pub mod sim;
 pub mod test_zone;
 pub mod udp;
@@ -500,6 +501,16 @@ impl Session {
             }
             None => self.conn.server_ticks(now_ms),
         }
+    }
+
+    /// The connection's encryption ("opensec", "vie", ...) once connected.
+    pub fn cipher_name(&self) -> Option<&'static str> {
+        self.conn.cipher_name()
+    }
+
+    /// The server's OpenSec key, when it sent one.
+    pub fn server_key(&self) -> Option<[u8; 32]> {
+        self.conn.peer_key()
     }
 
     pub fn rtt_ms(&self) -> u64 {

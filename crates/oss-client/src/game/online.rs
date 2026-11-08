@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use oss_session::map::{MapCache, default_cache_dir};
 use oss_session::replay::{Player as ReplayPlayer, Recorder};
+use oss_session::security::{KnownServers, SecurityMode, client_handshake};
 use oss_session::udp::UdpDriver;
 use oss_session::{Session, SessionConfig, SessionEvent, State};
 
@@ -37,6 +38,10 @@ pub struct ServerOptions {
     pub attach: Option<String>,
     /// Record the visit to this replay file.
     pub record: Option<PathBuf>,
+    /// Encryption: OpenSec first with VIE fallback (auto), or one of them.
+    pub security: SecurityMode,
+    /// Where OpenSec server keys are remembered (trust on first use).
+    pub known_servers: Option<PathBuf>,
 }
 
 pub struct Online {
@@ -59,6 +64,10 @@ pub struct Online {
     pub attach: Option<String>,
     /// LVZ files received and not yet loaded by the game: (name, bytes).
     pub files: Vec<(String, Vec<u8>)>,
+    /// OpenSec keys on record, and whether this server's was already known.
+    known: KnownServers,
+    pinned: bool,
+    server: String,
 }
 
 impl Online {
@@ -79,7 +88,14 @@ impl Online {
             .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
             .unwrap_or(1);
         let now = driver.now_ms();
-        let mut session = Session::new(cfg, now, seed);
+        let known = opts
+            .known_servers
+            .as_deref()
+            .map(KnownServers::load)
+            .unwrap_or_default();
+        let pin = known.get(&opts.server);
+        let handshake = client_handshake(opts.security, pin, seed);
+        let mut session = Session::with_handshake(cfg, now, handshake);
         if let Some(path) = &opts.record {
             let started = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -109,6 +125,9 @@ impl Online {
             follow: opts.follow.clone(),
             attach: opts.attach.clone(),
             files: Vec::new(),
+            known,
+            pinned: pin.is_some(),
+            server: opts.server.clone(),
         })
     }
 
@@ -140,6 +159,9 @@ impl Online {
             follow: recorder,
             attach: None,
             files: Vec::new(),
+            known: KnownServers::default(),
+            pinned: false,
+            server: String::new(),
         })
     }
 
@@ -195,7 +217,18 @@ impl Online {
         let mut out = Vec::new();
         while let Some(ev) = self.session.poll_event() {
             match &ev {
-                SessionEvent::Connected => self.status = "Logging in...".into(),
+                SessionEvent::Connected => {
+                    let cipher = self.session.cipher_name().unwrap_or("?");
+                    self.status = format!("Logging in ({cipher})...");
+                    log::info!("connected to {} with {cipher}", self.server);
+                    // Trust on first use: remember an OpenSec server's key.
+                    if let (false, Some(key)) = (self.pinned, self.session.server_key()) {
+                        match self.known.remember(&self.server, key) {
+                            Ok(()) => log::info!("remembered {}'s OpenSec key", self.server),
+                            Err(e) => log::warn!("couldn't save the server key: {e}"),
+                        }
+                    }
+                }
                 SessionEvent::LoggedIn => self.status = "Entering arena...".into(),
                 SessionEvent::LoginFailed { message, .. } => {
                     self.error = Some(format!("Login failed: {message}"))
@@ -256,7 +289,16 @@ impl Online {
                     self.files.push((name.clone(), data.clone()));
                 }
                 SessionEvent::Closed(reason) if self.error.is_none() => {
-                    self.error = Some(format!("Disconnected ({reason:?})"));
+                    let handshake = matches!(reason, oss_session::Reason::HandshakeFailed(_));
+                    self.error = Some(if handshake && self.pinned {
+                        format!(
+                            "{} didn't prove the OpenSec key on record. If the zone really \
+                             changed its key, remove its line from known_servers.txt.",
+                            self.server
+                        )
+                    } else {
+                        format!("Disconnected ({reason:?})")
+                    });
                 }
                 _ => {}
             }

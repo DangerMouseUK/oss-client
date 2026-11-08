@@ -64,6 +64,10 @@ pub struct Options {
     pub macros: Vec<(crate::game::input::Binding, String)>,
     /// Directory servers for the zone browser.
     pub directories: Vec<String>,
+    /// Connection encryption.
+    pub security: oss_session::security::SecurityMode,
+    /// `--security` was given (it wins over the settings file).
+    pub security_from_cli: bool,
     /// `--zones`: start on the zone browser.
     pub open_zones: bool,
     /// Accessibility settings.
@@ -263,6 +267,10 @@ impl ApplicationHandler for App {
                 }
             }
             Mode::Zone(z) => {
+                let mut z = z.clone();
+                z.security = self.options.security;
+                z.known_servers = known_servers_path(&self.options);
+                let z = &z;
                 let size = window.inner_size();
                 let res = ((size.width / scale) as u16, (size.height / scale) as u16);
                 let net = match Online::connect(z, res) {
@@ -480,7 +488,9 @@ impl App {
                         Err(e) => return self.fail(event_loop, e),
                     }
                 }
-                Some(Choice::Connect(opts)) => {
+                Some(Choice::Connect(mut opts)) => {
+                    opts.security = self.options.security;
+                    opts.known_servers = known_servers_path(&self.options);
                     if let Some(path) = &self.options.login_file {
                         ls.login.save(path);
                     }
@@ -741,6 +751,7 @@ fn current_config(o: &Options) -> crate::config::Config {
             ui_scale: o.ui_scale,
             pad: o.pad.clone(),
             directories: o.directories.clone(),
+            security: o.security,
         }
     }
 }
@@ -933,6 +944,14 @@ fn draw_browser(
         color::WHITE,
         "Up/Down choose   Enter use   Esc back",
     );
+}
+
+/// `known_servers.txt` beside the settings file, for OpenSec keys.
+fn known_servers_path(o: &Options) -> Option<PathBuf> {
+    o.settings_path
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(|d| d.join("known_servers.txt"))
 }
 
 #[cfg(test)]

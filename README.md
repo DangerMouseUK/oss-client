@@ -42,6 +42,14 @@ cargo run --release -p oss-client -- --directory 127.0.0.1:4990 --zones
 plus the map and LVZ files), and `--replay visit.ossr` plays it back without a server,
 spectating and following the player who recorded it. A recording cut short still plays.
 
+## Encryption
+
+Connections try OpenSec first and fall back to VIE for servers that don't speak it.
+The first time a server proves an OpenSec key, the key is remembered in
+`known_servers.txt` beside the settings file. From then on that server must prove
+the same key over OpenSec, with no fallback. `--security auto|opensec|vie` or
+`[network] security` changes the policy.
+
 ## Settings
 
 `oss-client.ini` in your settings folder (`%APPDATA%\OpenSubSpace` on Windows,
