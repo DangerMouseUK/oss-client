@@ -44,8 +44,11 @@ Run the sandbox on the built-in arena, or on any `.lvl` map:
 
 ```
 cargo run --release -p oss-client -- --sandbox
-cargo run --release -p oss-client -- --sandbox path/to/map.lvl
+cargo run --release -p oss-client -- --sandbox path/to/map.lvl --lvz path/to/art.lvz
 ```
+
+Online, the arena's LVZ files (zone graphics: map and screen objects, BMP/PNG/JPEG/GIF
+images, animations, server toggles) are downloaded and cached with the map.
 
 Default Continuum keys: arrows fly, Shift afterburner, Ctrl guns, Tab bombs,
 Shift+Tab mines, Delete multifire, Esc menu (1-8 change ship, Q quit). Ctrl +/- changes
@@ -72,7 +75,7 @@ cargo run -p oss-session --example test_zone -- --bind 127.0.0.1:5000 path/to/ma
 
 - `oss-client` — the game (GPL-2.0-or-later).
 - `oss-sim` — deterministic 100 Hz ship/weapon/collision simulation (MIT).
-- `oss-assets` — `.bm2`/`.bmp`/`.png` and `.wa2`/`.wav` decoders, install discovery (MIT).
+- `oss-assets` — `.bm2`/`.bmp`/`.png`/`.jpg`/`.gif` and `.wa2`/`.wav` decoders, the asset search path (MIT).
 - `oss-session` — the client side of a game session over `oss-net`: login, arena entry,
   settings, map download/cache, security answers, players, positions, chat. Sans-IO,
   with a UDP driver.

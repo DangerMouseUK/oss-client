@@ -31,6 +31,8 @@ pub struct Online {
     pub error: Option<String>,
     /// Team requested on the command line.
     pub freq: Option<i16>,
+    /// LVZ files received and not yet loaded by the game: (name, bytes).
+    pub files: Vec<(String, Vec<u8>)>,
 }
 
 impl Online {
@@ -43,6 +45,7 @@ impl Online {
             arena: opts.arena.clone(),
             ship: opts.ship,
             resolution,
+            want_lvz: true,
             ..Default::default()
         };
         let seed = std::time::SystemTime::now()
@@ -59,6 +62,7 @@ impl Online {
             status: format!("Connecting to {}...", opts.server),
             error: None,
             freq: opts.freq,
+            files: Vec::new(),
         })
     }
 
@@ -111,6 +115,26 @@ impl Online {
                     door_seed,
                     timestamp,
                 } => self.seeds = Some((*green_seed, *door_seed, *timestamp)),
+                SessionEvent::FilesListed(files) => {
+                    for f in files {
+                        let cached = self.cache.load(&f.name);
+                        if cached.is_some_and(|d| self.session.use_cached_file(&f.name, &d)) {
+                            log::info!("{} from cache", f.name);
+                        } else {
+                            self.session.download_file(&f.name);
+                        }
+                    }
+                }
+                SessionEvent::FileReady {
+                    name,
+                    data,
+                    downloaded,
+                } => {
+                    if *downloaded && let Err(e) = self.cache.store(name, data) {
+                        log::warn!("couldn't cache {name}: {e}");
+                    }
+                    self.files.push((name.clone(), data.clone()));
+                }
                 SessionEvent::Closed(reason) if self.error.is_none() => {
                     self.error = Some(format!("Disconnected ({reason:?})"));
                 }

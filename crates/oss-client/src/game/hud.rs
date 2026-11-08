@@ -5,6 +5,7 @@
 use oss_sim::{Ship, TileMap, cap, ship::active, tile, toggle};
 
 use super::art::{Art, anim_frame};
+use super::lvz::ScreenRefs;
 use super::sandbox::Sandbox;
 use super::view::{Canvas, color};
 use crate::gfx::{Region, Renderer, TextureId};
@@ -29,6 +30,42 @@ pub fn draw(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
     }
     draw_radar(s, c, r);
     draw_messages(s, c, r);
+}
+
+/// Top of the item icon columns.
+fn icons_top(c: &Canvas) -> f32 {
+    (c.view_h * 0.57 + 1.0 - 100.0).floor()
+}
+
+/// Side of the small radar.
+fn radar_dim(c: &Canvas) -> f32 {
+    ((((c.view_w as u32 / 6) / 4) * 8) / 2) as f32
+}
+
+/// Anchor points for LVZ screen objects, indexed by `oss_proto::objects::reference`:
+/// screen corners and centre, the stat box, the item (specials) column on the left,
+/// below the energy bar, the chat, the radar and the weapon column on the right.
+pub fn screen_refs(c: &Canvas, statbox_corner: (f32, f32), chat_top: f32) -> ScreenRefs {
+    let (w, h) = (c.view_w, c.view_h);
+    let top = icons_top(c);
+    let dim = radar_dim(c);
+    let (rx, ry) = (w - dim - RADAR_MARGIN, h - dim - RADAR_MARGIN);
+    // Icon (26) plus the count tab beside it.
+    let specials_right = 37.0;
+    [
+        (0.0, 0.0),
+        ((w / 2.0).floor(), (h / 2.0).floor()),
+        (w, h),
+        statbox_corner,
+        (specials_right, top),
+        (specials_right, top + 7.0 * 25.0),
+        ((w / 2.0).floor(), 28.0),
+        (0.0, chat_top),
+        (rx, ry),
+        (rx, ry - 12.0),
+        (w - 26.0, top),
+        (w - 26.0, top + 6.0 * 25.0),
+    ]
 }
 
 fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
@@ -147,7 +184,7 @@ fn draw_items(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
     // Thin "empty slot" markers cut from the icon sheet.
     let empty_left = a.icons.sub(152, 120, 4, 24);
     let empty_right = a.icons.sub(78, 120, 4, 24);
-    let y_top = (c.view_h * 0.57 + 1.0 - 100.0).floor();
+    let y_top = icons_top(c);
 
     // Left column: counted items.
     let mut y = y_top;
@@ -310,7 +347,7 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
         )
     } else {
         // About a sixth of the screen width, centred on you, as in Continuum.
-        let dim = ((((c.view_w as u32 / 6) / 4) * 8) / 2) as f32;
+        let dim = radar_dim(c);
         // Centred on the camera (your ship, or the spectator view).
         let p = oss_sim::Vec2::new(c.cam.0 as i32, c.cam.1 as i32);
         let min_x = (to_radar(p.x as f32) - dim / 2.0)

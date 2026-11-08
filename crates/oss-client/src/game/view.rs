@@ -2,6 +2,8 @@
 
 use oss_sim::{Pos, ProjectileKind, fixed::ROTATION_UNITS, tile, toggle};
 
+use oss_proto::objects::layer;
+
 use super::art::{Art, anim_frame, once_frame};
 use super::sandbox::{EffectKind, Sandbox};
 use crate::gfx::{Region, Renderer, TextureId};
@@ -90,6 +92,23 @@ impl Canvas {
             region.w as f32 * self.scale,
             region.h as f32 * self.scale,
             color,
+        );
+    }
+
+    /// Draws `region` of `texture` with its top-left at world pixel (x, y).
+    pub fn world_tex(&self, r: &mut Renderer, texture: TextureId, region: Region, x: f32, y: f32) {
+        if region.w == 0 {
+            return;
+        }
+        let (px, py) = self.to_screen(x, y);
+        r.quad(
+            texture,
+            region,
+            px,
+            py,
+            region.w as f32 * self.scale,
+            region.h as f32 * self.scale,
+            [1.0; 4],
         );
     }
 
@@ -204,6 +223,11 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
     let world = &s.world;
     let me = s.me();
 
+    // LVZ below everything (the starfield is drawn separately, underneath).
+    for layer in [layer::BELOW_ALL, layer::AFTER_BACKGROUND] {
+        s.lvz.draw(layer, c, r, t, &s.screen_refs);
+    }
+
     // --- Tiles -------------------------------------------------------------------------
     let tx0 = ((c.cam.0 - c.view_w / 2.0) / 16.0).floor() as i32 - 1;
     let ty0 = ((c.cam.1 - c.view_h / 2.0) / 16.0).floor() as i32 - 1;
@@ -277,6 +301,8 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         };
         c.world(r, region, (ox * 16) as f32, (oy * 16) as f32);
     }
+
+    s.lvz.draw(layer::AFTER_TILES, c, r, t, &s.screen_refs);
 
     // --- Greens ------------------------------------------------------------------------
     let prize_frames = a.prizes.frame_count(16, 16);
@@ -357,6 +383,8 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
         };
         c.world_centered(r, region, x, y);
     }
+
+    s.lvz.draw(layer::AFTER_WEAPONS, c, r, t, &s.screen_refs);
 
     // --- Exhaust (under ships) -----------------------------------------------------------
     for e in s
@@ -441,4 +469,6 @@ pub fn draw_world(s: &Sandbox, c: &Canvas, r: &mut Renderer, alpha: f32) {
             c.world_centered(r, region, e.x, e.y);
         }
     }
+
+    s.lvz.draw(layer::AFTER_SHIPS, c, r, t, &s.screen_refs);
 }

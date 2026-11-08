@@ -53,6 +53,8 @@ pub struct Options {
     /// `--config`: the settings file, if not the default one.
     pub config: Option<PathBuf>,
     pub bindings: crate::game::input::Bindings,
+    /// `--lvz`: LVZ files to show in the sandbox.
+    pub lvz: Vec<PathBuf>,
     /// Player name from the settings file (the login screen's default).
     pub player_name: Option<String>,
     /// Where the login screen remembers the last zone and name.
@@ -216,6 +218,12 @@ impl ApplicationHandler for App {
                 ) {
                     Ok(mut s) => {
                         s.aim_bot = self.options.autopilot;
+                        for path in &self.options.lvz {
+                            match oss_assets::locate::read_file(path) {
+                                Ok(data) => s.load_lvz(&path.display().to_string(), &data),
+                                Err(e) => log::warn!("{e}"),
+                            }
+                        }
                         Screen::Game(Box::new(s))
                     }
                     Err(e) => return self.fail(event_loop, e),

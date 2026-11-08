@@ -45,6 +45,10 @@ pub enum ImageError {
     TooLarge(u32, u32),
     #[error("png: {0}")]
     Png(String),
+    #[error("jpeg: {0}")]
+    Jpeg(String),
+    #[error("gif: {0}")]
+    Gif(String),
 }
 
 impl Image {
@@ -113,15 +117,98 @@ fn check_dimensions(width: u32, height: u32) -> Result<(), ImageError> {
     Ok(())
 }
 
-/// Decodes a BMP or PNG by sniffing its signature. `.bm2` files may be either.
+/// Decodes a BMP, PNG, JPEG or GIF by sniffing its signature (`.bm2` files may be
+/// BMP or PNG; LVZ files use all four).
 pub fn decode_image(data: &[u8]) -> Result<Image, ImageError> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         decode_png(data)
     } else if data.starts_with(b"BM") {
         decode_bmp(data)
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        decode_jpeg(data)
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        decode_gif(data)
     } else {
         Err(ImageError::UnknownFormat)
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// JPEG
+
+/// Decodes a baseline or progressive JPEG to RGBA8 (opaque).
+pub fn decode_jpeg(data: &[u8]) -> Result<Image, ImageError> {
+    use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGBA)
+        .set_max_width(MAX_DIMENSION as usize)
+        .set_max_height(MAX_DIMENSION as usize);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
+    decoder
+        .decode_headers()
+        .map_err(|e| ImageError::Jpeg(e.to_string()))?;
+    let (w, h) = decoder
+        .dimensions()
+        .ok_or(ImageError::Invalid("jpeg without dimensions"))?;
+    let (width, height) = (w as u32, h as u32);
+    check_dimensions(width, height)?;
+    let rgba = decoder
+        .decode()
+        .map_err(|e| ImageError::Jpeg(e.to_string()))?;
+    if rgba.len() != (width * height * 4) as usize {
+        return Err(ImageError::Invalid("jpeg size mismatch"));
+    }
+    Ok(Image {
+        width,
+        height,
+        rgba,
+    })
+}
+
+// ---------------------------------------------------------------------------------------
+// GIF
+
+/// Decodes the first frame of a GIF to RGBA8, placed on its logical screen.
+pub fn decode_gif(data: &[u8]) -> Result<Image, ImageError> {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    if let Some(limit) = std::num::NonZeroU64::new(MAX_PIXELS * 4) {
+        options.set_memory_limit(gif::MemoryLimit::Bytes(limit));
+    }
+    let mut decoder = options
+        .read_info(std::io::Cursor::new(data))
+        .map_err(|e| ImageError::Gif(e.to_string()))?;
+    let (width, height) = (decoder.width() as u32, decoder.height() as u32);
+    check_dimensions(width, height)?;
+    let frame = decoder
+        .read_next_frame()
+        .map_err(|e| ImageError::Gif(e.to_string()))?
+        .ok_or(ImageError::Invalid("gif without frames"))?;
+    let mut img = Image::filled(width, height, [0, 0, 0, 0])?;
+    let (fw, fh) = (frame.width as u32, frame.height as u32);
+    if frame.buffer.len() < (fw * fh * 4) as usize {
+        return Err(ImageError::Truncated);
+    }
+    for y in 0..fh {
+        let ty = frame.top as u32 + y;
+        if ty >= height {
+            break;
+        }
+        for x in 0..fw {
+            let tx = frame.left as u32 + x;
+            if tx >= width {
+                break;
+            }
+            let s = ((y * fw + x) * 4) as usize;
+            let d = ((ty * width + tx) * 4) as usize;
+            img.rgba[d..d + 4].copy_from_slice(&frame.buffer[s..s + 4]);
+        }
+    }
+    Ok(img)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -648,6 +735,65 @@ mod tests {
         assert_eq!(img.pixel(1, 0), Some([255, 0, 0, 255]));
         img.key_black_transparent();
         assert_eq!(img.pixel(1, 0), Some([255, 0, 0, 255]));
+    }
+
+    /// The smallest baseline JPEG: one 8×8 grey block (value 128, so every DCT
+    /// coefficient is 0), a quantisation table of ones and one-symbol Huffman tables
+    /// (DC category 0, AC end-of-block), so the scan is two zero bits plus padding.
+    fn grey_jpeg() -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8]; // SOI
+        v.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]); // DQT, table 0
+        v.extend_from_slice(&[1; 64]);
+        // SOF0: 8-bit, 8×8, one component (id 1, 1×1 sampling, table 0).
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 8, 0, 8, 0, 8, 1, 1, 0x11, 0]);
+        for class in [0x00, 0x10] {
+            // DHT: one code of length 1 for symbol 0.
+            v.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x14, class, 1]);
+            v.extend_from_slice(&[0; 15]);
+            v.push(0);
+        }
+        // SOS: component 1 with tables 0/0, full spectral range.
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 1, 1, 0x00, 0, 63, 0]);
+        v.push(0b0011_1111); // DC "0", EOB "0", padding ones
+        v.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        v
+    }
+
+    #[test]
+    fn decodes_jpeg_and_rejects_garbage() {
+        let img = decode_image(&grey_jpeg()).unwrap();
+        assert_eq!((img.width, img.height), (8, 8));
+        let [r, g, b, a] = img.pixel(3, 5).unwrap();
+        assert!((126..=130).contains(&r) && r == g && g == b, "{r} {g} {b}");
+        assert_eq!(a, 255);
+        let mut cut = grey_jpeg();
+        cut.truncate(40);
+        assert!(decode_image(&cut).is_err());
+    }
+
+    #[test]
+    fn decodes_gif_first_frame_on_its_screen() {
+        let mut data = Vec::new();
+        {
+            let palette = [0, 0, 0, 255, 0, 0, 0, 0, 255];
+            let mut enc = gif::Encoder::new(&mut data, 4, 3, &palette).unwrap();
+            // A 2×2 frame at (1, 1): red, blue / blue, red.
+            let frame = gif::Frame {
+                left: 1,
+                top: 1,
+                width: 2,
+                height: 2,
+                buffer: std::borrow::Cow::Owned(vec![1, 2, 2, 1]),
+                ..Default::default()
+            };
+            enc.write_frame(&frame).unwrap();
+        }
+        let img = decode_image(&data).unwrap();
+        assert_eq!((img.width, img.height), (4, 3));
+        assert_eq!(img.pixel(1, 1), Some([255, 0, 0, 255]));
+        assert_eq!(img.pixel(2, 1), Some([0, 0, 255, 255]));
+        assert_eq!(img.pixel(0, 0).map(|p| p[3]), Some(0), "outside the frame");
+        assert!(decode_image(&data[..20]).is_err());
     }
 
     #[test]

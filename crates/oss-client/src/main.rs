@@ -32,6 +32,7 @@ Options:
                             (also OSS_ASSETS_DIR); may hold only some files
   --continuum-dir <dir>     Take graphics/sounds from a Continuum install
                             (also OSS_CONTINUUM_DIR)
+  --lvz <file.lvz>          Show an LVZ file in the sandbox (repeatable)
   --scale <n>               Integer pixel scale (default: from display DPI)
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
@@ -82,6 +83,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut autopilot = false;
     let mut mute = false;
     let mut config = None;
+    let mut lvz = Vec::new();
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -142,6 +144,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--autopilot" => autopilot = true,
             "--mute" => mute = true,
             "--config" => config = Some(PathBuf::from(value("--config")?)),
+            "--lvz" => lvz.push(PathBuf::from(value("--lvz")?)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -180,6 +183,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         volume: 60,
         config,
         bindings: Default::default(),
+        lvz,
         player_name: None,
         login_file: None,
     }))

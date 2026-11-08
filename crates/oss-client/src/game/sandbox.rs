@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use oss_assets::AssetDirs;
+use oss_proto::objects::layer;
 use oss_session::sim::{arena_world, own_position, remote_state, remote_weapon, weapon_for};
 use oss_session::{SPECTATOR, SessionEvent, chat_type};
 use oss_sim::{
@@ -20,6 +21,7 @@ use winit::keyboard::KeyCode;
 use super::art::{self, Art};
 use super::hud::{self, RadarCache};
 use super::input::{Action, InputState};
+use super::lvz::{Lvz, ScreenRefs};
 use super::online::Online;
 use super::statbox::{self, StatBox};
 use super::view::{self, Canvas, color};
@@ -93,6 +95,11 @@ pub struct Sandbox {
     /// Bumped whenever doors or bricks change, so the radar image is rebuilt.
     pub(super) map_revision: u64,
     statbox: StatBox,
+    /// Bottom-right of the stat box as last drawn (an LVZ anchor).
+    statbox_corner: (f32, f32),
+    pub(super) lvz: Lvz,
+    /// LVZ screen anchors for this frame.
+    pub(super) screen_refs: ScreenRefs,
     /// World tick of the last clock correction (online).
     slew_tick: u32,
     brick_count: usize,
@@ -224,6 +231,7 @@ impl Sandbox {
             .clone()
             .unwrap_or_else(|| "(public)".into());
         net.flush();
+        let files = std::mem::take(&mut net.files);
         let mut s = Self::build(
             renderer,
             dir,
@@ -235,6 +243,9 @@ impl Sandbox {
             audio,
             Some(net),
         )?;
+        for (name, data) in files {
+            s.load_lvz(&name, &data);
+        }
         s.spectating = spectating;
         s.spec_cam = (8192.0, 8192.0);
         s.message(
@@ -270,6 +281,9 @@ impl Sandbox {
             radar: None,
             map_revision: 0,
             statbox: StatBox::default(),
+            statbox_corner: (0.0, 0.0),
+            lvz: Lvz::default(),
+            screen_refs: [(0.0, 0.0); 12],
             slew_tick: 0,
             brick_count: 0,
             last: Instant::now(),
@@ -451,6 +465,7 @@ impl Sandbox {
         }
         let clock = self.clock;
         self.effects.retain(|e| clock - e.start < e.kind.params().2);
+        self.lvz.expire(clock);
         self.update_engine_sound();
     }
 
@@ -856,6 +871,16 @@ impl Sandbox {
                     self.world.reset_green_timer();
                     sim_events.extend(self.world.sync_doors(door_seed, timestamp));
                 }
+                SessionEvent::ObjectsToggled(toggles) => {
+                    for (id, on) in toggles {
+                        self.lvz.toggle(id, on, self.clock);
+                    }
+                }
+                SessionEvent::ObjectsChanged(changes) => {
+                    for c in &changes {
+                        self.lvz.change(c);
+                    }
+                }
                 SessionEvent::GreenTaken { x, y, .. } => {
                     self.world.remove_green_at(x as u16, y as u16);
                 }
@@ -894,7 +919,23 @@ impl Sandbox {
             .net
             .as_ref()
             .map(|n| n.session.players().count() as u32);
+        let files = self
+            .net
+            .as_mut()
+            .map(|n| std::mem::take(&mut n.files))
+            .unwrap_or_default();
+        for (name, data) in files {
+            self.load_lvz(&name, &data);
+        }
         self.handle_events(&sim_events);
+    }
+
+    /// Adds an LVZ file's objects (logged and skipped if it doesn't parse).
+    pub fn load_lvz(&mut self, name: &str, data: &[u8]) {
+        match self.lvz.add_file(name, data, self.clock) {
+            Ok(n) => log::info!("{name}: {n} LVZ objects"),
+            Err(e) => log::warn!("LVZ {e}"),
+        }
     }
 
     /// Online, keeps the world's tick count on the server's clock: small drift is
@@ -1095,7 +1136,15 @@ impl Sandbox {
                     self.effect(effect, x, y);
                     self.sound(name, 0.9, Some(*pos));
                 }
-                Event::ShipKilled { pos, .. } => {
+                Event::ShipKilled {
+                    pos, ship, killer, ..
+                } => {
+                    if *ship == me {
+                        self.lvz
+                            .trigger(oss_proto::objects::mode::DEATH, self.clock);
+                    } else if *killer == me {
+                        self.lvz.trigger(oss_proto::objects::mode::KILL, self.clock);
+                    }
                     let (x, y) = pos.to_f32();
                     self.effect(EffectKind::ShipExplosion, x, y);
                     self.sound("explode1", 1.0, Some(*pos));
@@ -1141,10 +1190,19 @@ impl Sandbox {
         let alpha = self.acc.as_secs_f32() / TICK.as_secs_f32();
         let cam = self.camera(alpha);
         let c = Canvas::new(&self.art, self.atlas, r.size(), self.scale, cam);
+        self.lvz.upload(r);
+        let chat_top = c.view_h - 16.0 - LOG_LINES as f32 * 12.0;
+        self.screen_refs = hud::screen_refs(&c, self.statbox_corner, chat_top);
         view::draw_world(self, &c, r, alpha);
         hud::draw(self, &c, r);
+        self.lvz
+            .draw(layer::AFTER_GAUGES, &c, r, self.clock, &self.screen_refs);
         self.draw_statbox(&c, r);
         self.draw_log(&c, r);
+        self.lvz
+            .draw(layer::AFTER_CHAT, &c, r, self.clock, &self.screen_refs);
+        self.lvz
+            .draw(layer::TOP_MOST, &c, r, self.clock, &self.screen_refs);
         if self.menu {
             self.draw_menu(&c, r);
         }
@@ -1189,6 +1247,7 @@ impl Sandbox {
             return;
         };
         let (x, y, w, h) = l.rect;
+        self.statbox_corner = (x + w + 3.0, y + h);
         c.rect(r, x, y, w + 3.0, h, [0.0, 0.0, 0.0, 0.75]);
         c.rect(r, x, l.separator, w + 3.0, 1.0, [0.45, 0.45, 0.55, 1.0]);
         for &(mx, my, m) in &l.markers {

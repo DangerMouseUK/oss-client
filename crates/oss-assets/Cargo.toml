@@ -8,8 +8,10 @@ license = "MIT"
 repository.workspace = true
 
 [dependencies]
+gif = "0.14.2"
 png = "0.18"
 thiserror = "2"
+zune-jpeg = "0.5.15"
 
 [lints]
 workspace = true
