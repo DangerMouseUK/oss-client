@@ -11,7 +11,7 @@ Rust game client for SubSpace/Continuum. Licence **GPL-2.0-or-later**; `oss-sim`
 - Security paths are pluggable traits; Continuum's handshake is not implemented in this repo.
 
 ## Rules
-- Never commit game assets. Locate the user's Continuum/Steam install (or a configured folder) at runtime.
+- The client ships its default asset set in `assets/classic/` (graphics and sound). A user's own folder (`--assets-dir`/`OSS_ASSETS_DIR`) or a Continuum install (`--continuum-dir`) overrides it. Never commit `Continuum.exe` or its DLLs, third-party zone downloads or captures.
 - Untrusted network/file data never panics the client.
 - Tests use synthetic data; no captures, personal data or machine paths in the repo.
 - Before committing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.

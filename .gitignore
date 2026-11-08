@@ -4,6 +4,8 @@ CLAUDE.local.md
 /local/
 *.pcap
 *.pcapng
-# Continuum/SubSpace game assets are never redistributed from this repo
+# Asset files are only tracked under assets/classic/
 *.bm2
 *.wa2
+!/assets/classic/**/*.bm2
+!/assets/classic/**/*.wa2
