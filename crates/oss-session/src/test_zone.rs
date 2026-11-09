@@ -287,7 +287,7 @@ impl TestZone {
             .filter(|p| p.in_arena)
             .map(Self::player_data)
             .collect();
-        self.send(from, &PlayerId { pid, extra: None }, true);
+        self.send(from, &PlayerId { pid, arena: None }, true);
         let settings = self.settings.clone();
         self.send_raw(from, &settings);
         self.send(from, &PlayerEntering { players: everyone }, true);

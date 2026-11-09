@@ -86,7 +86,7 @@ impl Zone {
                 send(server, &|o| {
                     PlayerId {
                         pid: 5,
-                        extra: None,
+                        arena: None,
                     }
                     .encode(o)
                 });
