@@ -1312,8 +1312,14 @@ impl Session {
             return false;
         }
         let now = self.server_ticks(now_ms);
+        // Signed, because the last stamp can be *ahead* of the clock: when two
+        // packets fall in one tick `send_position` stamps the second one a tick
+        // later, which a weapon fired just after a routine update does all the
+        // time. Read unsigned, that one-tick lead is a difference of four
+        // thousand million, so every later call says "due" and the client sends a
+        // position packet per frame for the rest of the session.
         self.last_position_ticks
-            .is_none_or(|t| now.wrapping_sub(t) >= self.position_interval())
+            .is_none_or(|t| (now.wrapping_sub(t) as i32) >= self.position_interval() as i32)
     }
 
     /// Sends your position (also used to fire weapons: set `pos.weapon`).
@@ -1541,6 +1547,46 @@ mod tests {
     fn names_trim_padding() {
         assert_eq!(fixed_to_string(b"Bob\0\0\0"), "Bob");
         assert_eq!(fixed_to_string(b"Alice   "), "Alice");
+    }
+
+    /// A weapon packet stamps the next tick when it shares a tick with the update
+    /// before it, which leaves the last stamp ahead of the clock. The next regular
+    /// update must still wait its turn instead of every call reporting "due".
+    #[test]
+    fn a_weapon_packet_does_not_start_a_position_flood() {
+        let mut s = Session::new(SessionConfig::default(), 0, 1);
+        s.state = State::Playing;
+        s.players.insert(
+            7,
+            Player {
+                pid: 7,
+                name: "me".into(),
+                squad: String::new(),
+                ship: 0,
+                freq: 0,
+                kill_points: 0,
+                flag_points: 0,
+                wins: 0,
+                losses: 0,
+                flags: 0,
+                position: None,
+            },
+        );
+        s.pid = Some(7);
+        let interval = s.position_interval();
+        assert!(interval >= 5);
+        let now = 10_000;
+        let tick = s.server_ticks(now);
+        // A routine update, then a weapon in the same tick: the weapon is stamped
+        // one tick past the clock.
+        s.send_position(now, &OwnPosition::default());
+        s.send_position(now, &OwnPosition::default());
+        assert_eq!(s.last_position_ticks, Some(tick.wrapping_add(1)));
+        assert!(!s.position_due(now), "due again in the same tick");
+        // Still not due a few ticks later, and due once the interval has passed.
+        let ms = |ticks: u32| now + u64::from(ticks) * 10;
+        assert!(!s.position_due(ms(interval - 1)));
+        assert!(s.position_due(ms(interval + 2)));
     }
 
     #[test]
