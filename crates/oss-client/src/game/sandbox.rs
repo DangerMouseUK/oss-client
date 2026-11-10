@@ -1161,19 +1161,21 @@ impl Sandbox {
             None => (line, ""),
         };
         match word.to_ascii_lowercase().as_str() {
-            "?go" => {
+            // Offline there is no arena and no ship to report on, so these fall
+            // through to the sandbox's own command list instead of being swallowed.
+            "?go" if self.online() => {
                 if let Some(net) = self.net.as_mut() {
                     net.session.change_arena(rest);
                     net.flush();
-                    self.message(
-                        if rest.is_empty() {
-                            "Entering a public arena...".to_string()
-                        } else {
-                            format!("Entering arena {rest}...")
-                        },
-                        color::GREEN,
-                    );
                 }
+                self.message(
+                    if rest.is_empty() {
+                        "Entering a public arena...".to_string()
+                    } else {
+                        format!("Entering arena {rest}...")
+                    },
+                    color::GREEN,
+                );
                 true
             }
             // Continuum takes "?namelen N" only, with the space.
@@ -1182,7 +1184,7 @@ impl Sandbox {
                 self.message(reply, color::GREEN);
                 true
             }
-            "?status" if rest.is_empty() => {
+            "?status" if rest.is_empty() && self.online() => {
                 self.show_status();
                 true
             }
@@ -1203,7 +1205,7 @@ impl Sandbox {
     /// whole upgrades as Continuum counts them (nullspace `GetShipStatusPercent`).
     fn show_status(&mut self) {
         let me = self.me();
-        if !self.online() || me.kind as usize >= self.world.settings.ships.len() {
+        if me.kind as usize >= self.world.settings.ships.len() {
             return;
         }
         let s = &self.world.settings.ships[me.kind as usize];
