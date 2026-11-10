@@ -7,8 +7,8 @@ use std::io::Write;
 use oss_net::{Config, Event, Server, VieAcceptor};
 use oss_proto::common::PlayerData;
 use oss_proto::s2c::{
-    ChatBody, EnteringArena, Green, LoginResponse, MapData, MapFile, MapFilename, PlayerEntering,
-    PlayerId, S2CChat, Security,
+    ChatBody, EnteringArena, Green, IncomingFile, LoginResponse, MapData, MapFile, MapFilename,
+    PlayerEntering, PlayerId, S2CChat, Security,
 };
 use oss_proto::{C2SPacket, ClientSettings, FixedStr, Packet, checksum};
 use oss_session::replay::{Player as ReplayPlayer, Recorder};
@@ -52,10 +52,17 @@ struct Zone {
     greens: Vec<(i16, i16, i16)>,
     /// Files requested, in order (0 = the map).
     requests: Vec<u16>,
+    /// Whether the client asked for the news file (C2S `0x0D`).
+    asked_for_news: bool,
 }
 
 /// Stand-in LVZ contents (the session doesn't parse them).
 const LVZ: &[u8] = b"CONT fake lvz bytes";
+
+/// The zone's news file, served like ASSS does: an S2C `0x10` with no name,
+/// zlib-compressed, over a sized transfer.
+const NEWS: &[u8] = b"Welcome to the test zone.
+Second line.";
 
 impl Zone {
     fn handle(&mut self, server: &mut Server<u32>, pkt: &[u8]) {
@@ -72,6 +79,7 @@ impl Zone {
                     LoginResponse {
                         code: 0,
                         server_version: 134,
+                        news_checksum: checksum::crc32(NEWS),
                         ..Default::default()
                     }
                     .encode(o)
@@ -136,6 +144,16 @@ impl Zone {
                         name: FixedStr::new(b"art.lvz"),
                         data: LVZ.to_vec(),
                     },
+                }
+                .encode(&mut p);
+                server.connection_mut(&ADDR).unwrap().send_sized(p);
+            }
+            C2SPacket::NewsRequest(_) => {
+                self.asked_for_news = true;
+                let mut p = Vec::new();
+                IncomingFile {
+                    name: FixedStr::default(),
+                    data: zlib(NEWS),
                 }
                 .encode(&mut p);
                 server.connection_mut(&ADDR).unwrap().send_sized(p);
@@ -210,6 +228,12 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
         }
         while let Some(ev) = client.poll_event() {
             match &ev {
+                SessionEvent::LoggedIn => {
+                    // Continuum asks for the news when its checksum differs from
+                    // the copy it kept; a matching copy means no request at all.
+                    assert_eq!(client.news_checksum(), checksum::crc32(NEWS));
+                    client.request_news_if_new(Some(b"stale news"));
+                }
                 SessionEvent::MapNeeded { name, .. } => {
                     assert_eq!(name, "tiny.lvl");
                     assert!(
@@ -264,6 +288,15 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
     }
 
     assert_eq!(zone.got_login.as_deref(), Some("tester"));
+    assert!(zone.asked_for_news, "the news request went out");
+    let news = events.iter().find_map(|e| match e {
+        SessionEvent::News(t) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        news.as_deref(),
+        Some(String::from_utf8_lossy(NEWS).as_ref())
+    );
     assert!(map_ready);
     assert_eq!(client.state(), State::Playing);
     assert_eq!(client.pid(), Some(5));

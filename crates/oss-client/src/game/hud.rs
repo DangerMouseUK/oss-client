@@ -39,8 +39,26 @@ fn icons_top(c: &Canvas) -> f32 {
 }
 
 /// Side of the small radar.
-fn radar_dim(c: &Canvas) -> f32 {
+pub(super) fn radar_dim(c: &Canvas) -> f32 {
     ((((c.view_w as u32 / 6) / 4) * 8) / 2) as f32
+}
+
+/// The map square a pixel position falls in, as Continuum names it: the map is 20
+/// by 20 squares, columns A onwards and rows 1 onwards (nullspace
+/// `Radar::RenderTime`, which divides the 1024-tile map by `1024 / 20`).
+pub(super) fn map_coordinate(x: f32, y: f32) -> String {
+    let cell = |v: f32| (v / 16.0 / (1024.0 / 20.0)).floor().clamp(0.0, 19.0) as u32;
+    let col = char::from(b'A' + cell(x) as u8);
+    format!("{col}{}", cell(y) + 1)
+}
+
+/// The line Continuum draws just above the radar. Continuum's is
+/// `"{hour}:{min}{am|pm}  {square}"` (nullspace `Radar::RenderTime`); we draw the
+/// square alone, because std has no local time and a wall clock in the corner did
+/// not look worth a date crate. Adding the clock is a one-line change here once
+/// one is available.
+pub(super) fn radar_text(x: f32, y: f32) -> String {
+    map_coordinate(x, y)
 }
 
 /// Anchor points for LVZ screen objects, indexed by `oss_proto::objects::reference`
@@ -418,6 +436,17 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
         }
     };
     c.ui_tex(r, radar.texture, region, x0, y0, Some((dim, dim)), [1.0; 4]);
+    if !s.big_radar {
+        // Where Continuum puts it: right-aligned just above the radar.
+        let (cx, cy) = c.cam;
+        c.text_right(
+            r,
+            c.view_w - 5.0,
+            y0 - 14.0,
+            color::WHITE,
+            &radar_text(cx, cy),
+        );
+    }
 
     let mut dot = |px: f32, py: f32, size: f32, rgba: [f32; 4]| {
         let (rx, ry) = ((to_radar(px) - min_x) / k, (to_radar(py) - min_y) / k);

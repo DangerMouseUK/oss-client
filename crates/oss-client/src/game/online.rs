@@ -12,6 +12,9 @@ use oss_session::security::{
 use oss_session::udp::UdpDriver;
 use oss_session::{Session, SessionConfig, SessionEvent, State};
 
+/// The zone's news, cached beside its maps under Continuum's name for it.
+const NEWS_FILE: &str = "news.txt";
+
 /// Where packets come from.
 enum Source {
     Live(UdpDriver),
@@ -249,7 +252,13 @@ impl Online {
                         }
                     }
                 }
-                SessionEvent::LoggedIn => self.status = "Entering arena...".into(),
+                SessionEvent::LoggedIn => {
+                    self.status = "Entering arena...".into();
+                    // Continuum takes the zone's news on login, and only when its
+                    // checksum differs from the copy it kept.
+                    let cached = self.stored_file(NEWS_FILE);
+                    self.session.request_news_if_new(cached.as_deref());
+                }
                 SessionEvent::LoginFailed { message, .. } => {
                     self.error = Some(format!("Login failed: {message}"))
                 }
@@ -307,6 +316,13 @@ impl Online {
                         log::warn!("couldn't cache {name}: {e}");
                     }
                     self.files.push((name.clone(), data.clone()));
+                }
+                SessionEvent::News(text) => {
+                    if !self.is_replay()
+                        && let Err(e) = self.cache.store(NEWS_FILE, text.as_bytes())
+                    {
+                        log::warn!("couldn't cache the zone news: {e}");
+                    }
                 }
                 SessionEvent::Closed(reason) if self.error.is_none() => {
                     let handshake = matches!(reason, oss_session::Reason::HandshakeFailed(_));

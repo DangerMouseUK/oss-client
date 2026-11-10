@@ -20,7 +20,7 @@ use winit::keyboard::KeyCode;
 
 use super::art::{self, Art};
 use super::balls::{BallAction, BallPlayer, BallRules, Balls};
-use super::chat::{self, ChatContext, ChatPlayer, Line};
+use super::chat::{self, ChatContext, ChatLog, ChatPlayer, Line, Message};
 use super::flags::{Flags, Toucher};
 use super::hud::{self, RadarCache};
 use super::input::{Action, InputState};
@@ -34,12 +34,6 @@ use crate::gfx::{Renderer, StarParams, TextureId};
 const TICK: Duration = Duration::from_millis(10);
 /// Most sim ticks run per frame before we give up catching up (e.g. after a stall).
 const MAX_TICKS_PER_FRAME: u32 = 25;
-/// Messages kept in the log.
-const MAX_MESSAGES: usize = 200;
-/// Message lines shown on screen.
-const LOG_LINES: usize = 8;
-/// Longest chat line.
-const MAX_CHAT: usize = 200;
 /// Spectator camera speed, pixels per second.
 const SPEC_SPEED: f32 = 1200.0;
 
@@ -80,13 +74,6 @@ pub struct Effect {
     pub start: f32,
 }
 
-/// A line in the message log.
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub text: String,
-    pub color: u32,
-}
-
 pub struct Sandbox {
     pub(super) world: World,
     /// Your ship's id in `world` (your player id online).
@@ -106,10 +93,16 @@ pub struct Sandbox {
     pub(super) lvz: Lvz,
     pub(super) flags: Flags,
     pub(super) balls: Balls,
-    /// Who last messaged you privately (for `::` replies).
-    last_private: Option<String>,
-    /// Tab completion in progress: the line as typed and how many Tabs so far.
-    completing: Option<(String, usize)>,
+    /// The chat box, its log and its history.
+    pub(super) chat: ChatLog,
+    /// The last player you killed and the last who killed you (,
+    /// ).
+    last_killed: Option<String>,
+    last_killer: Option<String>,
+    /// The zone's news file, wrapped into lines, and whether it is on screen.
+    news: Vec<String>,
+    news_open: bool,
+    news_scroll: usize,
     /// Macro keys: binding and the line they send.
     pub macros: Vec<(super::input::Binding, String)>,
     /// Accessibility: colour palette and extra interface scale.
@@ -139,7 +132,6 @@ pub struct Sandbox {
     acc: Duration,
     pub(super) clock: f32,
     pub(super) effects: Vec<Effect>,
-    pub(super) messages: Vec<Message>,
     pub(super) menu: bool,
     pub(super) show_fps: bool,
     pub(super) big_radar: bool,
@@ -160,8 +152,6 @@ pub struct Sandbox {
     spec_follow: Option<u16>,
     /// Spectating with X-radar on (End), unless `Spectator:NoXRadar`.
     spec_xradar: bool,
-    /// The chat line being typed, if the chat box is open.
-    pub(super) typing: Option<String>,
     /// Testing aid: steer toward the nearest enemy and shoot (overrides the keys
     /// whenever an enemy is alive).
     pub aim_bot: bool,
@@ -342,8 +332,12 @@ impl Sandbox {
             balls: Balls::default(),
             attached_to: None,
             attachments: Default::default(),
-            last_private: None,
-            completing: None,
+            chat: ChatLog::default(),
+            last_killed: None,
+            last_killer: None,
+            news: Vec::new(),
+            news_open: false,
+            news_scroll: 0,
             macros: Vec::new(),
             palette: Default::default(),
             ui_scale_extra: 0,
@@ -361,7 +355,6 @@ impl Sandbox {
             acc: Duration::ZERO,
             clock: 0.0,
             effects: Vec::new(),
-            messages: Vec::new(),
             menu: false,
             show_fps: false,
             big_radar: false,
@@ -376,7 +369,6 @@ impl Sandbox {
             spec_cam: (8192.0, 8192.0),
             spec_follow: None,
             spec_xradar: false,
-            typing: None,
             aim_bot: false,
         };
         if s.me().is_alive() {
@@ -544,10 +536,14 @@ impl Sandbox {
     pub fn message(&mut self, text: impl Into<String>, color: u32) {
         let text = text.into();
         log::debug!("message: {text}");
-        self.messages.push(Message { text, color });
-        if self.messages.len() > MAX_MESSAGES {
-            self.messages.remove(0);
-        }
+        self.chat.push(Message::local(text, color));
+    }
+
+    /// Adds a chat line that arrived (or was echoed) as chat type `kind`.
+    fn chat_message(&mut self, kind: u8, sender: Option<String>, text: impl Into<String>) {
+        let text = text.into();
+        log::debug!("message: {text}");
+        self.chat.push(Message::received(kind, sender, text));
     }
 
     fn spawn_warp_effect(&mut self) {
@@ -596,11 +592,14 @@ impl Sandbox {
         let mods = (input.shift(), input.ctrl());
         self.ui_input(&mut edges, &pressed, &typed, mods);
         self.big_radar = !self.menu && input.action_held(Action::BigRadar);
-        if self.spectating && !self.menu && self.typing.is_none() && edges.contains(&Action::XRadar)
+        if self.spectating
+            && !self.menu
+            && self.chat.input.is_none()
+            && edges.contains(&Action::XRadar)
         {
             self.toggle_spec_xradar();
         }
-        if self.spectating && !self.menu && self.typing.is_none() {
+        if self.spectating && !self.menu && self.chat.input.is_none() {
             let step = SPEC_SPEED * dt.as_secs_f32() * if input.shift() { 3.0 } else { 1.0 };
             let (dx, dy) = (
                 input.action_held(Action::Right) as i32 as f32
@@ -675,7 +674,7 @@ impl Sandbox {
                 ShipInput::default()
             } else {
                 let mut i = input.ship_input(&edges);
-                if self.typing.is_some() {
+                if self.chat.input.is_some() {
                     // Tab completes names while typing rather than firing.
                     (i.bomb, i.mine) = (false, false);
                 }
@@ -831,26 +830,23 @@ impl Sandbox {
         typed: &str,
         (shift, ctrl): (bool, bool),
     ) {
-        if self.typing.is_some() && pressed.contains(&KeyCode::Tab) {
+        if self.chat.input.is_some() && pressed.contains(&KeyCode::Tab) {
             self.complete_name();
         }
-        if let Some(line) = self.typing.as_mut() {
+        if self.chat.input.is_some() {
             for c in typed.chars() {
-                if !c.is_control() && line.chars().count() < MAX_CHAT {
-                    line.push(c);
-                    self.completing = None;
-                }
+                self.chat.type_char(c);
             }
             let mut send = false;
             let mut cancel = false;
             for key in pressed {
                 match key {
-                    KeyCode::Backspace => {
-                        line.pop();
-                        self.completing = None;
-                    }
+                    KeyCode::Backspace => self.chat.backspace(ctrl),
                     KeyCode::Enter | KeyCode::NumpadEnter => send = true,
                     KeyCode::Escape => cancel = true,
+                    // Ours: walk back through the lines you sent earlier.
+                    KeyCode::ArrowUp => self.chat.recall(true),
+                    KeyCode::ArrowDown => self.chat.recall(false),
                     _ => {}
                 }
             }
@@ -858,15 +854,37 @@ impl Sandbox {
             // and toggles bound to keys that also type text are ignored.
             edges.retain(|a| !matches!(a, Action::Menu));
             if cancel {
-                self.typing = None;
+                self.chat.cancel();
             } else if send {
-                let line = self.typing.take().unwrap_or_default();
-                self.send_chat_line(line.trim());
+                let line = self.chat.submit();
+                self.send_chat_line(&line);
             }
+            return;
+        }
+        if self.news_open {
+            for key in pressed {
+                match key {
+                    KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter => {
+                        self.news_open = false
+                    }
+                    KeyCode::ArrowUp => self.news_scroll = self.news_scroll.saturating_sub(1),
+                    KeyCode::ArrowDown => self.news_scroll += 1,
+                    KeyCode::PageUp => self.news_scroll = self.news_scroll.saturating_sub(10),
+                    KeyCode::PageDown => self.news_scroll += 10,
+                    _ => {}
+                }
+            }
+            self.news_scroll = self.news_scroll.min(self.news.len().saturating_sub(1));
+            edges.clear();
             return;
         }
         if edges.contains(&Action::Menu) {
             self.menu = !self.menu;
+            // Continuum shows the whole chat buffer while the menu is open
+            // (nullspace `Game.cpp`); leaving it puts the log back at the newest.
+            if !self.menu {
+                self.chat.scroll_to_bottom();
+            }
             edges.clear();
             return;
         }
@@ -882,6 +900,15 @@ impl Sandbox {
                         self.request_ship(SPECTATOR);
                         self.menu = false;
                     }
+                    KeyCode::KeyN if !self.news.is_empty() => {
+                        self.news_open = true;
+                        self.news_scroll = 0;
+                        self.menu = false;
+                    }
+                    // Ours: the full log is on screen with the menu open, so this
+                    // is where scrolling it belongs. Continuum cannot scroll at all.
+                    KeyCode::PageUp => self.chat.scroll_by(1),
+                    KeyCode::PageDown => self.chat.scroll_by(-1),
                     k => {
                         if let Some(n) = digit(*k) {
                             self.request_ship(n - 1);
@@ -897,7 +924,7 @@ impl Sandbox {
             .iter()
             .any(|k| matches!(k, KeyCode::Enter | KeyCode::NumpadEnter))
         {
-            self.typing = Some(String::new());
+            self.chat.start_typing();
             return;
         }
         self.run_macros(pressed, shift, ctrl);
@@ -945,6 +972,13 @@ impl Sandbox {
         if line.is_empty() {
             return;
         }
+        if line.starts_with('?') && self.client_command(line) {
+            return;
+        }
+        // Continuum's % substitutions happen before the line is read as a prefix,
+        // so ":%tickname:hi" works.
+        let expanded = self.expand_macros(line);
+        let line = expanded.as_str();
         let Some(net) = self.net.as_ref() else {
             self.local_command(line);
             return;
@@ -965,7 +999,7 @@ impl Sandbox {
                 .statbox
                 .selected()
                 .filter(|&pid| pid != self.me_id as i16),
-            last_private: self.last_private.as_deref(),
+            last_private: self.chat.last_private(),
         };
         let parsed = chat::parse(line, &ctx);
         let Some(net) = self.net.as_mut() else { return };
@@ -989,19 +1023,10 @@ impl Sandbox {
                 net.session.send_chat(kind, target, &text);
                 net.flush();
                 // Servers don't echo your own messages; commands get their reply.
+                // Your own line is shown as the type it was sent as, so it takes
+                // the same colours and the same name column as everyone else's.
                 if let Some(echo) = echo {
-                    let colour = match kind {
-                        chat_type::FREQ => color::YELLOW,
-                        chat_type::PRIVATE | chat_type::REMOTE_PRIVATE => color::GREEN,
-                        chat_type::ENEMY_FREQ | chat_type::CHANNEL => color::PINK,
-                        _ => color::WHITE,
-                    };
-                    let shown = if kind == chat_type::CHANNEL {
-                        echo
-                    } else {
-                        format!("{me_name}> {echo}")
-                    };
-                    self.message(shown, colour);
+                    self.chat_message(kind, Some(me_name.clone()), echo);
                 }
             }
         }
@@ -1009,20 +1034,10 @@ impl Sandbox {
 
     /// Tab while typing `:partial`: completes the player name, cycling on repeats.
     fn complete_name(&mut self) {
-        let Some(line) = self.typing.clone() else {
-            return;
-        };
         let Some(net) = self.net.as_ref() else { return };
         let names: Vec<String> = net.session.players().map(|p| p.name.clone()).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let (base, n) = match self.completing.take() {
-            Some((base, n)) => (base, n + 1),
-            None => (line, 0),
-        };
-        if let Some(done) = chat::complete(&base, &refs, n) {
-            self.typing = Some(done);
-            self.completing = Some((base, n));
-        }
+        self.chat.complete_name(&refs);
     }
 
     /// Macro keys (from the settings file): send their line when pressed.
@@ -1036,6 +1051,179 @@ impl Sandbox {
         for line in lines {
             self.send_chat_as(&line, true);
         }
+    }
+
+    /// Continuum's `%` substitutions in a line you send (they work in any message,
+    /// not only in a macro). The set and their meanings are Trench Wars' own help
+    /// file for Continuum players (`twcore/src/data/HelpResponses.txt`, the
+    /// "&Macro &How" entries): `%selfname`, `%tickname` (the player ticked in the
+    /// stat box), `%squad`, `%freq`, `%bounty`, `%flags`, `%energy`, `%killed`,
+    /// `%killer`, `%coord`, `%area`, `%red`, `%redname`, `%redbounty`, `%redflags`.
+    ///
+    /// `%area` ("your general area on the map") and `%red` (name, bounty and flags
+    /// of the closest flag carrier, in one string) are left alone: both are free
+    /// text whose exact wording in Continuum is not recorded anywhere we have, and
+    /// a wrong wording would read as the real thing. `%redname`, `%redbounty` and
+    /// `%redflags` carry the same information unambiguously and are substituted.
+    fn expand_macros(&self, line: &str) -> String {
+        if !line.contains('%') {
+            return line.to_string();
+        }
+        let me = self.me();
+        let (my_name, my_squad, my_freq) = match self.net.as_ref().and_then(|n| n.session.me()) {
+            Some(p) => (p.name.clone(), p.squad.clone(), p.freq),
+            None => (String::new(), String::new(), me.freq as i16),
+        };
+        let ticked = self
+            .statbox
+            .selected()
+            .and_then(|pid| self.net.as_ref()?.session.player(pid))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let carrier = self.closest_flag_carrier();
+        let (x, y) = me.pos.to_f32();
+        let mut out = line.to_string();
+        // Longest names first, so `%redname` is not eaten by `%red`.
+        let subs: [(&str, String); 10] = [
+            (
+                "%redbounty",
+                carrier.as_ref().map_or(0, |c| c.1).to_string(),
+            ),
+            ("%redflags", carrier.as_ref().map_or(0, |c| c.2).to_string()),
+            (
+                "%redname",
+                carrier.as_ref().map_or(String::new(), |c| c.0.clone()),
+            ),
+            ("%selfname", my_name),
+            ("%tickname", ticked),
+            ("%bounty", me.bounty.to_string()),
+            ("%energy", me.energy_points().to_string()),
+            ("%squad", my_squad),
+            ("%coord", hud::map_coordinate(x, y)),
+            ("%freq", my_freq.to_string()),
+        ];
+        for (key, value) in subs {
+            if out.contains(key) {
+                out = out.replace(key, &value);
+            }
+        }
+        // These two are per-event rather than per-ship.
+        if out.contains("%flags") {
+            let carried = self
+                .net
+                .as_ref()
+                .and_then(|n| n.session.me())
+                .map_or(0, |p| p.flags);
+            out = out.replace("%flags", &carried.to_string());
+        }
+        if out.contains("%killed") {
+            out = out.replace("%killed", self.last_killed.as_deref().unwrap_or(""));
+        }
+        if out.contains("%killer") {
+            out = out.replace("%killer", self.last_killer.as_deref().unwrap_or(""));
+        }
+        out
+    }
+
+    /// The nearest enemy carrying flags: (name, bounty, flags). Continuum draws
+    /// enemy flag carriers red, which is where `%red*` gets its name.
+    fn closest_flag_carrier(&self) -> Option<(String, u32, i16)> {
+        let net = self.net.as_ref()?;
+        let me = self.me();
+        let my_freq = me.freq;
+        let (mx, my) = me.pos.to_f32();
+        let mut best: Option<(f32, (String, u32, i16))> = None;
+        for p in net.session.players() {
+            if p.flags <= 0 || p.freq as u16 == my_freq {
+                continue;
+            }
+            let Some(i) = self.world.ship_index(p.pid as u16) else {
+                continue;
+            };
+            let ship = &self.world.ships[i];
+            let (x, y) = ship.pos.to_f32();
+            let d = (x - mx).hypot(y - my);
+            if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+                best = Some((d, (p.name.clone(), ship.bounty, p.flags)));
+            }
+        }
+        best.map(|(_, v)| v)
+    }
+
+    /// Commands Continuum answers itself instead of sending on (nullspace
+    /// `ChatController::HandleInputCommands`): `?go`, `?namelen` and `?status`.
+    /// `?news` is ours — Continuum opens the news in a window of its own, which we
+    /// have no equivalent of, so it gets a command and a menu key. Returns true
+    /// when the line was handled here.
+    fn client_command(&mut self, line: &str) -> bool {
+        let (word, rest) = match line.split_once(' ') {
+            Some((w, r)) => (w, r.trim()),
+            None => (line, ""),
+        };
+        match word.to_ascii_lowercase().as_str() {
+            "?go" => {
+                if let Some(net) = self.net.as_mut() {
+                    net.session.change_arena(rest);
+                    net.flush();
+                    self.message(
+                        if rest.is_empty() {
+                            "Entering a public arena...".to_string()
+                        } else {
+                            format!("Entering arena {rest}...")
+                        },
+                        color::GREEN,
+                    );
+                }
+                true
+            }
+            // Continuum takes "?namelen N" only, with the space.
+            "?namelen" if !rest.is_empty() => {
+                let reply = self.chat.set_namelen(rest);
+                self.message(reply, color::GREEN);
+                true
+            }
+            "?status" if rest.is_empty() => {
+                self.show_status();
+                true
+            }
+            "?news" if rest.is_empty() => {
+                if self.news.is_empty() {
+                    self.message("This zone has no news.", color::YELLOW);
+                } else {
+                    self.news_open = true;
+                    self.news_scroll = 0;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `?status`: how far each upgradeable stat is toward its maximum, counted in
+    /// whole upgrades as Continuum counts them (nullspace `GetShipStatusPercent`).
+    fn show_status(&mut self) {
+        let me = self.me();
+        if !self.online() || me.kind as usize >= self.world.settings.ships.len() {
+            return;
+        }
+        let s = &self.world.settings.ships[me.kind as usize];
+        let stats = me.stats;
+        let shrapnel = me.shrapnel;
+        let pct = |upgrade: u32, maximum: u32, current: u32| {
+            if upgrade == 0 {
+                return 100;
+            }
+            let max_upgrades = (maximum / upgrade).max(1);
+            (current / upgrade) * 100 / max_upgrades
+        };
+        let line = format!(
+            "Recharge:{}%  Thruster:{}%  Speed:{}%  Rotation:{}%  Shrapnel:{shrapnel}",
+            pct(s.upgrade_recharge, s.maximum_recharge, stats.recharge),
+            pct(s.upgrade_thrust, s.maximum_thrust, stats.thrust),
+            pct(s.upgrade_speed, s.maximum_speed, stats.speed),
+            pct(s.upgrade_rotation, s.maximum_rotation, stats.rotation),
+        );
+        self.chat_message(chat_type::ARENA, None, line);
     }
 
     /// Offline `?commands`.
@@ -1203,7 +1391,25 @@ impl Sandbox {
                             .unwrap_or_default()
                     };
                     let (kn, dn) = (name(killer, self), name(killed, self));
-                    self.message(format!("{dn} killed by {kn}"), color::GREEN);
+                    let bounty = self
+                        .world
+                        .ship_index(killed as u16)
+                        .map_or(0, |i| self.world.ships[i].bounty);
+                    let me = self.viewer_pid();
+                    if killer == me {
+                        self.last_killed = Some(dn.clone());
+                    }
+                    if killed == me {
+                        self.last_killer = Some(kn.clone());
+                    }
+                    // nullspace: "name(bounty) killed by: killer", yellow when you
+                    // are one of the two, green otherwise.
+                    let colour = if killer == me || killed == me {
+                        color::YELLOW
+                    } else {
+                        color::GREEN
+                    };
+                    self.message(format!("{dn}({bounty}) killed by: {kn}"), colour);
                     // A kill can leave a prize where the ship died, if it was moving.
                     if green > 0
                         && let Some(i) = self.world.ship_index(killed as u16)
@@ -1224,23 +1430,16 @@ impl Sandbox {
                     kind, name, text, ..
                 } => {
                     if let Some(from) = chat::private_sender(kind, name.as_deref(), &text) {
-                        self.last_private = Some(from);
+                        self.chat.saw_private(&from);
                     }
-                    let colour = match kind {
-                        chat_type::ARENA | chat_type::PRIVATE | chat_type::REMOTE_PRIVATE => {
-                            color::GREEN
-                        }
-                        chat_type::FREQ => color::YELLOW,
-                        chat_type::ENEMY_FREQ | chat_type::CHANNEL => color::PINK,
-                        chat_type::WARNING | chat_type::SERVER_ERROR => color::RED,
-                        _ => color::WHITE,
-                    };
-                    match name {
-                        Some(n) if kind != chat_type::ARENA => {
-                            self.message(format!("{n}> {text}"), colour)
-                        }
-                        _ => self.message(text, colour),
-                    }
+                    self.chat_message(kind, name, text);
+                }
+                SessionEvent::News(text) => {
+                    self.news = text.replace('\r', "").lines().map(str::to_string).collect();
+                    self.message(
+                        "Zone news received: Esc then N, or ?news, reads it.",
+                        color::GREEN,
+                    );
                 }
                 SessionEvent::Settings(cs) => {
                     self.world.settings = ArenaSettings::from_client_settings(&cs);
@@ -2025,7 +2224,7 @@ impl Sandbox {
             self.lvz.art_changed = false;
             self.rebuild_art(r);
         }
-        let chat_top = ui.view_h - 16.0 - LOG_LINES as f32 * 12.0;
+        let chat_top = ui.view_h - 16.0 - ChatLog::visible_rows(ui.view_h, false) as f32 * 12.0;
         self.screen_refs = hud::screen_refs(&ui, self.statbox_corner, chat_top, self.spectating);
         view::draw_world(self, &c, &ui, r, alpha);
         hud::draw(self, &ui, r);
@@ -2037,6 +2236,9 @@ impl Sandbox {
         self.lvz.draw(layer::TOP_MOST, &c, &ui, r, clock, &refs);
         if self.menu {
             self.draw_menu(&ui, r);
+        }
+        if self.news_open {
+            self.draw_news(&ui, r);
         }
         StarParams {
             camera: [cam.0, cam.1],
@@ -2125,27 +2327,38 @@ impl Sandbox {
 
     fn draw_log(&self, c: &Canvas, r: &mut Renderer) {
         let mut y = c.view_h - 16.0;
-        if let Some(line) = &self.typing {
-            // Show the end of long lines.
-            let max = ((c.view_w - 40.0) / 8.0).max(10.0) as usize;
-            let shown: String = line
-                .chars()
-                .rev()
-                .take(max)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            let cursor = if (self.clock * 2.0).fract() < 0.5 {
-                "_"
-            } else {
-                " "
-            };
-            c.text(r, 4.0, y, color::WHITE, &format!("> {shown}{cursor}"));
+        // The log stops short of the radar, as in Continuum, and wraps there.
+        let width = chat_width(c);
+        let mut rows = ChatLog::visible_rows(c.view_h, self.menu);
+        if let Some(line) = &self.chat.input {
+            // The line being typed wraps too, but cuts at the edge instead of at a
+            // space so the cursor stays with the characters (nullspace).
+            let colour = chat::input_color(line);
+            let wrapped = chat::wrap(line, width, false);
+            rows = rows.saturating_sub(wrapped.len());
+            y -= 12.0 * (wrapped.len() - 1) as f32;
+            for (i, part) in wrapped.iter().enumerate() {
+                let cursor = if i + 1 == wrapped.len() && (self.clock * 2.0).fract() < 0.5 {
+                    "_"
+                } else {
+                    ""
+                };
+                c.text(
+                    r,
+                    4.0,
+                    y + i as f32 * 12.0,
+                    colour,
+                    &format!("{part}{cursor}"),
+                );
+            }
             y -= 14.0;
         }
-        for m in self.messages.iter().rev().take(LOG_LINES) {
-            c.text(r, 4.0, y, m.color, &m.text);
+        for line in self.chat.lines(width, rows).iter().rev() {
+            if !line.prefix.is_empty() {
+                c.text(r, 4.0, y, line.prefix_color, &line.prefix);
+            }
+            let x = 4.0 + line.prefix.chars().count() as f32 * 8.0;
+            c.text(r, x, y, line.color, &line.text);
             y -= 12.0;
         }
         if self.spectating
@@ -2174,6 +2387,32 @@ impl Sandbox {
         }
     }
 
+    /// The zone's news, as a page over the game. Continuum opens it in a window of
+    /// its own; this is our stand-in (Esc or Enter closes it, arrows scroll).
+    fn draw_news(&self, c: &Canvas, r: &mut Renderer) {
+        let width = ((c.view_w - 32.0) / 8.0).max(16.0) as usize;
+        let rows = ((c.view_h - 60.0) / 12.0).max(1.0) as usize;
+        let mut lines: Vec<String> = Vec::new();
+        for raw in self.news.iter().skip(self.news_scroll) {
+            lines.extend(chat::wrap(raw, width, true));
+            if lines.len() >= rows {
+                break;
+            }
+        }
+        c.rect(
+            r,
+            8.0,
+            8.0,
+            c.view_w - 16.0,
+            c.view_h - 16.0,
+            [0.0, 0.0, 0.0, 0.9],
+        );
+        c.text(r, 16.0, 16.0, color::YELLOW, "Zone news (Esc closes)");
+        for (i, line) in lines.iter().take(rows).enumerate() {
+            c.text(r, 16.0, 36.0 + i as f32 * 12.0, color::WHITE, line);
+        }
+    }
+
     fn draw_menu(&self, c: &Canvas, r: &mut Renderer) {
         let mut lines = vec![
             if self.online() { "Menu" } else { "Sandbox" },
@@ -2183,11 +2422,16 @@ impl Sandbox {
         if self.online() {
             lines.push("S     Spectate");
         }
+        if !self.news.is_empty() {
+            lines.push("N     Zone news");
+        }
         lines.extend([
             "O     Options (video, sound, keys, macros)",
             "Q     Quit",
             "Esc   Back to game",
             "Enter Chat ('team, :name:private, ?help)",
+            "      ?go [arena], ?namelen N, ?status, ?news",
+            "      PgUp/PgDn here scrolls the chat log",
             "",
             "Arrows fly, Shift afterburner, Ctrl guns, Tab bombs,",
             "Shift+Tab mines, Shift+Ctrl repel, Delete multifire,",
@@ -2216,6 +2460,12 @@ impl Sandbox {
             );
         }
     }
+}
+
+/// How many characters wide the chat area is: the view minus the radar beside it,
+/// as Continuum lays it out (nullspace keeps `surface_dim.x - radar_size` clear).
+fn chat_width(c: &Canvas) -> usize {
+    ((c.view_w - hud::radar_dim(c) - 12.0) / 8.0).max(16.0) as usize
 }
 
 /// `me_id` while playing a replay: no real player, so everyone is a remote ship.

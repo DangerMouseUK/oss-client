@@ -173,6 +173,8 @@ pub enum SessionEvent {
         data: Vec<u8>,
         downloaded: bool,
     },
+    /// The zone's news file, as text ([`Session::request_news`] asked for it).
+    News(String),
     /// A flag is on the map at tile (x, y), owned by `freq` (`0xFFFF` neutral)
     /// (S2C `0x12`).
     FlagLocation {
@@ -332,6 +334,10 @@ pub struct Session {
     downloads: VecDeque<u16>,
     /// A map or file transfer is in flight.
     downloading: bool,
+    /// CRC-32 of the zone's news file from the login reply (0 = the zone has none).
+    news_checksum: u32,
+    /// A news request is in flight (the reply is an S2C `0x10` with no name).
+    news_pending: bool,
     entering_done: bool,
     events: VecDeque<SessionEvent>,
     weapons_received: u32,
@@ -372,6 +378,8 @@ impl Session {
             downloads: VecDeque::new(),
             turf_flags: Default::default(),
             downloading: false,
+            news_checksum: 0,
+            news_pending: false,
             entering_done: false,
             events: VecDeque::new(),
             weapons_received: 0,
@@ -655,6 +663,7 @@ impl Session {
         };
         match packet {
             S2CPacket::LoginResponse(r) => {
+                self.news_checksum = r.news_checksum;
                 if r.code == login_code::OK {
                     self.events.push_back(SessionEvent::LoggedIn);
                     self.go_arena();
@@ -744,6 +753,7 @@ impl Session {
                         .push_back(SessionEvent::FilesListed(self.files.clone()));
                 }
             }
+            S2CPacket::IncomingFile(f) => self.on_news(&f.name, &f.data),
             S2CPacket::MapData(m) => {
                 let name = fixed_to_string(m.name.as_bytes());
                 let is_map = self
@@ -1056,6 +1066,59 @@ impl Session {
         true
     }
 
+    /// CRC-32 of the zone's news file, from the login reply; 0 means the zone has
+    /// no news. Continuum compares this with its cached `news.txt` and only then
+    /// asks (mervbot `clientprot.cpp`, which does the same).
+    pub fn news_checksum(&self) -> u32 {
+        self.news_checksum
+    }
+
+    /// Asks for the zone's news file (C2S `0x0D`). It arrives as an S2C `0x10`
+    /// with an all-zero name, zlib-compressed, and is reported as
+    /// [`SessionEvent::News`]. Does nothing when the zone has no news.
+    pub fn request_news(&mut self) {
+        if self.news_checksum == 0 || self.news_pending {
+            return;
+        }
+        self.news_pending = true;
+        self.send(&c2s::NewsRequest {}, true);
+    }
+
+    /// Asks for the news file only when the zone has one and `cached` (this
+    /// zone's last `news.txt`, if kept) does not already match its checksum. This
+    /// is what Continuum does, and mervbot with it.
+    pub fn request_news_if_new(&mut self, cached: Option<&[u8]>) {
+        if self.news_checksum == 0 {
+            return;
+        }
+        if cached.is_some_and(|d| checksum::crc32(d) == self.news_checksum) {
+            return;
+        }
+        self.request_news();
+    }
+
+    /// Changes arena, as Continuum's `?go` does: no argument (or an empty one) for
+    /// any public arena, a number for that public arena, any other text for a named
+    /// arena. nullspace `ChatController::HandleInputCommands`.
+    pub fn change_arena(&mut self, arena: &str) {
+        let arena = arena.trim();
+        let (arena_type, name) = arena_target(arena);
+        self.cfg.arena = (!arena.is_empty()).then(|| arena.to_string());
+        let ship = self.me().map_or(self.cfg.ship, |p| p.ship).min(SPECTATOR);
+        let go = GoArena {
+            ship,
+            allow_audio: 0,
+            obscenity_filter: 0,
+            x_res: self.cfg.resolution.0 as i16,
+            y_res: self.cfg.resolution.1 as i16,
+            arena_type,
+            arena: name,
+            optional_graphics: self.cfg.want_lvz.then_some(1),
+        };
+        self.send(&go, true);
+        self.state = State::EnteringArena;
+    }
+
     /// Downloads extra file `name`. Transfers run one at a time, after the map.
     pub fn download_file(&mut self, name: &str) {
         if let Some(index) = self.file_named(name).map(|f| f.index) {
@@ -1080,6 +1143,31 @@ impl Session {
             let index = (index != 0).then_some(index);
             self.send(&MapRequest { index }, true);
         }
+    }
+
+    /// S2C `0x10`. An all-zero name is the news file; anything else is a file
+    /// transfer this client never starts, so it is only logged.
+    fn on_news(&mut self, name: &FixedStr<16>, data: &[u8]) {
+        let name = fixed_to_string(name.as_bytes());
+        if !name.is_empty() {
+            log::debug!("ignoring an incoming file we did not ask for: {name}");
+            return;
+        }
+        self.news_pending = false;
+        let text = match map::inflate(data) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("the zone's news file is corrupt: {e}");
+                return;
+            }
+        };
+        // News is plain text; zones write it in the Windows code page, so anything
+        // that is not UTF-8 is read as Latin-1 rather than dropped.
+        let text = match String::from_utf8(text) {
+            Ok(t) => t,
+            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        };
+        self.events.push_back(SessionEvent::News(text));
     }
 
     fn on_file_data(&mut self, file: &ArenaFile, data: Vec<u8>) {
@@ -1394,8 +1482,21 @@ fn fixed_to_string(b: &[u8]) -> String {
     String::from_utf8_lossy(&b[..end]).trim_end().to_string()
 }
 
+/// How Continuum encodes a `?go` argument: nothing is any public arena, digits are
+/// that public arena's number in the type field, anything else is a named arena
+/// (nullspace `ChatController::HandleInputCommands`).
+fn arena_target(arena: &str) -> (i16, FixedStr<16>) {
+    if arena.is_empty() {
+        (c2s::arena_type::ANY_PUBLIC, FixedStr::default())
+    } else if let Ok(n) = arena.parse::<u16>() {
+        (n.min(i16::MAX as u16) as i16, FixedStr::default())
+    } else {
+        (c2s::arena_type::NAMED, FixedStr::new(arena.as_bytes()))
+    }
+}
+
 /// Human-readable login failure.
-pub fn login_message(code: u8) -> &'static str {
+fn login_message(code: u8) -> &'static str {
     match code {
         login_code::NEW_USER => "unknown name (new user)",
         login_code::BAD_PASSWORD => "wrong password",
@@ -1440,5 +1541,18 @@ mod tests {
     fn names_trim_padding() {
         assert_eq!(fixed_to_string(b"Bob\0\0\0"), "Bob");
         assert_eq!(fixed_to_string(b"Alice   "), "Alice");
+    }
+
+    #[test]
+    fn go_arena_targets_follow_continuum() {
+        let (t, n) = arena_target("");
+        assert_eq!((t, n.to_str()), (c2s::arena_type::ANY_PUBLIC, Some("")));
+        // Digits name a public arena by number, in the type field itself.
+        let (t, n) = arena_target("4");
+        assert_eq!((t, n.to_str()), (4, Some("")));
+        let (t, n) = arena_target("duel");
+        assert_eq!((t, n.to_str()), (c2s::arena_type::NAMED, Some("duel")));
+        // A number too large for the field is clamped, not wrapped negative.
+        assert_eq!(arena_target("65535").0, i16::MAX);
     }
 }
