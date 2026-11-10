@@ -1,5 +1,6 @@
-//! The network side of the client: a session to a zone, its socket and map cache;
-//! or a replay file played back through the same session code.
+//! The network side of the client: a session to a zone, its socket and its cache of
+//! maps, LVZ files and the zone's news; or a replay file played back through the
+//! same session code.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

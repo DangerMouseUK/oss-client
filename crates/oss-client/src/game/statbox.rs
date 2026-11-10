@@ -1,8 +1,9 @@
 //! The stat box: the player list in the top-left corner, in Continuum's views.
 //!
 //! F2 cycles Names → Points → Point Sort → Team Sort → Full → Frequency → hidden;
-//! Page Up/Down move the selection (the selected player is the target for private
-//! messages and, later, spectating). Layout follows Continuum's: an 8×12 font, a
+//! Page Up/Down move the selection. The selected player is the target for private
+//! messages (`/text`), the one a spectator follows with Ctrl or Tab, and the one
+//! F7 attaches to as a turret. Layout follows Continuum's: an 8×12 font, a
 //! header line with the player count, then one 12-pixel row per player. This module
 //! only lays the box out; drawing is in [`super::sandbox`].
 

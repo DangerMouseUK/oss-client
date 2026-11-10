@@ -4,10 +4,13 @@ An open-source, cross-platform game client for SubSpace/Continuum, written in Ru
 
 - Windows, macOS and Linux (browser later), any resolution, high refresh rates, gamepads.
 - Plays on existing zones; feels like Continuum to veterans.
-- Graphics and sounds come from an asset folder, which your own folder can override.
+- Graphics and sounds ship in `assets/classic`, which your own folder can override.
 
-Status: early development. The offline sandbox works, and the client can join a zone
-(tested against the local test zone below; `oss-server` networking is in progress).
+Status: in development. The client joins real zones: it logs in, downloads and caches
+the map, LVZ graphics and the zone news, renders the arena, flies, fights, and has
+chat, macros, replays, a settings screen, screenshots, accessibility palettes,
+gamepad remapping and a zone browser. Continuum's own encryption is not in this
+repository, so zones that require it cannot be joined from here.
 
 ## Play online
 
@@ -22,8 +25,19 @@ Enter opens the chat box: `'text` or `//text` team, `"text` the selected player'
 `:name:text` private (Tab completes the name; remote players and `:#squad:` go through
 the biller), `::text` reply, `/text` private to the player selected in the stat box,
 `;text` or `;N;text` chat channels, `=N` change team, `?command` goes to the server.
+Up/Down in the chat box bring back lines you sent.
+
+The client answers a few commands itself, as Continuum does: `?go [arena]` changes
+arena, `?namelen N` sets the width of the sender column in chat, `?status` shows how
+far your ship is upgraded, and `?news` opens the zone's news (also N in the menu).
+Continuum's `%` substitutions work in anything you send: `%selfname`, `%tickname`,
+`%squad`, `%freq`, `%bounty`, `%flags`, `%energy`, `%killed`, `%killer`, `%coord`,
+`%redname`, `%redbounty`, `%redflags`.
+
 F2 cycles the stat box views, Page Up/Down select a player. Esc opens the menu: 1-8
-change ship, S spectate, Q quit. Maps you download are cached per server.
+change ship, S spectate, N zone news, O options, Q quit; the whole chat log is on
+screen while the menu is open, and Page Up/Down scroll it. Maps, LVZ files and the
+news are cached per server.
 
 ## Zone browser
 
@@ -60,8 +74,14 @@ turns this off.
 
 `oss-client.ini` in your settings folder (`%APPDATA%\OpenSubSpace` on Windows,
 `~/.config/open-subspace` elsewhere, or `--config <file>`) holds video, audio, your
-player name, every key binding and macro keys (`[macros]`, e.g. `Ctrl+F1 = 'help at base`). It is written with the defaults on first run;
-command-line flags override it.
+player name, every key and gamepad binding, macro keys (`[macros]`, e.g.
+`Ctrl+F1 = 'help at base`), the accessibility palette and interface scale, and the
+encryption policy. It is written with the defaults on first run; command-line flags
+override it.
+
+Print Screen or F11 saves a screenshot beside the settings file. `[accessibility]
+palette` picks a colour-blind or high-contrast palette, and `ui_scale` draws the
+interface larger than the world.
 
 ## Try the sandbox
 
@@ -97,8 +117,8 @@ Run with `--help` for more options.
 cargo run --release -p oss-bot -- --server 127.0.0.1:5000 --ship 1 --count 20 --fly --chat "hi"
 ```
 
-Until `oss-server` accepts network clients, a minimal relay zone (login, one arena, map
-download, position/chat relay; not a real server) is available for local testing:
+A minimal relay zone (login, one arena, map download, position/chat relay; not a real
+server) is there for tests that should not need a server:
 
 ```
 cargo run -p oss-session --example test_zone -- --bind 127.0.0.1:5000 path/to/map.lvl
