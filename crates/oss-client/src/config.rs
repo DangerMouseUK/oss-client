@@ -1,4 +1,5 @@
-//! The settings file: video, audio, player name and key bindings.
+//! The settings file: video, audio, accessibility, networking, the player's name,
+//! key and gamepad bindings, macro keys and directory servers.
 //!
 //! A small INI file (`oss-client.ini` in the user's config folder, or `--config`).
 //! Missing entries keep their defaults, unknown or bad lines are reported and skipped,
@@ -8,9 +9,13 @@
 //! ```ini
 //! [video]
 //! scale = 0          ; 0 = from the display's DPI
+//! [accessibility]
+//! palette = standard ; or deuteranopia, protanopia, tritanopia, high_contrast
 //! [keys]
 //! gun = NoShift+ControlLeft, NoShift+ControlRight
 //! mine = Shift+Tab
+//! [macros]
+//! Ctrl+F1 = 'on my way to %coord
 //! ```
 
 use std::path::{Path, PathBuf};

@@ -1,6 +1,6 @@
 //! The in-game HUD in Continuum's layout: energy gauge and digits (top), item icons
-//! (left), weapon/toggle icons and timed effects (right), radar (bottom right),
-//! messages (bottom left).
+//! (left), weapon/toggle icons and timed effects (right), radar with the map square
+//! above it (bottom right), messages (bottom left).
 
 use oss_sim::{Ship, TileMap, cap, ship::active, tile, toggle};
 
