@@ -61,7 +61,7 @@ pub struct Art {
 pub const OVERRIDABLE: &[&str] = &[
     "ships", "bullets", "bombs", "mines", "explode0", "explode1", "explode2", "warp", "exhaust",
     "goal", "flag", "prizes", "shrapnel", "warppnt", "repel", "shield", "super", "empburst",
-    "rocket", "powerb", "over1", "over2", "over3", "over4", "over5", "wall",
+    "rocket", "powerb", "over1", "over2", "over3", "over4", "over5", "wall", "gradient",
 ];
 
 /// Whether an LVZ file named `stem` (no extension, lowercase) replaces a standard sheet.
