@@ -20,6 +20,8 @@ Play online:
   --name <name>             Player name (default: from the settings file)
   --password <pw>           Password (default empty)
   --arena <name>            Arena to enter (default: any public arena)
+  --new-user                Register the name instead of expecting it to exist.
+                            Subgame forgets its accounts when the zone restarts
   --ship <1-8|spec>         Ship to enter in (default spec online, 1 offline)
   --freq <n>                Team to join (in game: type =n)
   --follow <name>           Spectate, following this player
@@ -81,6 +83,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut name = None;
     let mut password = String::new();
     let mut arena = None;
+    let mut new_user = false;
     let mut ship: Option<u8> = None;
     let mut freq: Option<i16> = None;
     let mut continuum_dir = None;
@@ -119,6 +122,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--name" => name = Some(value("--name")?),
             "--password" => password = value("--password")?,
             "--arena" => arena = Some(value("--arena")?),
+            "--new-user" => new_user = true,
             "--freq" => {
                 freq = Some(
                     value("--freq")?
@@ -237,6 +241,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             security: security.unwrap_or_default(),
             known_servers: None,
             identities: None,
+            new_user,
         })),
         // No --server or --sandbox: the login screen.
         (false, None) => app::Mode::Login { server: None },

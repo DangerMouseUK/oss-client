@@ -51,6 +51,18 @@ pub struct SessionConfig {
     pub timezone_bias: i16,
     /// Ask for the arena's LVZ files (graphics; bots usually don't need them).
     pub want_lvz: bool,
+    /// Register the name on login: the login packet's "new user" byte
+    /// (mervbot `generatePassword`, `clientprot.cpp`).
+    ///
+    /// Subgame refuses a name it does not know with
+    /// [`login_code::NEW_USER`] unless this is set, and its accounts do not survive a
+    /// zone restart, so against a freshly started subgame **every** name is new. ASSS reads the byte only on the billing path
+    /// (`billing_ssc.c` forwards it as `MakeNew`); a billerless ASSS zone ignores it
+    /// and takes any name either way.
+    ///
+    /// Off by default: it asks the server to create an account, so a mistyped name
+    /// should fail rather than quietly become a new player.
+    pub new_user: bool,
 }
 
 impl Default for SessionConfig {
@@ -64,6 +76,7 @@ impl Default for SessionConfig {
             machine_id: 0x0C55_0C55,
             timezone_bias: 0,
             want_lvz: false,
+            new_user: false,
         }
     }
 }
@@ -611,7 +624,7 @@ impl Session {
     fn send_login(&mut self) {
         let login = Login {
             kind: c2s::kind::LOGIN,
-            flags: 0,
+            flags: u8::from(self.cfg.new_user),
             name: FixedStr::new(self.cfg.name.as_bytes()),
             password: FixedStr::new(self.cfg.password.as_bytes()),
             machine_id: self.cfg.machine_id,

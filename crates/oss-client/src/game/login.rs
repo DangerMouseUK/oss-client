@@ -226,6 +226,8 @@ impl Login {
             security: Default::default(),
             known_servers: None,
             identities: None,
+            // The login screen has no field for it; `--new-user` is the way in.
+            new_user: false,
         })))
     }
 }
