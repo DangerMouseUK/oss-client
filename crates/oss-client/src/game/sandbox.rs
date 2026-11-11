@@ -1588,8 +1588,27 @@ impl Sandbox {
                         self.lvz.change(c);
                     }
                 }
-                SessionEvent::GreenTaken { x, y, .. } => {
+                SessionEvent::GreenTaken { pid, x, y, prize } => {
                     self.world.remove_green_at(x as u16, y as u16);
+                    // `Ship:PrizeShareLimit`: a teammate's green is shared with every
+                    // ship we simulate locally (online, that is ours alone) whose bounty
+                    // is still under its ship's share limit. `World::share_prize` skips
+                    // the taker, warp prizes and spectators, and leaves the prize seed
+                    // alone. Behaviour from the nullspace client (MIT):
+                    // `OnPlayerPrizePkt` in `Game.cpp`.
+                    if let Some(freq) = self
+                        .net
+                        .as_ref()
+                        .and_then(|n| n.session.player(pid))
+                        .map(|p| p.freq)
+                    {
+                        self.world.share_prize(
+                            freq as u16,
+                            pid as u16,
+                            prize as i32,
+                            &mut sim_events,
+                        );
+                    }
                 }
                 SessionEvent::ShipReset => {
                     let i = self.me_index();
