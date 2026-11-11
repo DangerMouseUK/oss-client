@@ -34,7 +34,24 @@ struct Globals {
 
 /// Handle to a texture owned by the renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextureId(usize);
+pub struct TextureId {
+    slot: u32,
+    /// Bumped every time the slot is freed, so a handle kept past
+    /// [`Renderer::free_texture`] draws nothing instead of whatever took its place.
+    generation: u32,
+}
+
+impl TextureId {
+    /// A handle to no texture, for tests that don't have a GPU. Drawing with it is
+    /// ignored, like any handle to a slot that was never filled.
+    #[cfg(test)]
+    pub fn for_test(slot: u32) -> Self {
+        Self {
+            slot,
+            generation: 0,
+        }
+    }
+}
 
 struct GpuTexture {
     texture: wgpu::Texture,
@@ -43,8 +60,15 @@ struct GpuTexture {
     height: u32,
 }
 
+/// One texture slot. Freed slots keep their generation and are handed out again by
+/// [`Renderer::create_texture`].
+struct Slot {
+    generation: u32,
+    texture: Option<GpuTexture>,
+}
+
 struct Batch {
-    texture: usize,
+    texture: TextureId,
     start: u32,
     count: u32,
 }
@@ -68,7 +92,9 @@ pub struct Renderer {
     globals_bg: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    textures: Vec<GpuTexture>,
+    textures: Vec<Slot>,
+    /// Slots whose texture was freed, reused by the next `create_texture`.
+    free_slots: Vec<usize>,
     vbuf: wgpu::Buffer,
     vbuf_capacity: usize,
     vertices: Vec<Vertex>,
@@ -302,6 +328,7 @@ impl Renderer {
             texture_layout,
             sampler,
             textures: Vec::new(),
+            free_slots: Vec::new(),
             vbuf,
             vbuf_capacity,
             vertices: Vec::new(),
@@ -344,19 +371,60 @@ impl Renderer {
     /// Uploads an RGBA8 texture and returns its handle.
     pub fn create_texture(&mut self, width: u32, height: u32, rgba: &[u8]) -> TextureId {
         let t = self.make_texture(width, height);
-        self.textures.push(t);
-        let id = TextureId(self.textures.len() - 1);
+        let slot = match self.free_slots.pop() {
+            Some(slot) => {
+                self.textures[slot].texture = Some(t);
+                slot
+            }
+            None => {
+                self.textures.push(Slot {
+                    generation: 0,
+                    texture: Some(t),
+                });
+                self.textures.len() - 1
+            }
+        };
+        let id = TextureId {
+            slot: slot as u32,
+            generation: self.textures[slot].generation,
+        };
         self.update_texture(id, rgba);
         id
     }
 
-    /// Replaces a texture with a new one of a different size, keeping its handle.
-    pub fn recreate_texture(&mut self, id: TextureId, width: u32, height: u32, rgba: &[u8]) {
-        if id.0 >= self.textures.len() {
+    /// Drops a texture's GPU memory and frees its slot for reuse. Handles to it stop
+    /// drawing anything; the arena change that freed them drops them in the same
+    /// breath.
+    pub fn free_texture(&mut self, id: TextureId) {
+        let Some(slot) = self.textures.get_mut(id.slot as usize) else {
+            return;
+        };
+        if slot.generation != id.generation || slot.texture.is_none() {
             return;
         }
-        self.textures[id.0] = self.make_texture(width, height);
+        slot.texture = None;
+        slot.generation = slot.generation.wrapping_add(1);
+        self.free_slots.push(id.slot as usize);
+    }
+
+    /// Replaces a texture with a new one of a different size, keeping its handle.
+    pub fn recreate_texture(&mut self, id: TextureId, width: u32, height: u32, rgba: &[u8]) {
+        let t = self.make_texture(width, height);
+        let Some(slot) = self.textures.get_mut(id.slot as usize) else {
+            return;
+        };
+        if slot.generation != id.generation {
+            return;
+        }
+        slot.texture = Some(t);
         self.update_texture(id, rgba);
+    }
+
+    fn gpu(&self, id: TextureId) -> Option<&GpuTexture> {
+        self.textures
+            .get(id.slot as usize)
+            .filter(|s| s.generation == id.generation)
+            .and_then(|s| s.texture.as_ref())
     }
 
     fn make_texture(&self, width: u32, height: u32) -> GpuTexture {
@@ -399,7 +467,7 @@ impl Renderer {
 
     /// Replaces a texture's contents (same size).
     pub fn update_texture(&mut self, id: TextureId, rgba: &[u8]) {
-        let Some(t) = self.textures.get(id.0) else {
+        let Some(t) = self.gpu(id) else {
             return;
         };
         if rgba.len() != (t.width * t.height * 4) as usize {
@@ -440,7 +508,7 @@ impl Renderer {
         h: f32,
         color: [f32; 4],
     ) {
-        let Some(t) = self.textures.get(texture.0) else {
+        let Some(t) = self.gpu(texture) else {
             return;
         };
         let (tw, th) = (t.width as f32, t.height as f32);
@@ -464,9 +532,9 @@ impl Renderer {
         let start = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&quad);
         match self.batches.last_mut() {
-            Some(b) if b.texture == texture.0 && b.start + b.count == start => b.count += 6,
+            Some(b) if b.texture == texture && b.start + b.count == start => b.count += 6,
             _ => self.batches.push(Batch {
-                texture: texture.0,
+                texture,
                 start,
                 count: 6,
             }),
@@ -572,7 +640,7 @@ impl Renderer {
                 pass.set_pipeline(&self.sprite_pipeline);
                 pass.set_vertex_buffer(0, self.vbuf.slice(..));
                 for b in &self.batches {
-                    if let Some(t) = self.textures.get(b.texture) {
+                    if let Some(t) = self.gpu(b.texture) {
                         pass.set_bind_group(1, &t.bind_group, &[]);
                         pass.draw(b.start..b.start + b.count, 0..1);
                     }

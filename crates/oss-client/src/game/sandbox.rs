@@ -87,6 +87,8 @@ pub struct Sandbox {
     pub(super) radar: Option<RadarCache>,
     /// Bumped whenever doors or bricks change, so the radar image is rebuilt.
     pub(super) map_revision: u64,
+    /// Online: the server moved us to another arena and its map hasn't arrived yet.
+    arena_change: bool,
     statbox: StatBox,
     /// Bottom-right of the stat box as last drawn (an LVZ anchor).
     statbox_corner: (f32, f32),
@@ -322,6 +324,7 @@ impl Sandbox {
             tileset: tileset.map(<[u8]>::to_vec),
             radar: None,
             map_revision: 0,
+            arena_change: false,
             statbox: StatBox::default(),
             statbox_corner: (0.0, 0.0),
             lvz: Lvz::default(),
@@ -1295,6 +1298,11 @@ impl Sandbox {
         let mut sim_events = Vec::new();
         for ev in events {
             match ev {
+                SessionEvent::EnteredArena { pid } => self.leave_arena(pid),
+                SessionEvent::Playing if self.arena_change => {
+                    self.arena_change = false;
+                    self.enter_arena();
+                }
                 SessionEvent::PlayerEntered(pid) => {
                     let Some(p) = self
                         .net
@@ -1669,6 +1677,9 @@ impl Sandbox {
         );
         match built {
             Ok((art, size, pixels)) => {
+                // The old atlas is nobody's now: this frame's canvases are built from
+                // `self.atlas` after this runs.
+                r.free_texture(self.atlas);
                 self.atlas = r.create_texture(size, size, &pixels);
                 self.art = art;
                 self.map_revision += 1;
@@ -1951,6 +1962,113 @@ impl Sandbox {
         net.flush();
     }
 
+    /// Online: the server put us in a different arena (`?go`, or a server-side move).
+    /// Everything the old arena owned goes now — its remote ships, bricks, flags,
+    /// balls, turrets and crowns, and its LVZ objects together with the textures they
+    /// uploaded, which until this existed stayed on the GPU for the rest of the
+    /// session. Our own ship and the old map stay on screen until the new arena's map
+    /// arrives at [`Sandbox::enter_arena`]; the arena gives us a new player id, so the
+    /// ship takes it with it.
+    fn leave_arena(&mut self, pid: i16) {
+        self.arena_change = true;
+        let new_id = if self.is_replay() {
+            self.me_id
+        } else {
+            pid as u16
+        };
+        self.world.ships.retain(|s| s.id == self.me_id);
+        match self.world.ships.first_mut() {
+            Some(s) => s.id = new_id,
+            // Nothing to carry over (we were a spectator the world never held): the
+            // screen still needs a ship to take its camera from until the new arena
+            // builds its own.
+            None => {
+                let i = self.world.add_remote_ship(new_id, 0, 0);
+                self.world.ships[i].takes_damage = false;
+            }
+        }
+        self.me_id = new_id;
+        self.world.clear_bricks();
+        self.brick_count = 0;
+        self.lvz.clear();
+        self.flags = Flags::new(Vec::new());
+        self.flag_deadline = None;
+        self.balls = Balls::default();
+        self.attached_to = None;
+        self.attachments.clear();
+        self.crowned.clear();
+        self.crown_deadline = None;
+        self.effects.clear();
+        self.statbox = StatBox::default();
+        self.last_killed = None;
+        self.last_killer = None;
+    }
+
+    /// Online: the new arena's map, settings and player list are all in, so the world
+    /// is rebuilt around them. The atlas is left to [`Sandbox::rebuild_art`] on the
+    /// next frame, which is where this has a renderer to hand.
+    fn enter_arena(&mut self) {
+        let Some(net) = self.net.as_ref() else { return };
+        let (Some((_, map_bytes)), Some(settings)) =
+            (net.map.clone(), net.session.settings().cloned())
+        else {
+            log::warn!("entered an arena with no map or no settings; keeping the old one");
+            return;
+        };
+        let green_seed = net.seeds.map_or(0, |s| s.0);
+        let (mut world, objects) = arena_world(&map_bytes, &settings, green_seed);
+        world.set_tick(net.session.server_ticks(net.now_ms()));
+        world.player_count = Some(net.session.players().count() as u32);
+        if let Some((_, door_seed, timestamp)) = net.seeds {
+            world.sync_doors(door_seed, timestamp);
+        }
+        let replay = net.is_replay();
+        let me = net.session.me().cloned();
+        let freq = me.as_ref().map_or(0, |p| p.freq as u16);
+        if let Some((center, radius)) = spawn_area(&settings, freq) {
+            world.spawn_center = center;
+            world.spawn_radius = radius;
+        }
+        for p in net.session.players() {
+            if (replay || Some(p.pid) != me.as_ref().map(|m| m.pid)) && p.ship != SPECTATOR {
+                world.add_remote_ship(p.pid as u16, p.ship, p.freq as u16);
+            }
+        }
+        let own_ship = match (replay, &me) {
+            (false, Some(p)) => p.ship,
+            _ => SPECTATOR,
+        };
+        add_own_ship(&mut world, self.me_id, own_ship, freq);
+        let level = oss_formats::Level::parse(&map_bytes).ok();
+        self.tileset = level
+            .as_ref()
+            .and_then(|l| l.tileset.as_ref())
+            .map(|t| t.bytes.clone());
+        self.objects = objects;
+        self.flags = Flags::new(
+            self.objects
+                .iter()
+                .filter(|o| o.id == oss_sim::tile::FLAG)
+                .map(|o| (o.x as i32, o.y as i32))
+                .collect(),
+        );
+        self.ball_rules = BallRules::from_arena(&world.settings);
+        self.world = world;
+        self.spectating = own_ship == SPECTATOR;
+        self.spec_follow = None;
+        self.spec_cam = (8192.0, 8192.0);
+        // The tileset changed with the map, so the atlas and the radar image both have
+        // to be built again.
+        self.lvz.art_changed = true;
+        self.map_revision += 1;
+        let arena = self
+            .net
+            .as_ref()
+            .and_then(|n| n.session.config().arena.clone())
+            .unwrap_or_else(|| "(public)".into());
+        self.message(format!("Entered arena {arena}."), color::GREEN);
+    }
+
     /// Adds an LVZ file's objects (logged and skipped if it doesn't parse).
     pub fn load_lvz(&mut self, name: &str, data: &[u8]) {
         match self.lvz.add_file(name, data, self.clock) {
@@ -2228,6 +2346,13 @@ impl Sandbox {
         let alpha = self.acc.as_secs_f32() / TICK.as_secs_f32();
         let cam = self.camera(alpha);
         let tints = self.palette.text_tints();
+        // Before the canvases below take a copy of `self.atlas`, or they spend the
+        // frame drawing the old atlas with the new art's regions.
+        self.lvz.upload(r);
+        if self.lvz.art_changed {
+            self.lvz.art_changed = false;
+            self.rebuild_art(r);
+        }
         let mut c = Canvas::new(&self.art, self.atlas, r.size(), self.scale, cam);
         c.tints = tints;
         // The interface (HUD, text, stat box, LVZ screen objects) can be drawn larger
@@ -2240,11 +2365,6 @@ impl Sandbox {
             cam,
         );
         ui.tints = tints;
-        self.lvz.upload(r);
-        if self.lvz.art_changed {
-            self.lvz.art_changed = false;
-            self.rebuild_art(r);
-        }
         let chat_top = ui.view_h - 16.0 - ChatLog::visible_rows(ui.view_h, false) as f32 * 12.0;
         self.screen_refs = hud::screen_refs(&ui, self.statbox_corner, chat_top, self.spectating);
         view::draw_world(self, &c, &ui, r, alpha);
