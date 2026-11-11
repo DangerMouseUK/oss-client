@@ -9,6 +9,7 @@
 //! your position. Packet handling follows ASSS (server truth) and the nullspace and
 //! mervbot clients.
 
+pub mod client;
 pub mod directory;
 pub mod map;
 pub mod replay;
@@ -27,6 +28,7 @@ use oss_proto::s2c::ChatBody;
 use oss_proto::s2c::{self, MapFilename, login_code};
 use oss_proto::{C2SPosition, ClientSettings, FixedStr, Packet, S2CPacket, WeaponInfo, checksum};
 
+pub use client::{ClientProfile, LoginForm, Profile, SecurityAnswer, SecurityChallenge, VieClient};
 pub use oss_net::DisconnectReason as Reason;
 pub use oss_proto::common::chat_type;
 pub use oss_proto::common::{Brick, ObjectChange, object_change};
@@ -63,6 +65,13 @@ pub struct SessionConfig {
     /// Off by default: it asks the server to create an account, so a mistyped name
     /// should fail rather than quietly become a new player.
     pub new_user: bool,
+    /// Which client to present as on the wire: the login form and the answer to a
+    /// security challenge. Defaults to [`VieClient`].
+    ///
+    /// A Continuum cipher needs the Continuum forms with it — an ASSS zone picks
+    /// which it expects from the encryption, not from the packet's type byte, and
+    /// drops a mismatched login without saying so. See [`mod@client`].
+    pub client: Profile,
 }
 
 impl Default for SessionConfig {
@@ -77,6 +86,7 @@ impl Default for SessionConfig {
             timezone_bias: 0,
             want_lvz: false,
             new_user: false,
+            client: client::vie(),
         }
     }
 }
@@ -622,8 +632,12 @@ impl Session {
     }
 
     fn send_login(&mut self) {
+        // Which form, and the fields that go with it, come from the profile: a
+        // Continuum zone drops a 101-byte login from a connection that negotiated
+        // Continuum encryption. See [`mod@client`].
+        let form = self.cfg.client.login();
         let login = Login {
-            kind: c2s::kind::LOGIN,
+            kind: form.kind,
             flags: u8::from(self.cfg.new_user),
             name: FixedStr::new(self.cfg.name.as_bytes()),
             password: FixedStr::new(self.cfg.password.as_bytes()),
@@ -631,12 +645,12 @@ impl Session {
             connect_type: 4,
             timezone_bias: self.cfg.timezone_bias,
             unknown1: 0,
-            client_version: 134,
+            client_version: form.version,
             field444: 444,
             field555: 555,
             permission_id: self.cfg.machine_id,
             reserved: [0; 12],
-            cont_id: None,
+            cont_id: form.continuum_id,
         };
         self.send(&login, true);
     }
@@ -1269,10 +1283,8 @@ impl Session {
         } else {
             checksum::settings_checksum(key, &self.settings_raw)
         };
-        let map_checksum = self
-            .map
-            .as_ref()
-            .and_then(|m| m.tiles.as_ref())
+        let tiles = self.map.as_ref().and_then(|m| m.tiles.as_ref());
+        let map_checksum = tiles
             .map(|t| {
                 checksum::map_checksum(key, |x, y| {
                     if (0..1024).contains(&x) && (0..1024).contains(&y) {
@@ -1283,12 +1295,18 @@ impl Session {
                 })
             })
             .unwrap_or(0);
+        // The profile supplies only what depends on the client binary; everything
+        // above and below it is the same for either client.
+        let answer = self.cfg.client.security(SecurityChallenge {
+            key,
+            map_crc32: tiles.map(|t| checksum::map_crc32(t)),
+        });
         let ping = (self.conn.rtt_ms() / 10).min(u16::MAX as u64) as u16;
         let stats = self.conn.stats();
         let resp = SecurityResponse {
             weapon_count: self.weapons_received,
             settings_checksum,
-            exe_checksum: checksum::vie_exe_checksum(key),
+            exe_checksum: answer.exe_checksum,
             map_checksum,
             s2c_slow_total: 0,
             s2c_fast_total: stats.datagrams_received.min(u32::MAX as u64) as u32,
@@ -1300,7 +1318,7 @@ impl Session {
             ping_low: ping,
             ping_high: ping,
             slow_frame: 0,
-            continuum: None,
+            continuum: answer.continuum,
         };
         self.send(&resp, true);
         self.flush(now_ms);
