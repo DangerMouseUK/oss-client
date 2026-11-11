@@ -52,13 +52,34 @@ pub(super) fn map_coordinate(x: f32, y: f32) -> String {
     format!("{col}{}", cell(y) + 1)
 }
 
-/// The line Continuum draws just above the radar. Continuum's is
-/// `"{hour}:{min}{am|pm}  {square}"` (nullspace `Radar::RenderTime`); we draw the
-/// square alone, because std has no local time and a wall clock in the corner did
-/// not look worth a date crate. Adding the clock is a one-line change here once
-/// one is available.
+/// The line Continuum draws just above the radar: `"{hour}:{min}{am|pm}  {square}"`
+/// (nullspace `Radar::RenderTime`), on the player's own wall clock. `std` has no
+/// local time, so the time zone comes from `jiff`, which `env_logger` already brings
+/// in; if the system zone can't be read it falls back to UTC rather than failing.
 pub(super) fn radar_text(x: f32, y: f32) -> String {
-    map_coordinate(x, y)
+    let now = jiff::Zoned::now();
+    format!(
+        "{}  {}",
+        clock_text(now.hour(), now.minute()),
+        map_coordinate(x, y)
+    )
+}
+
+/// A 12-hour clock with no leading zero on the hour, as nullspace's `sprintf` writes
+/// it: `"3:07pm"`.
+///
+/// *One deliberate divergence, as with the sim's other nullspace-derived rules:*
+/// nullspace only subtracts 12 when the hour is **above** 12, so between midnight and
+/// 1am it prints `0:07am`. Every am/pm clock a player has ever read shows `12:07am`
+/// there, so that is what this prints. **Settled by:** one Continuum screenshot taken
+/// between midnight and 1am, which would say whether the 0 is Continuum's own.
+fn clock_text(hour: i8, minute: i8) -> String {
+    let pm = hour >= 12;
+    let hour = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{hour}:{minute:02}{}", if pm { "pm" } else { "am" })
 }
 
 /// Anchor points for LVZ screen objects, indexed by `oss_proto::objects::reference`
@@ -623,6 +644,26 @@ mod tests {
         let img = radar_image(&map, 512);
         let i = (250 * 512 + 250) * 4;
         assert_eq!(&img[i..i + 4], &[90, 90, 90, 255]);
+    }
+
+    #[test]
+    fn the_clock_above_the_radar_reads_like_continuum() {
+        assert_eq!(clock_text(15, 7), "3:07pm");
+        assert_eq!(clock_text(9, 30), "9:30am");
+        assert_eq!(clock_text(12, 0), "12:00pm", "noon is 12pm, not 0pm");
+        assert_eq!(clock_text(23, 59), "11:59pm");
+        // nullspace prints "0:07am" here; see `clock_text`.
+        assert_eq!(clock_text(0, 7), "12:07am", "midnight is 12am, not 0am");
+    }
+
+    #[test]
+    fn the_radar_line_is_the_clock_then_the_map_square() {
+        // Two spaces between them, as nullspace's format string has.
+        let line = radar_text(0.0, 0.0);
+        let (clock, square) = line.split_once("  ").expect("clock then square");
+        assert!(clock.ends_with("am") || clock.ends_with("pm"), "{clock}");
+        assert!(clock.contains(':'), "{clock}");
+        assert_eq!(square, "A1");
     }
 
     #[test]
