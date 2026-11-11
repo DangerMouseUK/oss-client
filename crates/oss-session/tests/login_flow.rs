@@ -289,6 +289,11 @@ fn a_continuum_profile_reaches_the_wire_in_the_continuum_forms() {
         client: std::sync::Arc::new(StubContinuum),
         ..Default::default()
     };
+    // Note the pairing: a Continuum profile over the VIE acceptor, because this
+    // repository has no Continuum cipher and never will. The session logs an error
+    // about exactly that -- `login_form_mismatch` -- and sends anyway, which is why
+    // that check logs rather than asserting. A `debug_assert!` there would fail this
+    // test, which is the only test that can exercise the Continuum forms at all.
     let mut client = Session::new(cfg, now, 0xBEEF);
     let mut zone = Zone::default();
 

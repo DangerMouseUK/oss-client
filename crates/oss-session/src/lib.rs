@@ -21,7 +21,8 @@ pub mod udp;
 use std::collections::{BTreeMap, VecDeque};
 
 use oss_net::{
-    Config, Connection, DisconnectReason, Event as NetEvent, Handshake, VieClientHandshake,
+    CipherKind, Config, Connection, DisconnectReason, Event as NetEvent, Handshake,
+    VieClientHandshake,
 };
 use oss_proto::c2s::{self, GoArena, Login, MapRequest, SecurityResponse, SetFreq, SetShip};
 use oss_proto::s2c::ChatBody;
@@ -636,6 +637,26 @@ impl Session {
         // Continuum zone drops a 101-byte login from a connection that negotiated
         // Continuum encryption. See [`mod@client`].
         let form = self.cfg.client.login();
+        // The profile and the cipher are chosen separately and have to agree: a zone
+        // picks the login form it expects from the *encryption*, not from the packet's
+        // type byte, and drops a mismatch with nothing on the wire to say why. This is
+        // the one place both are in hand. `Connection::establish` sets the cipher
+        // before it pushes `Connected`, and this runs from that arm, so the kind is
+        // already known here.
+        //
+        // Logged, not asserted: with `SecurityMode::Auto` the cipher we end up with is
+        // partly the *server's* choice (OpenSec, falling back to VIE), so a remote peer
+        // can decide whether this fires — and in this repo network data never panics
+        // the client. The send goes ahead; the zone's refusal is the real outcome and
+        // this is the line that explains it.
+        if let Some(complaint) =
+            login_form_mismatch(self.conn.cipher_kind(), form.kind == c2s::kind::CONT_LOGIN)
+        {
+            log::error!(
+                "{complaint} (cipher {}); the zone will drop this login",
+                self.conn.cipher_name().unwrap_or("?")
+            );
+        }
         let login = Login {
             kind: form.kind,
             flags: u8::from(self.cfg.new_user),
@@ -1533,6 +1554,35 @@ fn arena_target(arena: &str) -> (i16, FixedStr<16>) {
 }
 
 /// Human-readable login failure.
+/// Whether a login form and the cipher it will be sent under disagree, and what to
+/// say about it.
+///
+/// A zone picks the login form it expects from the **encryption**, not from the
+/// packet's type byte — ASSS `core.c`'s `PLogin` is registered for both `0x09` and
+/// `0x24` and checks the length against `p->type`, which `net.c` takes from the
+/// encryption module. oss-server does the same: its transport classifies a connection
+/// from the conn-init byte and `modules/core.rs` then holds a VIE client to
+/// [`Login::VIE_LEN`] and a Continuum one to `Login::CONT_LEN`.
+///
+/// `None` means "cannot tell", which is not the same as agreement:
+/// [`CipherKind`] is `#[non_exhaustive]` and [`CipherKind::Other`] is the `Cipher`
+/// trait's default, so an external cipher that does not override `kind()` turns this
+/// check off rather than failing it.
+fn login_form_mismatch(cipher: Option<CipherKind>, continuum_form: bool) -> Option<&'static str> {
+    match (cipher?, continuum_form) {
+        // A VIE handshake that ended unencrypted is still the VIE module as far as the
+        // zone is concerned, and an OpenSec client hello is a `00 01` packet, which
+        // oss-server classifies as a VIE client. All three want the SubSpace form.
+        (CipherKind::Vie | CipherKind::None | CipherKind::OpenSec, true) => {
+            Some("Continuum login form on a connection that is not Continuum-encrypted")
+        }
+        (CipherKind::Continuum, false) => {
+            Some("SubSpace login form on a Continuum-encrypted connection")
+        }
+        _ => None,
+    }
+}
+
 fn login_message(code: u8) -> &'static str {
     match code {
         login_code::NEW_USER => "unknown name (new user)",
@@ -1631,5 +1681,43 @@ mod tests {
         assert_eq!((t, n.to_str()), (c2s::arena_type::NAMED, Some("duel")));
         // A number too large for the field is clamped, not wrapped negative.
         assert_eq!(arena_target("65535").0, i16::MAX);
+    }
+
+    /// The pairing the session cannot otherwise catch: the profile picks the login
+    /// form, the handshake picks the cipher, and a zone that disagrees drops the
+    /// login silently. Every arm is pinned, including the two that must stay quiet.
+    #[test]
+    fn a_login_form_must_match_the_cipher_it_is_sent_under() {
+        use CipherKind::*;
+
+        // The three that mean "the zone expects the SubSpace form".
+        for k in [Vie, None, OpenSec] {
+            assert!(
+                login_form_mismatch(Some(k), true).is_some(),
+                "{k:?} + Continuum form is a mismatch"
+            );
+            assert_eq!(
+                login_form_mismatch(Some(k), false),
+                Option::None,
+                "{k:?} + SubSpace form is right"
+            );
+        }
+
+        assert!(login_form_mismatch(Some(Continuum), false).is_some());
+        assert_eq!(login_form_mismatch(Some(Continuum), true), Option::None);
+
+        // `Other` is the `Cipher` trait's default, so an external cipher that does not
+        // override `kind()` lands here. It must read as "cannot tell" in **both**
+        // directions -- never as a mismatch, which would cry wolf at every private
+        // implementation, and never as agreement either.
+        assert_eq!(login_form_mismatch(Some(Other), true), Option::None);
+        assert_eq!(login_form_mismatch(Some(Other), false), Option::None);
+
+        // Before the cipher is known there is nothing to compare. In practice this
+        // cannot happen -- `Connection::establish` sets the cipher before it pushes
+        // `Connected`, and `send_login` runs from that arm -- but the signature allows
+        // it and silence is the only safe answer.
+        assert_eq!(login_form_mismatch(Option::None, true), Option::None);
+        assert_eq!(login_form_mismatch(Option::None, false), Option::None);
     }
 }
