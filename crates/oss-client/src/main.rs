@@ -40,7 +40,7 @@ Options:
                             (also OSS_ASSETS_DIR); may hold only some files
   --continuum-dir <dir>     Take graphics/sounds from a Continuum install
                             (also OSS_CONTINUUM_DIR)
-  --lvz <file.lvz>          Show an LVZ file in the sandbox (repeatable)
+  --lvz <file.lvz>          Show an LVZ file, offline or in a zone (repeatable)
   --scale <n>               Integer pixel scale (default: from display DPI)
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
@@ -55,6 +55,8 @@ Options:
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
   --screenshot-at <secs>    When to take that screenshot
   --autopilot               Fly and shoot automatically (testing)
+  --send <secs>:<line>      Type this line in game <secs> after the arena loads,
+                            as if you had typed it (repeatable; testing)
   -h, --help                Show this help";
 
 fn main() {
@@ -95,6 +97,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut screenshot = None;
     let mut screenshot_at = 2.0f32;
     let mut autopilot = false;
+    let mut send: Vec<(f32, String)> = Vec::new();
     let mut mute = false;
     let mut config = None;
     let mut lvz = Vec::new();
@@ -165,6 +168,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
                     .ok_or("--screenshot-at must be 0-600 seconds")?
             }
             "--autopilot" => autopilot = true,
+            "--send" => {
+                let v = value("--send")?;
+                let (secs, line) = v
+                    .split_once(':')
+                    .ok_or("--send takes <secs>:<line>, e.g. 5:?go twobase")?;
+                let at: f32 = secs
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("--send: {secs:?} isn't a number of seconds"))?;
+                send.push((at, line.to_string()));
+            }
             "--mute" => mute = true,
             "--config" => config = Some(PathBuf::from(value("--config")?)),
             "--lvz" => lvz.push(PathBuf::from(value("--lvz")?)),
@@ -184,6 +198,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             other => return Err(format!("unknown argument {other}")),
         }
     }
+    // Soonest last, so the game screen pops them off the end as the clock passes.
+    send.sort_by(|a, b| b.0.total_cmp(&a.0));
     if let Some(path) = replay {
         if sandbox || server.is_some() {
             return Err("--replay can't be combined with --sandbox or --server".into());
@@ -198,6 +214,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             screenshot,
             screenshot_at,
             autopilot,
+            send: send.clone(),
             mute,
             volume: 60,
             config,
@@ -256,6 +273,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         screenshot,
         screenshot_at,
         autopilot,
+        send,
         mute,
         volume: 60,
         config,

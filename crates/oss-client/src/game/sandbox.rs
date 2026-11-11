@@ -161,6 +161,10 @@ pub struct Sandbox {
     /// Testing aid: steer toward the nearest enemy and shoot (overrides the keys
     /// whenever an enemy is alive).
     pub aim_bot: bool,
+    /// Testing aid (`--send`): lines to type at the given clock times, soonest last
+    /// so they pop off the end. They go through [`Sandbox::send_chat_line`], the same
+    /// path a typed line takes, so a scripted `?go` is a real `?go`.
+    pub scripted: Vec<(f32, String)>,
 }
 
 /// Sounds the game uses, loaded up front.
@@ -378,6 +382,7 @@ impl Sandbox {
             spec_follow: None,
             spec_xradar: false,
             aim_bot: false,
+            scripted: Vec::new(),
         };
         if s.me().is_alive() {
             s.spawn_warp_effect();
@@ -593,6 +598,12 @@ impl Sandbox {
         self.last = now;
         self.clock += dt.as_secs_f32();
         self.fps.frame(now);
+        while self.scripted.last().is_some_and(|(t, _)| self.clock >= *t) {
+            if let Some((_, line)) = self.scripted.pop() {
+                log::info!("--send: {line}");
+                self.send_chat_line(&line);
+            }
+        }
 
         let mut edges = input.take_edges();
         let pressed = input.take_pressed();
@@ -1975,6 +1986,18 @@ impl Sandbox {
     /// arrives at [`Sandbox::enter_arena`]; the arena gives us a new player id, so the
     /// ship takes it with it.
     fn leave_arena(&mut self, pid: i16) {
+        log::info!(
+            "leaving arena: dropping {} remote ship(s), {} LVZ object(s), {} LVZ image(s),              {} crowned player(s), {} turret(s)",
+            self.world
+                .ships
+                .iter()
+                .filter(|s| s.id != self.me_id)
+                .count(),
+            self.lvz.objects.len(),
+            self.lvz.images.len(),
+            self.crowned.len(),
+            self.attachments.len(),
+        );
         self.arena_change = true;
         let new_id = if self.is_replay() {
             self.me_id
@@ -2045,10 +2068,12 @@ impl Sandbox {
         };
         add_own_ship(&mut world, self.me_id, own_ship, freq);
         let level = oss_formats::Level::parse(&map_bytes).ok();
-        self.tileset = level
+        let tileset = level
             .as_ref()
             .and_then(|l| l.tileset.as_ref())
             .map(|t| t.bytes.clone());
+        let tileset_changed = self.tileset != tileset;
+        self.tileset = tileset;
         self.objects = objects;
         self.flags = Flags::new(
             self.objects
@@ -2062,15 +2087,32 @@ impl Sandbox {
         self.spectating = own_ship == SPECTATOR;
         self.spec_follow = None;
         self.spec_cam = (8192.0, 8192.0);
-        // The tileset changed with the map, so the atlas and the radar image both have
-        // to be built again.
-        self.lvz.art_changed = true;
+        // The radar image always has to be built again; the atlas only when the new
+        // map brought a different tileset. Watching a live `?go` showed it being built
+        // twice per arena change otherwise — once for the LVZ teardown, then again
+        // here for a tileset that had not moved.
+        self.lvz.art_changed |= tileset_changed;
         self.map_revision += 1;
-        let arena = self
+        let (arena, map_name) = self
             .net
             .as_ref()
-            .and_then(|n| n.session.config().arena.clone())
-            .unwrap_or_else(|| "(public)".into());
+            .map(|n| {
+                (
+                    n.session.config().arena.clone(),
+                    n.map.as_ref().map(|(name, _)| name.clone()),
+                )
+            })
+            .unwrap_or_default();
+        let arena = arena.unwrap_or_else(|| "(public)".into());
+        log::info!(
+            "entered arena {arena}: map {} ({} bytes, {} objects), {} player(s), {} ship(s),              map revision {}",
+            map_name.unwrap_or_else(|| "?".into()),
+            map_bytes.len(),
+            self.objects.len(),
+            self.net.as_ref().map_or(0, |n| n.session.players().count()),
+            self.world.ships.len(),
+            self.map_revision,
+        );
         self.message(format!("Entered arena {arena}."), color::GREEN);
     }
 

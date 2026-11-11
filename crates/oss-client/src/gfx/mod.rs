@@ -60,11 +60,100 @@ struct GpuTexture {
     height: u32,
 }
 
-/// One texture slot. Freed slots keep their generation and are handed out again by
-/// [`Renderer::create_texture`].
-struct Slot {
+/// One slot in [`Slots`]. A freed slot keeps its generation and is handed out again.
+struct Slot<T> {
     generation: u32,
-    texture: Option<GpuTexture>,
+    value: Option<T>,
+}
+
+/// The table behind [`TextureId`]: hands out slots, frees them for reuse, and refuses
+/// a handle whose slot was freed since it was issued.
+///
+/// Generic over the payload and free of wgpu so the part that is easy to get subtly
+/// wrong — handing a reused slot to a handle that predates the reuse — can be tested
+/// without a GPU. See the tests at the bottom of this file.
+struct Slots<T> {
+    slots: Vec<Slot<T>>,
+    /// Slots whose value was freed, reused by the next `insert`.
+    free: Vec<usize>,
+}
+
+impl<T> Default for Slots<T> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+}
+
+impl<T> Slots<T> {
+    /// Stores `value` in a free slot, or a new one, and returns a handle to it.
+    fn insert(&mut self, value: T) -> TextureId {
+        let slot = match self.free.pop() {
+            Some(slot) => {
+                self.slots[slot].value = Some(value);
+                log::debug!(
+                    "reusing texture slot {slot} as gen {}",
+                    self.slots[slot].generation
+                );
+                slot
+            }
+            None => {
+                self.slots.push(Slot {
+                    generation: 0,
+                    value: Some(value),
+                });
+                self.slots.len() - 1
+            }
+        };
+        TextureId {
+            slot: slot as u32,
+            generation: self.slots[slot].generation,
+        }
+    }
+
+    /// The value `id` refers to, or `None` if the slot is empty or has been reused
+    /// since `id` was issued.
+    fn get(&self, id: TextureId) -> Option<&T> {
+        self.slots
+            .get(id.slot as usize)
+            .filter(|s| s.generation == id.generation)
+            .and_then(|s| s.value.as_ref())
+    }
+
+    /// Replaces what `id` refers to, keeping the handle valid. Does nothing to a
+    /// stale handle.
+    fn replace(&mut self, id: TextureId, value: T) -> bool {
+        match self.slots.get_mut(id.slot as usize) {
+            Some(slot) if slot.generation == id.generation => {
+                slot.value = Some(value);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drops what `id` refers to and frees its slot. Bumping the generation is what
+    /// stops a handle kept past this from reading whatever lands in the slot next.
+    fn free(&mut self, id: TextureId) -> bool {
+        let Some(slot) = self.slots.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if slot.generation != id.generation || slot.value.is_none() {
+            return false;
+        }
+        slot.value = None;
+        slot.generation = slot.generation.wrapping_add(1);
+        log::debug!(
+            "freed texture slot {} (gen {} -> {})",
+            id.slot,
+            id.generation,
+            slot.generation
+        );
+        self.free.push(id.slot as usize);
+        true
+    }
 }
 
 struct Batch {
@@ -92,9 +181,7 @@ pub struct Renderer {
     globals_bg: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    textures: Vec<Slot>,
-    /// Slots whose texture was freed, reused by the next `create_texture`.
-    free_slots: Vec<usize>,
+    textures: Slots<GpuTexture>,
     vbuf: wgpu::Buffer,
     vbuf_capacity: usize,
     vertices: Vec<Vertex>,
@@ -327,8 +414,7 @@ impl Renderer {
             globals_bg,
             texture_layout,
             sampler,
-            textures: Vec::new(),
-            free_slots: Vec::new(),
+            textures: Slots::default(),
             vbuf,
             vbuf_capacity,
             vertices: Vec::new(),
@@ -371,23 +457,7 @@ impl Renderer {
     /// Uploads an RGBA8 texture and returns its handle.
     pub fn create_texture(&mut self, width: u32, height: u32, rgba: &[u8]) -> TextureId {
         let t = self.make_texture(width, height);
-        let slot = match self.free_slots.pop() {
-            Some(slot) => {
-                self.textures[slot].texture = Some(t);
-                slot
-            }
-            None => {
-                self.textures.push(Slot {
-                    generation: 0,
-                    texture: Some(t),
-                });
-                self.textures.len() - 1
-            }
-        };
-        let id = TextureId {
-            slot: slot as u32,
-            generation: self.textures[slot].generation,
-        };
+        let id = self.textures.insert(t);
         self.update_texture(id, rgba);
         id
     }
@@ -396,35 +466,19 @@ impl Renderer {
     /// drawing anything; the arena change that freed them drops them in the same
     /// breath.
     pub fn free_texture(&mut self, id: TextureId) {
-        let Some(slot) = self.textures.get_mut(id.slot as usize) else {
-            return;
-        };
-        if slot.generation != id.generation || slot.texture.is_none() {
-            return;
-        }
-        slot.texture = None;
-        slot.generation = slot.generation.wrapping_add(1);
-        self.free_slots.push(id.slot as usize);
+        self.textures.free(id);
     }
 
     /// Replaces a texture with a new one of a different size, keeping its handle.
     pub fn recreate_texture(&mut self, id: TextureId, width: u32, height: u32, rgba: &[u8]) {
         let t = self.make_texture(width, height);
-        let Some(slot) = self.textures.get_mut(id.slot as usize) else {
-            return;
-        };
-        if slot.generation != id.generation {
-            return;
+        if self.textures.replace(id, t) {
+            self.update_texture(id, rgba);
         }
-        slot.texture = Some(t);
-        self.update_texture(id, rgba);
     }
 
     fn gpu(&self, id: TextureId) -> Option<&GpuTexture> {
-        self.textures
-            .get(id.slot as usize)
-            .filter(|s| s.generation == id.generation)
-            .and_then(|s| s.texture.as_ref())
+        self.textures.get(id)
     }
 
     fn make_texture(&self, width: u32, height: u32) -> GpuTexture {
@@ -772,5 +826,76 @@ impl Renderer {
     fn clear_queue(&mut self) {
         self.vertices.clear();
         self.batches.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reason [`TextureId`] carries a generation at all. An arena change frees
+    /// every texture the old arena uploaded and the next arena's textures are handed
+    /// the same slots; a handle that outlived the free must read as empty rather than
+    /// as whatever took its place. Nothing on screen can show this — a stale handle
+    /// that wrongly resolved would draw a plausible-looking wrong image — so it is
+    /// checked here, where the slot table is free of wgpu.
+    #[test]
+    fn a_handle_kept_past_a_free_never_reads_the_slot_that_replaced_it() {
+        let mut slots = Slots::<&str>::default();
+        let ships = slots.insert("old arena's ships");
+        let banner = slots.insert("old arena's banner");
+        assert_eq!(slots.get(ships), Some(&"old arena's ships"));
+
+        // The arena changes: everything it uploaded goes.
+        assert!(slots.free(ships));
+        assert!(slots.free(banner));
+        assert_eq!(slots.get(ships), None, "freed, so it reads as empty");
+
+        // The new arena's textures land in the same slots, newest free first.
+        let new_banner = slots.insert("new arena's banner");
+        let new_ships = slots.insert("new arena's ships");
+        assert_eq!(new_banner.slot, banner.slot, "the slot really is reused");
+        assert_eq!(new_ships.slot, ships.slot);
+
+        // The point of the whole exercise.
+        assert_eq!(slots.get(ships), None, "stale handle, reused slot");
+        assert_eq!(slots.get(banner), None);
+        assert_eq!(slots.get(new_ships), Some(&"new arena's ships"));
+        assert_eq!(slots.get(new_banner), Some(&"new arena's banner"));
+    }
+
+    #[test]
+    fn a_stale_handle_cannot_free_or_overwrite_the_slot_that_replaced_it() {
+        let mut slots = Slots::<u32>::default();
+        let old = slots.insert(1);
+        assert!(slots.free(old));
+        let new = slots.insert(2);
+        assert_eq!(new.slot, old.slot);
+
+        assert!(
+            !slots.free(old),
+            "a stale handle must not free the new value"
+        );
+        assert_eq!(slots.get(new), Some(&2), "which is still there");
+        assert!(!slots.replace(old, 3), "nor overwrite it");
+        assert_eq!(slots.get(new), Some(&2));
+
+        // Double-freeing a live handle is refused too, so the slot is not queued twice.
+        assert!(slots.free(new));
+        assert!(!slots.free(new));
+        assert_eq!(slots.free.len(), 1, "the slot is queued for reuse once");
+    }
+
+    #[test]
+    fn replace_keeps_the_handle_and_an_unknown_slot_is_refused() {
+        let mut slots = Slots::<u32>::default();
+        let id = slots.insert(7);
+        assert!(slots.replace(id, 8));
+        assert_eq!(slots.get(id), Some(&8), "the handle still points at it");
+
+        let never_filled = TextureId::for_test(99);
+        assert_eq!(slots.get(never_filled), None);
+        assert!(!slots.free(never_filled));
+        assert!(!slots.replace(never_filled, 1));
     }
 }
