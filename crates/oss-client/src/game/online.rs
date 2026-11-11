@@ -50,6 +50,9 @@ pub struct ServerOptions {
     pub known_servers: Option<PathBuf>,
     /// Your OpenSec identity keys, one per zone; `None` offers no identity.
     pub identities: Option<PathBuf>,
+    /// Register the name on login instead of expecting the zone to know it
+    /// ([`SessionConfig::new_user`]).
+    pub new_user: bool,
 }
 
 pub struct Online {
@@ -89,6 +92,7 @@ impl Online {
             ship: opts.ship,
             resolution,
             want_lvz: true,
+            new_user: opts.new_user,
             ..Default::default()
         };
         let seed = std::time::SystemTime::now()

@@ -28,6 +28,9 @@ Options:
   --fly                  Fly around (needs a ship): thrust, turn and shoot at random
   --chat <text>          Say this in public chat once in the arena; :name:text
                          sends it privately to that player once they're here
+  --new-user             Register the name instead of expecting it to exist.
+                         Subgame forgets its accounts when the zone restarts, so a
+                         bot needs this against a zone that has just come up
   --duration <secs>      Disconnect after this long (default: run until Ctrl+C)
   --map-cache <dir>      Where downloaded maps are kept
   --security <mode>      vie (default), opensec, or auto (OpenSec, falling back
@@ -52,6 +55,7 @@ struct Options {
     verbose: bool,
     security: SecurityMode,
     identity: Option<PathBuf>,
+    new_user: bool,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>, String> {
@@ -69,6 +73,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
         verbose: false,
         security: SecurityMode::Vie,
         identity: None,
+        new_user: false,
     };
     while let Some(a) = args.next() {
         let mut value = |n: &str| args.next().ok_or_else(|| format!("{n} needs a value"));
@@ -78,6 +83,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
             "--name" => o.name = value("--name")?,
             "--password" => o.password = value("--password")?,
             "--arena" => o.arena = Some(value("--arena")?),
+            "--new-user" => o.new_user = true,
             "--ship" => {
                 let v = value("--ship")?;
                 o.ship = if v.eq_ignore_ascii_case("spec") {
@@ -318,6 +324,7 @@ fn main() {
             arena: opts.arena.clone(),
             ship: opts.ship,
             machine_id: 0x0B07_0000 + i as u32,
+            new_user: opts.new_user,
             ..Default::default()
         };
         let seed = std::time::SystemTime::now()

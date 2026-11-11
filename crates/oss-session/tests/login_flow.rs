@@ -46,6 +46,8 @@ fn player(pid: i16, name: &str, ship: i8) -> PlayerData {
 struct Zone {
     settings: Vec<u8>,
     got_login: Option<String>,
+    /// The login packet's "new user" byte, as the zone received it.
+    login_flags: Option<u8>,
     security: Option<oss_proto::c2s::SecurityResponse>,
     positions: Vec<oss_proto::C2SPosition>,
     chats: Vec<String>,
@@ -75,6 +77,7 @@ impl Zone {
         match C2SPacket::decode(pkt).expect("valid C2S") {
             C2SPacket::Login(l) => {
                 self.got_login = l.name.to_str().map(str::to_string);
+                self.login_flags = Some(l.flags);
                 send(server, &|o| {
                     LoginResponse {
                         code: 0,
@@ -188,6 +191,47 @@ impl Zone {
     }
 }
 
+/// `SessionConfig::new_user` sets the login packet's "new user" byte, which subgame
+/// requires for a name it does not know — and since its accounts do not survive a
+/// zone restart, that is every name on a freshly started zone. Byte 1 of the login
+/// packet, from mervbot's `generatePassword` (`clientprot.cpp`).
+#[test]
+fn new_user_asks_the_zone_to_register_the_name() {
+    let mut now = 1_000u64;
+    let mut server = Server::new(Config::server());
+    server.add_acceptor(Box::new(VieAcceptor::default()));
+    let cfg = SessionConfig {
+        name: "newbie".into(),
+        new_user: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone::default();
+
+    for _ in 0..200 {
+        now += 10;
+        client.tick(now);
+        while let Some(d) = client.poll_transmit() {
+            server.handle_datagram(now, ADDR, &d);
+        }
+        server.tick(now);
+        while let Some((_, ev)) = server.poll_event() {
+            if let Event::Packet(p) = ev {
+                zone.handle(&mut server, &p);
+            }
+        }
+        while let Some((_, d)) = server.poll_transmit() {
+            client.handle_datagram(now, &d);
+        }
+        while client.poll_event().is_some() {}
+        if zone.login_flags.is_some() {
+            break;
+        }
+    }
+    assert_eq!(zone.got_login.as_deref(), Some("newbie"));
+    assert_eq!(zone.login_flags, Some(1));
+}
+
 #[test]
 fn logs_in_enters_arena_downloads_map_and_plays() {
     let mut now = 1_000u64;
@@ -288,6 +332,11 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
     }
 
     assert_eq!(zone.got_login.as_deref(), Some("tester"));
+    assert_eq!(
+        zone.login_flags,
+        Some(0),
+        "an ordinary login does not ask the zone to create the account"
+    );
     assert!(zone.asked_for_news, "the news request went out");
     let news = events.iter().find_map(|e| match e {
         SessionEvent::News(t) => Some(t.clone()),
