@@ -40,6 +40,31 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  docs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oss-client
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-client
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+      # cargo doc runs build scripts, so this needs the same system libraries
+      # the test job installs.
+      - name: Linux system libraries (windowing, audio, gamepad)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-client
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   deny:
     runs-on: ubuntu-latest
     steps:

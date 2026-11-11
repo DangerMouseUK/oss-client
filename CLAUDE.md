@@ -14,7 +14,14 @@ Rust game client for SubSpace/Continuum. Licence **GPL-2.0-or-later**; `oss-asse
 - The client ships its default asset set in `assets/classic/` (graphics and sound). A user's own folder (`--assets-dir`/`OSS_ASSETS_DIR`) or a Continuum install (`--continuum-dir`) overrides it. Never commit `Continuum.exe` or its DLLs, third-party zone downloads or captures.
 - Untrusted network/file data never panics the client.
 - Tests use synthetic data; no captures, personal data or machine paths in the repo.
-- Before committing: `cargo fmt` (**not** `cargo fmt --all`), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- Before committing, all four: `cargo fmt` (**not** `cargo fmt --all`), `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`, and
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`.
+  **The doc gate is not optional and the other three cannot stand in for it.** CI runs it as the
+  `docs` job, and it is the only one that catches a rustdoc fault — a public item linking to a
+  private one, a broken intra-doc link, a bad code fence. oss-core's `main` went red on exactly
+  that on 2026-11-11, after fmt, clippy and tests all passed locally.
+  (CI's own `fmt` step uses `--all --check`, which only reads: it never writes to `../oss-core`.)
   `cargo fmt --all` takes its package list from `cargo metadata`, which includes path
   dependencies outside this workspace. In this repo it therefore hands rustfmt 30 source
   roots in the sibling `../oss-core` checkout — every crate there, including
