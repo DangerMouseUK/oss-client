@@ -14,4 +14,11 @@ Rust game client for SubSpace/Continuum. Licence **GPL-2.0-or-later**; `oss-asse
 - The client ships its default asset set in `assets/classic/` (graphics and sound). A user's own folder (`--assets-dir`/`OSS_ASSETS_DIR`) or a Continuum install (`--continuum-dir`) overrides it. Never commit `Continuum.exe` or its DLLs, third-party zone downloads or captures.
 - Untrusted network/file data never panics the client.
 - Tests use synthetic data; no captures, personal data or machine paths in the repo.
-- Before committing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- Before committing: `cargo fmt` (**not** `cargo fmt --all`), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+  `cargo fmt --all` takes its package list from `cargo metadata`, which includes path
+  dependencies outside this workspace. In this repo it therefore hands rustfmt 30 source
+  roots in the sibling `../oss-core` checkout — every crate there, including
+  `oss-conformance` and `oss-bot-sdk`, which this repo does not depend on — and
+  **rewrites oss-core in place**, across a repo boundary and without saying so. Plain
+  `cargo fmt` at the workspace root covers exactly this repo's four crates, which is what
+  is wanted. Verified 2026-11-11 with `cargo fmt --all --verbose --check`.
