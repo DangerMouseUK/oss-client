@@ -34,8 +34,27 @@ pub fn draw(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
 }
 
 /// Top of the item icon columns.
+/// Measured against Continuum at a client area of 1888x1016: references 4 and 10
+/// both sit at y = 460, twenty pixels above what the slope below gives. The twenty
+/// is subtracted here rather than folded into the constant so it stays visible as
+/// what it is.
+const ICONS_TOP_MEASURED_SHIFT: f32 = 20.0;
+
+/// Top of the icon columns: specials down the left, weapons down the right.
+///
+/// **One measured point, and a slope nobody has been able to check.** Continuum does
+/// not re-lay-out when its window is resized — it keeps the size it started at and
+/// clips — so only a single view height could be observed
+/// (`oss-workspace/notes/continuum-observations.md`, 2026-11-11). This is therefore
+/// exact at h = 1016 and a guess at every other height: the 0.57 slope is still ours,
+/// kept because it is the only one we have any basis for, shifted so it passes
+/// through the one point we know. **A second view height would recover the real
+/// formula**; until someone runs Continuum at one, do not read the slope as measured.
+///
+/// The row pitches built on top of this *are* confirmed: references 4 to 5 differ by
+/// 175 (7 x 25) and 10 to 11 by 150 (6 x 25), exactly as below.
 fn icons_top(c: &Canvas) -> f32 {
-    (c.view_h * 0.57 + 1.0 - 100.0).floor()
+    (c.view_h * 0.57 + 1.0 - 100.0).floor() - ICONS_TOP_MEASURED_SHIFT
 }
 
 /// Side of the small radar.
@@ -85,39 +104,52 @@ fn clock_text(hour: i8, minute: i8) -> String {
 /// Anchor points for LVZ screen objects, indexed by `oss_proto::objects::reference`
 /// (the LVZ format's one-letter codes in brackets).
 ///
-/// Sources: the LVZ format notes give each code's meaning; nullspace (MIT) implements
-/// only Normal, Centre, Bottom-right and Below-energy, and those four follow it
-/// exactly. The rest are our reading of the format notes placed on our HUD, which
-/// mirrors Continuum's layout. They are **unverified** against Continuum and need a
-/// veteran play-test (a zone tutorial LVZ that points arrows at each HUD element is a
-/// good check):
+/// Sources: the LVZ format notes give each code's meaning, and nullspace (MIT)
+/// implements four of them. **Eleven of the twelve were then measured against the
+/// real Continuum** at a client area of 1888x1016, against the local subgame zone
+/// (`oss-workspace/notes/continuum-observations.md`, 2026-11-11, with screenshots in
+/// `captures/continuum-obs/`). That run also confirmed the convention this code
+/// already used — **drawn top-left = reference point + offset** — by moving every
+/// marker exactly -16 in both axes when the LVZ offset went 0 to -16.
 ///
 /// | # | Code | Meaning                         | Status     |
 /// |---|------|---------------------------------|------------|
-/// | 0 | (none) | screen top-left               | nullspace  |
-/// | 1 | C    | screen centre                   | nullspace  |
-/// | 2 | B    | screen bottom-right             | nullspace  |
-/// | 3 | S    | stat box bottom-right           | unverified |
-/// | 4 | G    | specials (left items) top-right | unverified |
-/// | 5 | F    | specials bottom-right           | unverified |
-/// | 6 | E    | below the energy bar            | nullspace (spectating: unverified) |
-/// | 7 | T    | chat top-left                   | unverified |
-/// | 8 | R    | radar top-left                  | unverified (radar size from nullspace) |
-/// | 9 | O    | radar text top-left             | unverified |
-/// | 10 | W   | weapons (right icons) top-left  | unverified |
-/// | 11 | V   | weapons bottom-left             | unverified |
+/// | 0 | (none) | screen top-left               | measured   |
+/// | 1 | C    | screen centre                   | measured   |
+/// | 2 | B    | screen bottom-right             | measured   |
+/// | 3 | S    | stat box bottom-right           | measured, both states |
+/// | 4 | G    | specials (left items) top-right | measured (x exact; y at one height) |
+/// | 5 | F    | specials bottom-right           | measured (pitch confirmed) |
+/// | 6 | E    | below the energy bar            | measured (spectating: unverified) |
+/// | 7 | T    | chat top-left                   | shape measured, not swept |
+/// | 8 | R    | radar top-left                  | measured exactly |
+/// | 9 | O    | radar text top-left             | measured, and it moves with the text |
+/// | 10 | W   | weapons (right icons) top-left  | measured (x exact; y at one height) |
+/// | 11 | V   | weapons bottom-left             | measured (pitch confirmed) |
+///
+/// Still open, and deliberately not guessed at: every y above comes from a single
+/// view height (see [`icons_top`]); reference 7 moved with the number of chat lines
+/// but was not swept; reference 6 while spectating was not observed; and nobody has
+/// checked whether the Options -> Display gauges move 4, 5, 6, 10 or 11, which they
+/// plausibly do — all the numbers here are for "Standard".
+///
+/// `radar_line` is the text drawn above the radar this frame, which reference 9
+/// tracks character for character.
 pub fn screen_refs(
     c: &Canvas,
     statbox_corner: (f32, f32),
     chat_top: f32,
     spectating: bool,
+    radar_line: &str,
 ) -> ScreenRefs {
     let (w, h) = (c.view_w, c.view_h);
     let top = icons_top(c);
     let dim = radar_dim(c);
     let (rx, ry) = (w - dim - RADAR_MARGIN, h - dim - RADAR_MARGIN);
-    // Icon (26) plus the count tab beside it.
-    let specials_right = 37.0;
+    // The icon's width alone. This was 37 ("icon (26) plus the count tab beside it"),
+    // which the measurement disagreed with: Continuum puts references 4 and 5 at 26,
+    // the same 26 reference 10 already used on the other side.
+    let specials_right = 26.0;
     // nullspace: the health bar's height, or below the spectator text lines when
     // spectating (we show no energy bar then; our spectator line is one row).
     let below_energy = if spectating { 12.0 } else { 28.0 };
@@ -131,8 +163,14 @@ pub fn screen_refs(
         ((w / 2.0).floor(), below_energy),
         (0.0, chat_top),
         (rx, ry),
-        // The radar's text line (coordinates/clock) sits just above it.
-        (rx, ry - 12.0),
+        // Not the radar's corner: the top-left of the radar's own text run, which is
+        // right-aligned to the radar's right edge, so this slides as the line changes
+        // width. Continuum was watched doing exactly that — turning Options -> Radar
+        // -> "Show Clock" off dropped six characters and moved the point +48px.
+        (
+            rx + dim - 8.0 * radar_line.chars().count() as f32,
+            ry - 16.0,
+        ),
         (w - 26.0, top),
         (w - 26.0, top + 6.0 * 25.0),
     ]
@@ -458,15 +496,12 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
     };
     c.ui_tex(r, radar.texture, region, x0, y0, Some((dim, dim)), [1.0; 4]);
     if !s.big_radar {
-        // Where Continuum puts it: right-aligned just above the radar.
-        let (cx, cy) = c.cam;
-        c.text_right(
-            r,
-            c.view_w - 5.0,
-            y0 - 14.0,
-            color::WHITE,
-            &radar_text(cx, cy),
-        );
+        // Where Continuum puts it, measured: right-aligned to the radar's own right
+        // edge (not the screen's), with the glyph row's top 16px above the radar.
+        // This used to be `view_w - 5` and `-14`, which put the run one pixel right
+        // and two pixels low; reference 9 is the top-left of this very run, so the
+        // two have to agree.
+        c.text_right(r, x0 + dim, y0 - 16.0, color::WHITE, &s.radar_line);
     }
 
     let mut dot = |px: f32, py: f32, size: f32, rgba: [f32; 4]| {
@@ -664,6 +699,47 @@ mod tests {
         assert!(clock.ends_with("am") || clock.ends_with("pm"), "{clock}");
         assert!(clock.contains(':'), "{clock}");
         assert_eq!(square, "A1");
+    }
+
+    /// Every number here comes from watching the real Continuum at a client area of
+    /// 1888x1016 against the local subgame zone, flying a Warbird with `Show Clock`
+    /// on: `oss-workspace/notes/continuum-observations.md` (2026-11-11), screenshots
+    /// in `captures/continuum-obs/`. If one of these ever has to change, it should be
+    /// because a new observation says so, not because the formula behind it moved.
+    #[test]
+    fn the_lvz_anchors_match_continuum_at_1888x1016() {
+        let art = crate::game::art::Art::default();
+        let c = Canvas::new(&art, TextureId::for_test(0), (1888, 1016), 1, (0.0, 0.0));
+        assert_eq!((c.view_w, c.view_h), (1888.0, 1016.0));
+        // The radar's own geometry, which reference 8 landing exactly confirms.
+        assert_eq!(radar_dim(&c), 312.0);
+        let (rx, ry) = (1570.0, 698.0);
+
+        // "4:53pm  A1" was the line in the capture: ten characters.
+        let refs = screen_refs(&c, (109.0, 29.0), 992.0, false, "4:53pm  A1");
+
+        assert_eq!(refs[0], (0.0, 0.0), "0 N normal");
+        assert_eq!(refs[1], (944.0, 508.0), "1 C centre");
+        assert_eq!(refs[2], (1888.0, 1016.0), "2 B bottom-right");
+        assert_eq!(refs[3], (109.0, 29.0), "3 S stat box, open");
+        assert_eq!(refs[4], (26.0, 460.0), "4 G specials top-right");
+        assert_eq!(refs[5], (26.0, 635.0), "5 F specials bottom-right");
+        assert_eq!(refs[6], (944.0, 28.0), "6 E below the energy bar");
+        assert_eq!(refs[7], (0.0, 992.0), "7 T chat top-left");
+        assert_eq!(refs[8], (rx, ry), "8 R radar top-left");
+        assert_eq!(refs[9], (1802.0, 682.0), "9 O radar text top-left");
+        assert_eq!(refs[10], (1862.0, 460.0), "10 W weapons top-left");
+        assert_eq!(refs[11], (1862.0, 610.0), "11 V weapons bottom-left");
+
+        // Turning the clock off in Continuum dropped six characters and moved
+        // reference 9 right by exactly 48px; the two spaces before the square stay.
+        let no_clock = screen_refs(&c, (109.0, 29.0), 992.0, false, "  A1");
+        assert_eq!(no_clock[9], (1850.0, 682.0), "9 O with the clock off");
+        assert_eq!(no_clock[9].0 - refs[9].0, 48.0);
+
+        // Measured: with the player list closed, reference 3 is the screen origin.
+        let hidden = screen_refs(&c, (0.0, 0.0), 992.0, false, "4:53pm  A1");
+        assert_eq!(hidden[3], (0.0, 0.0), "3 S stat box, hidden");
     }
 
     #[test]
