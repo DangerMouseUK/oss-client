@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use oss_assets::{Image, decode_image};
-use oss_formats::Lvz as LvzFile;
+use oss_formats::{Clv1Reference, Lvz as LvzFile, ObjectLayout, ObjectSection};
 use oss_proto::objects::{layer, mode};
 use oss_session::{ObjectChange, object_change};
 
@@ -106,6 +106,34 @@ fn fit_sheet(img: Image, x_count: u32, y_count: u32, anim: u32) -> Option<(Image
     Some((out, layout(w, h, cols)))
 }
 
+/// What a screen object's offset is measured from, on one axis.
+///
+/// The two LVZ layouts anchor to **different and unrelated sets of points**, and the
+/// whole reason `CLV1` screen objects were refused until now is that reading one with
+/// the other's table puts it hundreds of pixels out. Keeping them in one `u8` is what
+/// made that mistake possible, so they are separate variants here and the compiler
+/// keeps them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenAnchor {
+    /// `CLV2`: an index into the twelve HUD anchors ([`ScreenRefs`]), which depend on
+    /// where this client puts its own radar, stat box, icons and chat.
+    Hud(u8),
+    /// `CLV1`: one of three points that depend on the view size alone, so they are
+    /// resolved at draw time and owe nothing to the HUD.
+    Clv1(Clv1Reference),
+}
+
+impl ScreenAnchor {
+    /// Where this anchor sits along an axis `extent` pixels long, given the twelve
+    /// HUD anchors for this frame.
+    fn axis(self, refs: &ScreenRefs, extent: f32, hud: impl Fn(&(f32, f32)) -> f32) -> f32 {
+        match self {
+            Self::Hud(i) => refs.get(i as usize).map_or(0.0, hud),
+            Self::Clv1(a) => a.axis(extent as i32) as f32,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LvzObject {
     pub id: u16,
@@ -113,8 +141,8 @@ pub struct LvzObject {
     /// Map: pixels. Screen: offset from the reference points.
     pub x: i16,
     pub y: i16,
-    pub x_ref: u8,
-    pub y_ref: u8,
+    pub x_ref: ScreenAnchor,
+    pub y_ref: ScreenAnchor,
     /// Index into [`Lvz::images`].
     pub image: usize,
     /// First image of the object's own section (image numbers are relative to it).
@@ -174,9 +202,21 @@ impl Lvz {
                 Err(e) => log::warn!("{name}: {}: {e}", String::from_utf8_lossy(&s.name)),
             }
         }
-        let sections = file.object_sections().map_err(|e| format!("{name}: {e}"))?;
+        // Not `file.object_sections()`, which goes through `ObjectSection::parse` and
+        // refuses `CLV1` screen objects on purpose: that guard is for callers that
+        // read positions with the `CLV2` accessors, which this one no longer does.
+        // (oss-core intends to make `parse_with_clv1` the default and retire the
+        // split, at which point this can go back to `object_sections()`.)
+        let sections = file
+            .sections
+            .iter()
+            .filter(|s| s.is_object_section())
+            .map(|s| ObjectSection::parse_with_clv1(&s.data()?))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{name}: {e}"))?;
         let before = self.objects.len();
         for section in sections {
+            let layout = section.layout();
             let base = self.images.len();
             for def in &section.images {
                 let file_name = String::from_utf8_lossy(&def.name).to_ascii_lowercase();
@@ -225,20 +265,34 @@ impl Lvz {
                     log::warn!("{name}: too many LVZ objects; ignoring the rest");
                     break;
                 }
-                let (x, y) = if o.is_map_object() {
-                    (o.map_x(), o.map_y())
-                } else {
-                    (o.screen_x(), o.screen_y())
+                // The two layouts put the reference and the offset in opposite ends
+                // of the word, so which accessors apply is decided here, once, by the
+                // section's own version.
+                let (x, y, x_ref, y_ref) = match (o.is_map_object(), layout) {
+                    (true, _) => (
+                        o.map_x(),
+                        o.map_y(),
+                        ScreenAnchor::Hud(0),
+                        ScreenAnchor::Hud(0),
+                    ),
+                    (false, ObjectLayout::Clv2) => (
+                        o.screen_x(),
+                        o.screen_y(),
+                        ScreenAnchor::Hud(o.x_ref()),
+                        ScreenAnchor::Hud(o.y_ref()),
+                    ),
+                    (false, ObjectLayout::Clv1) => (
+                        o.clv1_screen_x(),
+                        o.clv1_screen_y(),
+                        ScreenAnchor::Clv1(o.clv1_x_ref()),
+                        ScreenAnchor::Clv1(o.clv1_y_ref()),
+                    ),
                 };
                 let mode = o.mode();
                 if !o.is_map_object() {
                     log::debug!(
-                        "{name}: screen object {} at ref {} {:+}, ref {} {:+}, image {} layer {} mode {}",
+                        "{name}: {layout:?} screen object {} at {x_ref:?} {x:+}, {y_ref:?} {y:+}, image {} layer {} mode {}",
                         o.id(),
-                        o.x_ref(),
-                        x,
-                        o.y_ref(),
-                        y,
                         o.image,
                         o.layer,
                         mode
@@ -253,8 +307,8 @@ impl Lvz {
                     map: o.is_map_object(),
                     x,
                     y,
-                    x_ref: o.x_ref(),
-                    y_ref: o.y_ref(),
+                    x_ref,
+                    y_ref,
                     image: base + o.image as usize,
                     image_base: base,
                     layer: o.layer.min(LAYERS - 1),
@@ -312,8 +366,29 @@ impl Lvz {
                 if o.map {
                     (o.x, o.y) = (d.map_x(), d.map_y());
                 } else {
-                    (o.x, o.y) = (d.screen_x(), d.screen_y());
-                    (o.x_ref, o.y_ref) = (d.x_ref(), d.y_ref());
+                    // A server change (S2C `0x36`) carries position words with no
+                    // version of their own, so they are read with the layout the
+                    // object's own file used. A `CLV1` object read as `CLV2` would
+                    // jump hundreds of pixels on the first change, which is the bug
+                    // this whole split exists to prevent. **Not observed either way:**
+                    // nothing we hold says which layout a server composes these in,
+                    // and until today a `CLV1` screen object could not reach this code
+                    // at all. Settled by a zone with a `CLV1` LVZ whose server moves
+                    // one of its screen objects, watched in Continuum.
+                    match o.x_ref {
+                        ScreenAnchor::Clv1(_) => {
+                            (o.x, o.y) = (d.clv1_screen_x(), d.clv1_screen_y());
+                            (o.x_ref, o.y_ref) = (
+                                ScreenAnchor::Clv1(d.clv1_x_ref()),
+                                ScreenAnchor::Clv1(d.clv1_y_ref()),
+                            );
+                        }
+                        ScreenAnchor::Hud(_) => {
+                            (o.x, o.y) = (d.screen_x(), d.screen_y());
+                            (o.x_ref, o.y_ref) =
+                                (ScreenAnchor::Hud(d.x_ref()), ScreenAnchor::Hud(d.y_ref()));
+                        }
+                    }
                 }
             }
             if c.mask & object_change::IMAGE != 0 {
@@ -386,8 +461,8 @@ impl Lvz {
                 }
                 c.world_tex(r, texture, region, x, y);
             } else {
-                let rx = refs.get(o.x_ref as usize).map_or(0.0, |p| p.0);
-                let ry = refs.get(o.y_ref as usize).map_or(0.0, |p| p.1);
+                let rx = o.x_ref.axis(refs, ui.view_w, |p| p.0);
+                let ry = o.y_ref.axis(refs, ui.view_h, |p| p.1);
                 ui.ui_tex(
                     r,
                     texture,
@@ -485,7 +560,10 @@ mod tests {
         let shown: Vec<u16> = lvz.shown().map(|o| o.id).collect();
         assert_eq!(shown, [7], "only the always-shown object starts visible");
         let o = &lvz.objects[1];
-        assert_eq!((o.map, o.x_ref, o.x, o.y_ref, o.y), (false, 1, -10, 2, -20));
+        assert_eq!(
+            (o.map, o.x_ref, o.x, o.y_ref, o.y),
+            (false, ScreenAnchor::Hud(1), -10, ScreenAnchor::Hud(2), -20)
+        );
         // Animation: two frames over one second.
         assert_eq!(img.frame(0.2).x, 0);
         assert_eq!(img.frame(0.7).x, 2);
@@ -512,6 +590,70 @@ mod tests {
         assert!(lvz.art_changed);
         // Black was keyed out as in object images.
         assert_eq!(lvz.art_overrides["ship3"].pixel(0, 0).unwrap()[3], 255);
+    }
+
+    /// Trench Wars' `entermsg.lvz`, which is the file that made `CLV1` worth
+    /// decoding: one screen object whose x hangs from the centred box at -780 and
+    /// whose y hangs from the view's top-left at +100. Those two words were read out
+    /// of the real file, not invented — loading it logs exactly this.
+    ///
+    /// The expected positions are oss-core's, measured from Continuum at two view
+    /// sizes. 1280x800 is the one that matters here: under the `CLV2` reading this
+    /// landed 613px out and the banner ran off the screen.
+    #[test]
+    fn the_trench_wars_banner_lands_where_continuum_puts_it() {
+        let clv1_word = |nibble: u16, offset: i16| (nibble << 12) | (offset as u16 & 0xFFF);
+        let banner = ObjectData {
+            x_word: clv1_word(4, -780), // Clv1Reference::CentredBox
+            y_word: clv1_word(0, 100),  // Clv1Reference::TopLeft
+            ..Default::default()
+        };
+        let objects = ObjectSection {
+            version: *b"CLV1",
+            objects: vec![banner],
+            images: vec![ImageDef {
+                x_count: 1,
+                y_count: 1,
+                animation_time: 0,
+                name: b"sheet.bmp".to_vec(),
+            }],
+        };
+        let bytes = LvzFile {
+            sections: vec![
+                Section::new(b"sheet.bmp", 0, &sheet()),
+                Section::objects(&objects),
+            ],
+        }
+        .to_bytes();
+
+        let mut lvz = Lvz::default();
+        // Before this, `ObjectSection::parse` refused the whole file.
+        assert_eq!(lvz.add_file("entermsg.lvz", &bytes, 0.0).unwrap(), 1);
+        let o = &lvz.objects[0];
+        assert_eq!(o.x_ref, ScreenAnchor::Clv1(Clv1Reference::CentredBox));
+        assert_eq!(o.y_ref, ScreenAnchor::Clv1(Clv1Reference::TopLeft));
+        assert_eq!((o.x, o.y), (-780, 100));
+
+        // The HUD anchors must not be consulted at all for a CLV1 object, so this
+        // deliberately passes a table of absurd values: if one leaked in, the
+        // positions below would be wrong.
+        let poison: ScreenRefs = [(9999.0, 9999.0); 12];
+        let at = |w: f32, h: f32| {
+            (
+                o.x_ref.axis(&poison, w, |p| p.0) + o.x as f32,
+                o.y_ref.axis(&poison, h, |p| p.1) + o.y as f32,
+            )
+        };
+        assert_eq!(at(1888.0, 1016.0), (644.0, 100.0));
+        assert_eq!(at(1920.0, 1080.0), (660.0, 100.0));
+        assert_eq!(at(1280.0, 800.0), (340.0, 100.0), "used to clip off-screen");
+
+        // And the same answer as oss-core's own helper, which is where the
+        // measurement lives; ours only splits it into anchor plus offset.
+        for (w, h) in [(1888, 1016), (1920, 1080), (1280, 800)] {
+            let (x, y) = objects.objects[0].clv1_screen_position(w, h);
+            assert_eq!(at(w as f32, h as f32), (x as f32, y as f32));
+        }
     }
 
     #[test]
