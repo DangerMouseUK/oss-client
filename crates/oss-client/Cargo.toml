@@ -23,6 +23,15 @@ log = "0.4"
 png = "0.18"
 cpal = "0.18"
 env_logger = "0.11"
+# The clock above the radar. Already in the tree under env_logger; this only asks
+# it for the system time zone, which std has no way to read.
+jiff = { version = "0.2", default-features = false, features = [
+    "std",
+    "tz-system",
+    "tzdb-zoneinfo",
+    "tzdb-concatenated",
+    "tzdb-bundle-platform",
+] }
 egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
 egui-wgpu = { version = "0.37", default-features = false }
 egui-winit = { version = "0.37", default-features = false }
