@@ -48,6 +48,12 @@ struct Zone {
     got_login: Option<String>,
     /// The login packet's "new user" byte, as the zone received it.
     login_flags: Option<u8>,
+    /// The login exactly as it arrived: length, type byte and client version. ASSS
+    /// checks the length against the client type the encryption chose, so these are
+    /// what decides whether a zone accepts us at all.
+    login_wire: Option<(usize, u8, u16)>,
+    /// Length of the C2S `0x1A` the client answered with.
+    security_len: Option<usize>,
     security: Option<oss_proto::c2s::SecurityResponse>,
     positions: Vec<oss_proto::C2SPosition>,
     chats: Vec<String>,
@@ -74,10 +80,19 @@ impl Zone {
             p(&mut out);
             server.send(&ADDR, &out, true);
         };
-        match C2SPacket::decode(pkt).expect("valid C2S") {
+        // ASSS registers `PLogin` for both `C2S_LOGIN` and `C2S_CONTLOGIN` and tells
+        // the forms apart by the client type its encryption chose, not by the type
+        // byte. This zone does the same, so a Continuum-form login is not silently
+        // ignored here the way it was before.
+        let decoded = match C2SPacket::decode(pkt).expect("valid C2S") {
+            C2SPacket::ContLogin(c) => C2SPacket::Login(c.0),
+            other => other,
+        };
+        match decoded {
             C2SPacket::Login(l) => {
                 self.got_login = l.name.to_str().map(str::to_string);
                 self.login_flags = Some(l.flags);
+                self.login_wire = Some((pkt.len(), l.kind, l.client_version));
                 send(server, &|o| {
                     LoginResponse {
                         code: 0,
@@ -161,7 +176,10 @@ impl Zone {
                 .encode(&mut p);
                 server.connection_mut(&ADDR).unwrap().send_sized(p);
             }
-            C2SPacket::SecurityResponse(r) => self.security = Some(r),
+            C2SPacket::SecurityResponse(r) => {
+                self.security_len = Some(pkt.len());
+                self.security = Some(r);
+            }
             C2SPacket::Position(p) => self.positions.push(p),
             C2SPacket::TakeGreen(g) => {
                 self.greens.push((g.x, g.y, g.prize));
@@ -230,6 +248,106 @@ fn new_user_asks_the_zone_to_register_the_name() {
     }
     assert_eq!(zone.got_login.as_deref(), Some("newbie"));
     assert_eq!(zone.login_flags, Some(1));
+}
+
+/// A stand-in for the private Continuum side: it answers in the Continuum *shape*
+/// without any Continuum arithmetic, so the session's plumbing can be exercised here
+/// while the real implementation stays out of this repository.
+#[derive(Debug)]
+struct StubContinuum;
+
+impl oss_session::ClientProfile for StubContinuum {
+    fn login(&self) -> oss_session::LoginForm {
+        oss_session::LoginForm::continuum(40, [0xAB; 64])
+    }
+    fn security(&self, c: oss_session::SecurityChallenge) -> oss_session::SecurityAnswer {
+        oss_session::SecurityAnswer {
+            exe_checksum: c.key ^ 0x5555_5555,
+            continuum: Some((-3, c.map_crc32)),
+        }
+    }
+}
+
+/// The defect this guards: `send_login` and `answer_security` used to hardcode the
+/// SubSpace forms, so a session using a Continuum cipher sent a 101-byte login that
+/// an ASSS zone drops before authentication (`core.c` `PLogin`: the length is checked
+/// against the client type the *encryption* chose, not against the type byte, and
+/// `CFG_RELAX_LENGTH_CHECKS` only relaxes it to `< 165`).
+///
+/// Both packets now come from the profile, which is what a private implementation
+/// plugs into. Nothing Continuum-era is needed to test that the plumbing reaches the
+/// wire — only that the shapes are right.
+#[test]
+fn a_continuum_profile_reaches_the_wire_in_the_continuum_forms() {
+    let mut now = 1_000u64;
+    let mut server = Server::new(Config::server());
+    server.add_acceptor(Box::new(VieAcceptor::default()));
+    let cfg = SessionConfig {
+        name: "contish".into(),
+        password: "pw".into(),
+        want_lvz: true,
+        client: std::sync::Arc::new(StubContinuum),
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone::default();
+
+    for _ in 0..2000 {
+        now += 10;
+        client.tick(now);
+        while let Some(d) = client.poll_transmit() {
+            server.handle_datagram(now, ADDR, &d);
+        }
+        server.tick(now);
+        while let Some((_, ev)) = server.poll_event() {
+            if let Event::Packet(p) = ev {
+                zone.handle(&mut server, &p);
+            }
+        }
+        while let Some((_, d)) = server.poll_transmit() {
+            client.handle_datagram(now, &d);
+        }
+        while let Some(ev) = client.poll_event() {
+            match &ev {
+                SessionEvent::MapNeeded { .. } => client.download_map(),
+                SessionEvent::FilesListed(files) => {
+                    for f in files {
+                        client.download_file(&f.name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if zone.security.is_some() {
+            break;
+        }
+    }
+
+    assert_eq!(zone.got_login.as_deref(), Some("contish"));
+    assert_eq!(
+        zone.login_wire,
+        Some((oss_proto::c2s::Login::CONT_LEN, 0x24, 40)),
+        "165 bytes, type 0x24, version 40 -- LEN_LOGINPACKET_CONT"
+    );
+
+    let sec = zone.security.expect("security response");
+    assert_eq!(sec.exe_checksum, KEY ^ 0x5555_5555, "from the profile");
+    let level = oss_formats::Level::parse(&map_bytes()).unwrap();
+    let crc = checksum::map_crc32(level.tile_grid().cells());
+    assert_eq!(
+        sec.continuum,
+        Some((-3, Some(crc))),
+        "the session hands the profile the map CRC it computed, and sends the trailer"
+    );
+    assert!(
+        oss_proto::c2s::SecurityResponse::is_continuum_len(zone.security_len.unwrap()),
+        "a length a Continuum zone accepts, not the 40-byte SubSpace one"
+    );
+    // The parts that do not depend on the client are still the session's own work.
+    assert_eq!(
+        sec.settings_checksum,
+        checksum::settings_checksum(KEY, &zone.settings)
+    );
 }
 
 #[test]
@@ -336,6 +454,18 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
         zone.login_flags,
         Some(0),
         "an ordinary login does not ask the zone to create the account"
+    );
+    // ASSS drops a login whose length does not match the client type its encryption
+    // chose: core.c's PLogin, LEN_LOGINPACKET_VIE.
+    assert_eq!(
+        zone.login_wire,
+        Some((oss_proto::c2s::Login::VIE_LEN, 0x09, 134)),
+        "the default profile is a SubSpace client"
+    );
+    assert_eq!(
+        zone.security_len,
+        Some(oss_proto::c2s::SecurityResponse::VIE_LEN),
+        "and answers the security check in the SubSpace form"
     );
     assert!(zone.asked_for_news, "the news request went out");
     let news = events.iter().find_map(|e| match e {
