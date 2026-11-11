@@ -137,6 +137,9 @@ pub struct Lvz {
     pub objects: Vec<LvzObject>,
     /// Decoded images waiting for upload: (image index, pixels).
     pending: Vec<(usize, Image)>,
+    /// Textures of images dropped by [`Lvz::clear`], handed back to the renderer on
+    /// the next [`Lvz::upload`] (the only place this has a renderer to hand).
+    freed: Vec<TextureId>,
     /// Files that replace standard sheets (`ships`, `ship3`, `bullets`...), keyed by
     /// lowercase name without extension.
     pub art_overrides: HashMap<String, Image>,
@@ -264,8 +267,27 @@ impl Lvz {
         Ok(self.objects.len() - before)
     }
 
-    /// Uploads newly decoded images.
+    /// Drops every object and image this arena's LVZ files loaded, and with them the
+    /// standard sheets they replaced. The GPU textures go back to the renderer on the
+    /// next [`Lvz::upload`]; before this existed they stayed on the GPU for the rest
+    /// of the session every time the player changed arena.
+    pub fn clear(&mut self) {
+        self.freed
+            .extend(self.images.iter().filter_map(|i| i.texture));
+        self.images.clear();
+        self.objects.clear();
+        self.pending.clear();
+        if !self.art_overrides.is_empty() {
+            self.art_overrides.clear();
+            self.art_changed = true;
+        }
+    }
+
+    /// Uploads newly decoded images, and frees the ones [`Lvz::clear`] dropped.
     pub fn upload(&mut self, r: &mut Renderer) {
+        for id in self.freed.drain(..) {
+            r.free_texture(id);
+        }
         for (i, img) in self.pending.drain(..) {
             if let Some(slot) = self.images.get_mut(i) {
                 slot.texture = Some(r.create_texture(img.width, img.height, &img.rgba));
@@ -490,6 +512,38 @@ mod tests {
         assert!(lvz.art_changed);
         // Black was keyed out as in object images.
         assert_eq!(lvz.art_overrides["ship3"].pixel(0, 0).unwrap()[3], 255);
+    }
+
+    #[test]
+    fn changing_arena_drops_the_old_one_and_queues_its_textures() {
+        let art = LvzFile {
+            sections: vec![Section::new(b"ship3.bmp", 0, &sheet())],
+        }
+        .to_bytes();
+        let mut lvz = Lvz::default();
+        lvz.add_file("objects.lvz", &lvz_bytes(), 0.0).unwrap();
+        lvz.add_file("art.lvz", &art, 0.0).unwrap();
+        assert!(!lvz.images.is_empty());
+        assert!(!lvz.art_overrides.is_empty());
+        // Pretend the images were uploaded, as `upload` would have done on the first
+        // frame after the file arrived.
+        lvz.pending.clear();
+        for (i, img) in lvz.images.iter_mut().enumerate() {
+            img.texture = Some(crate::gfx::TextureId::for_test(i as u32));
+        }
+        let uploaded = lvz.images.len();
+
+        lvz.clear();
+
+        assert!(lvz.images.is_empty(), "the old arena's images are gone");
+        assert!(lvz.objects.is_empty(), "the old arena's objects are gone");
+        assert!(lvz.art_overrides.is_empty(), "standard sheets are back");
+        assert!(lvz.art_changed, "the atlas has to be rebuilt without them");
+        assert_eq!(
+            lvz.freed.len(),
+            uploaded,
+            "every uploaded texture is queued for the renderer"
+        );
     }
 
     #[test]
