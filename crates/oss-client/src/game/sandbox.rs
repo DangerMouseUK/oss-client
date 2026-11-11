@@ -2105,10 +2105,15 @@ impl Sandbox {
             .unwrap_or_default();
         let arena = arena.unwrap_or_else(|| "(public)".into());
         log::info!(
-            "entered arena {arena}: map {} ({} bytes, {} objects), {} player(s), {} ship(s),              map revision {}",
+            "entered arena {arena}: map {} ({} bytes, crc {:08x}, {} objects, tileset {}),              {} player(s), {} ship(s), map revision {}",
             map_name.unwrap_or_else(|| "?".into()),
             map_bytes.len(),
+            oss_proto::checksum::crc32(&map_bytes),
             self.objects.len(),
+            match &self.tileset {
+                Some(t) => format!("{} bytes", t.len()),
+                None => "none (bundled tiles)".to_string(),
+            },
             self.net.as_ref().map_or(0, |n| n.session.players().count()),
             self.world.ships.len(),
             self.map_revision,
