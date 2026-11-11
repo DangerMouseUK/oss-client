@@ -127,6 +127,10 @@ pub struct Sandbox {
     jitter_left: f32,
     /// LVZ screen anchors for this frame.
     pub(super) screen_refs: ScreenRefs,
+    /// The line drawn above the radar this frame (clock and map square). Built once
+    /// because reference point 9 is the top-left of this very run, so the anchor and
+    /// the drawing have to be the same string.
+    pub(super) radar_line: String,
     /// World tick of the last clock correction (online).
     slew_tick: u32,
     brick_count: usize,
@@ -352,6 +356,7 @@ impl Sandbox {
                 .map(|cs| BallRules::from_arena(&ArenaSettings::from_client_settings(cs)))
                 .unwrap_or_default(),
             screen_refs: [(0.0, 0.0); 12],
+            radar_line: String::new(),
             slew_tick: 0,
             brick_count: 0,
             last: Instant::now(),
@@ -2366,7 +2371,14 @@ impl Sandbox {
         );
         ui.tints = tints;
         let chat_top = ui.view_h - 16.0 - ChatLog::visible_rows(ui.view_h, false) as f32 * 12.0;
-        self.screen_refs = hud::screen_refs(&ui, self.statbox_corner, chat_top, self.spectating);
+        self.radar_line = hud::radar_text(ui.cam.0, ui.cam.1);
+        self.screen_refs = hud::screen_refs(
+            &ui,
+            self.statbox_corner,
+            chat_top,
+            self.spectating,
+            &self.radar_line,
+        );
         view::draw_world(self, &c, &ui, r, alpha);
         hud::draw(self, &ui, r);
         let (clock, refs) = (self.clock, self.screen_refs);
@@ -2441,6 +2453,10 @@ impl Sandbox {
     fn draw_statbox(&mut self, c: &Canvas, r: &mut Renderer) {
         let entries = self.statbox_entries();
         let Some(l) = self.statbox.layout(self.viewer_pid(), &entries) else {
+            // Measured: with the player list closed Continuum puts reference 3 at the
+            // screen origin, on top of reference 0, rather than leaving it where the
+            // box last was.
+            self.statbox_corner = (0.0, 0.0);
             return;
         };
         let (x, y, w, h) = l.rect;
