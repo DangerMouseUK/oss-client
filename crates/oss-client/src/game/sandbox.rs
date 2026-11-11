@@ -2124,7 +2124,14 @@ impl Sandbox {
     /// Adds an LVZ file's objects (logged and skipped if it doesn't parse).
     pub fn load_lvz(&mut self, name: &str, data: &[u8]) {
         match self.lvz.add_file(name, data, self.clock) {
-            Ok(n) => log::info!("{name}: {n} LVZ objects"),
+            // The shown count is the useful half: an object whose mode is
+            // SHOW_ALWAYS or an arena/zone entry is drawn as soon as the file
+            // loads, while a SERVER_CONTROLLED one waits to be toggled.
+            Ok(n) => log::info!(
+                "{name}: {n} LVZ objects ({} of {} shown)",
+                self.lvz.shown().count(),
+                self.lvz.objects.len()
+            ),
             Err(e) => log::warn!("LVZ {e}"),
         }
     }
