@@ -50,6 +50,10 @@ pub struct Options {
     pub screenshot_at: f32,
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
+    /// `--send`: lines to type in game at the given times, for scripted smoke tests
+    /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
+    /// end as its clock passes them.
+    pub send: Vec<(f32, String)>,
     pub mute: bool,
     /// Master volume 0-100.
     pub volume: u32,
@@ -253,6 +257,7 @@ impl ApplicationHandler for App {
                 ) {
                     Ok(mut s) => {
                         s.aim_bot = self.options.autopilot;
+                        s.scripted = self.options.send.clone();
                         s.open_settings = self.options.open_settings;
                         for path in &self.options.lvz {
                             match oss_assets::locate::read_file(path) {
@@ -585,6 +590,16 @@ impl App {
             match Sandbox::new_online(&mut run.renderer, &self.dir, conn.net, run.scale, audio) {
                 Ok(mut s) => {
                     s.aim_bot = self.options.autopilot;
+                    s.scripted = self.options.send.clone();
+                    // `--lvz` applies online too, so a zone's own file can be tried
+                    // against a real arena (and so an arena change has something to
+                    // tear down on a zone that serves none).
+                    for path in &self.options.lvz {
+                        match oss_assets::locate::read_file(path) {
+                            Ok(data) => s.load_lvz(&path.display().to_string(), &data),
+                            Err(e) => log::warn!("{e}"),
+                        }
+                    }
                     s.macros = self.options.macros.clone();
                     s.palette = self.options.palette;
                     s.ui_scale_extra = self.options.ui_scale;
