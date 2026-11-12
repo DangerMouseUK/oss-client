@@ -1,9 +1,16 @@
-//! The login screen: zone address, name, password, arena and ship.
+//! The start-up screen's form: name, password, arena, zone address and ship.
+//!
+//! Continuum's start-up screen is one screen carrying the profile, the ship you will
+//! fly, the zone list and the way through to options, so this is one part of ours
+//! rather than a screen of its own; the zone list beside it is [`super::zones`] and
+//! the two are drawn and driven together.
 //!
 //! Shown when the game starts without `--server` or `--sandbox`, and again when a
-//! connection fails. Up/Down or Tab move between fields, Left/Right change the ship,
-//! Enter connects, F5 flies the offline sandbox, Esc quits. The last zone, name, arena
-//! and ship (never the password) are remembered in `login.ini` beside the settings.
+//! connection fails or you leave a game. Tab or Up/Down move between fields,
+//! Left/Right change the ship, Enter plays, F2 opens the options, F3 asks the
+//! directories again, F5 flies the offline sandbox and Esc quits. The last zone, name,
+//! arena and ship (never the password) are remembered in `login.ini` beside the
+//! settings.
 
 use std::path::Path;
 
@@ -17,19 +24,26 @@ const MAX_FIELD: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
-    Server,
     Name,
     Password,
     Arena,
+    Server,
     Ship,
+    /// The zone list. It holds no text of its own: while it has the focus, Up and
+    /// Down walk the list rather than moving between fields, and whichever zone is
+    /// picked fills in [`Field::Server`].
+    Zones,
 }
 
-const FIELDS: [Field; 5] = [
-    Field::Server,
+/// Down the profile, then the ship, then across to the list, which is the order
+/// Continuum's start-up screen reads in.
+const FIELDS: [Field; 6] = [
     Field::Name,
     Field::Password,
     Field::Arena,
+    Field::Server,
     Field::Ship,
+    Field::Zones,
 ];
 
 impl Field {
@@ -40,6 +54,7 @@ impl Field {
             Field::Password => "Password",
             Field::Arena => "Arena",
             Field::Ship => "Ship",
+            Field::Zones => "Zones",
         }
     }
 }
@@ -49,8 +64,10 @@ impl Field {
 pub enum Choice {
     Connect(Box<ServerOptions>),
     Sandbox,
-    /// Open the zone browser.
-    Browse,
+    /// Open the settings, which is what Continuum's `options` button does.
+    Options,
+    /// Ask the directory servers again.
+    RefreshZones,
     Quit,
 }
 
@@ -107,7 +124,7 @@ impl Login {
             l.name = n.chars().take(MAX_FIELD).collect();
         }
         // Start where there's something to type.
-        l.focus = if l.name.is_empty() { 1 } else { 2 };
+        l.focus = usize::from(!l.name.is_empty());
         l
     }
 
@@ -129,6 +146,11 @@ impl Login {
         }
     }
 
+    /// Puts the cursor on the zone list (`--zones`).
+    pub fn focus_zones(&mut self) {
+        self.focus = FIELDS.len() - 1;
+    }
+
     pub fn focused(&self) -> Field {
         FIELDS[self.focus % FIELDS.len()]
     }
@@ -142,6 +164,7 @@ impl Login {
             Field::Arena if self.arena.is_empty() => "(any public arena)".into(),
             Field::Arena => self.arena.clone(),
             Field::Ship => ship_name(self.ship),
+            Field::Zones => String::new(),
         }
     }
 
@@ -155,7 +178,7 @@ impl Login {
             Field::Name => Some(&mut self.name),
             Field::Password => Some(&mut self.password),
             Field::Arena => Some(&mut self.arena),
-            Field::Ship => None,
+            Field::Ship | Field::Zones => None,
         }
     }
 
@@ -168,15 +191,20 @@ impl Login {
                 }
             }
         }
+        // While the list has the focus it owns Up and Down, so they walk zones
+        // instead of moving on to the next field.
+        let on_list = self.focused() == Field::Zones;
         for key in pressed {
             match key {
                 KeyCode::Escape => return Some(Choice::Quit),
+                KeyCode::F2 => return Some(Choice::Options),
+                KeyCode::F3 => return Some(Choice::RefreshZones),
                 KeyCode::F5 => return Some(Choice::Sandbox),
-                KeyCode::F3 => return Some(Choice::Browse),
                 KeyCode::Enter | KeyCode::NumpadEnter => return self.submit(),
-                KeyCode::ArrowDown => self.focus = (self.focus + 1) % FIELDS.len(),
                 KeyCode::Tab if !shift => self.focus = (self.focus + 1) % FIELDS.len(),
-                KeyCode::ArrowUp | KeyCode::Tab => {
+                KeyCode::Tab => self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len(),
+                KeyCode::ArrowDown if !on_list => self.focus = (self.focus + 1) % FIELDS.len(),
+                KeyCode::ArrowUp if !on_list => {
                     self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len()
                 }
                 KeyCode::ArrowLeft | KeyCode::ArrowRight if self.focused() == Field::Ship => {
@@ -204,12 +232,12 @@ impl Login {
         let server = self.server.trim();
         if !server.contains(':') {
             self.error = Some("Zone must be host:port".into());
-            self.focus = 0;
+            self.focus = 3;
             return None;
         }
         if self.name.trim().is_empty() {
             self.error = Some("Enter a name".into());
-            self.focus = 1;
+            self.focus = 0;
             return None;
         }
         self.error = None;
@@ -257,15 +285,27 @@ mod tests {
     #[test]
     fn typing_moving_and_connecting() {
         let mut l = Login::load(None, Some("Ace"));
+        // A name was remembered, so the cursor starts on the password.
         assert_eq!(l.focused(), Field::Password);
         assert_eq!(l.input(&[], "pw", false), None);
         assert_eq!(l.value(Field::Password), "**");
-        l.input(&[KeyCode::ArrowDown, KeyCode::ArrowDown], "", false);
+        l.input(
+            &[KeyCode::ArrowDown, KeyCode::ArrowDown, KeyCode::ArrowDown],
+            "",
+            false,
+        );
         assert_eq!(l.focused(), Field::Ship);
         l.input(&[KeyCode::ArrowLeft], "x", false);
         assert_eq!(l.value(Field::Ship), "spec");
         l.input(&[KeyCode::ArrowRight, KeyCode::ArrowRight], "", false);
         assert_eq!(l.value(Field::Ship), "2");
+        // One more step reaches the zone list, which takes no text and gives Up and
+        // Down to the list instead of to the form.
+        l.input(&[KeyCode::Tab], "", false);
+        assert_eq!(l.focused(), Field::Zones);
+        l.input(&[KeyCode::ArrowDown, KeyCode::ArrowUp], "zzz", false);
+        assert_eq!(l.focused(), Field::Zones);
+        assert_eq!(l.value(Field::Zones), "");
         let Some(Choice::Connect(o)) = l.input(&[KeyCode::Enter], "", false) else {
             panic!("expected connect");
         };
@@ -274,6 +314,11 @@ mod tests {
             ("Ace", "pw", 1, None)
         );
         assert_eq!(l.input(&[KeyCode::F5], "", false), Some(Choice::Sandbox));
+        assert_eq!(l.input(&[KeyCode::F2], "", false), Some(Choice::Options));
+        assert_eq!(
+            l.input(&[KeyCode::F3], "", false),
+            Some(Choice::RefreshZones)
+        );
         assert_eq!(l.input(&[KeyCode::Escape], "", false), Some(Choice::Quit));
     }
 
@@ -288,10 +333,17 @@ mod tests {
         l.input(&[], "secret", false);
         l.input(&[KeyCode::Tab], "", false);
         l.input(&[], "duel", false);
-        l.input(&[KeyCode::Tab, KeyCode::Tab, KeyCode::Backspace], "", false);
+        l.input(&[KeyCode::Tab, KeyCode::Backspace], "", false);
         assert_eq!(l.focused(), Field::Server);
-        l.input(&[], "", false);
         assert_eq!(l.server, "127.0.0.1:500");
+        // A zone address with no port is refused, and the cursor goes to the field
+        // that is wrong rather than to the top of the form.
+        l.input(&[], "0", false);
+        l.server = "nowhere".into();
+        assert_eq!(l.input(&[KeyCode::Enter], "", false), None);
+        assert_eq!(l.error.as_deref(), Some("Zone must be host:port"));
+        assert_eq!(l.focused(), Field::Server);
+        l.server = "127.0.0.1:5000".into();
         let dir = std::env::temp_dir().join(format!("oss-login-{}", std::process::id()));
         let path = dir.join(FILE_NAME);
         l.save(&path);
@@ -304,7 +356,7 @@ mod tests {
                 back.name.as_str(),
                 back.arena.as_str()
             ),
-            ("127.0.0.1:500", "Bob", "duel")
+            ("127.0.0.1:5000", "Bob", "duel")
         );
         assert!(back.password.is_empty());
         let _ = std::fs::remove_dir_all(&dir);

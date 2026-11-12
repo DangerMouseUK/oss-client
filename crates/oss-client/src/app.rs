@@ -113,8 +113,8 @@ struct LoginScreen {
     login: Login,
     art: Art,
     atlas: TextureId,
-    /// The zone browser, when open (F3).
-    browser: Option<crate::game::zones::ZoneBrowser>,
+    /// The zone list, which is part of this screen rather than a screen of its own.
+    browser: crate::game::zones::ZoneBrowser,
 }
 
 enum Screen {
@@ -275,7 +275,7 @@ impl App {
             login,
             art,
             atlas,
-            browser: None,
+            browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
         }));
         run.window.set_title("Open SubSpace");
         self.settings = None;
@@ -402,15 +402,14 @@ impl ApplicationHandler for App {
                 if let Some(s) = server {
                     login.server = s.clone();
                 }
-                let browser = self
-                    .options
-                    .open_zones
-                    .then(|| crate::game::zones::ZoneBrowser::open(&self.options.directories));
+                if self.options.open_zones {
+                    login.focus_zones();
+                }
                 Screen::Login(Box::new(LoginScreen {
                     login,
                     art,
                     atlas,
-                    browser,
+                    browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
                 }))
             }
         };
@@ -549,32 +548,45 @@ impl App {
 
         // Login: wait for a choice.
         if let Screen::Login(ls) = &mut run.screen {
-            let pressed = self.input.take_pressed();
+            ls.browser.pump();
+            // While the options are up they have the keyboard; the screen underneath
+            // would otherwise take every character into whichever field has focus.
+            let pressed = if self.settings.is_some() {
+                self.input.take_pressed();
+                self.input.take_edges();
+                self.input.typed.clear();
+                Vec::new()
+            } else {
+                self.input.take_pressed()
+            };
             let typed: String = std::mem::take(&mut self.input.typed)
                 .into_iter()
                 .map(|(_, c)| c)
                 .collect();
             self.input.take_edges();
-            let choice = if let Some(b) = ls.browser.as_mut() {
-                b.pump();
-                match b.input(&pressed) {
-                    Some(crate::game::zones::BrowserChoice::Pick(address)) => {
-                        ls.login.server = address;
-                        ls.login.error = None;
-                        ls.browser = None;
-                    }
-                    Some(crate::game::zones::BrowserChoice::Back) => ls.browser = None,
-                    None => {}
+            // The list owns Up/Down and the rest of its keys while it has the focus.
+            // Whichever row it settles on fills in the Zone field, so the highlighted
+            // row and the address can never disagree; Enter and Esc belong to the
+            // screen, and the form below answers them.
+            if ls.login.focused() == crate::game::login::Field::Zones {
+                let picked = ls.browser.input(&pressed);
+                if let Some(crate::game::zones::BrowserChoice::Pick(address)) = picked {
+                    ls.login.server = address;
+                    ls.login.error = None;
+                } else if !pressed.is_empty()
+                    && let Some(z) = ls.browser.zones.get(ls.browser.selected)
+                {
+                    ls.login.server.clone_from(&z.address);
+                    ls.login.error = None;
                 }
-                None
-            } else {
-                ls.login.input(&pressed, &typed, self.input.shift())
-            };
+            }
+            let choice = ls.login.input(&pressed, &typed, self.input.shift());
             match choice {
-                Some(Choice::Browse) => {
-                    ls.browser = Some(crate::game::zones::ZoneBrowser::open(
-                        &self.options.directories,
-                    ));
+                Some(Choice::Options) => {
+                    self.settings = Some(SettingsUi::new(current_config(&self.options)));
+                }
+                Some(Choice::RefreshZones) => {
+                    ls.browser = crate::game::zones::ZoneBrowser::open(&self.options.directories);
                 }
                 None => {}
                 Some(Choice::Quit) => {
@@ -656,7 +668,9 @@ impl App {
                             login,
                             art,
                             atlas,
-                            browser: None,
+                            browser: crate::game::zones::ZoneBrowser::open(
+                                &self.options.directories,
+                            ),
                         }));
                     }
                     (None, Some(err)) => return self.fail(event_loop, err),
@@ -736,10 +750,7 @@ impl App {
             }
             Screen::Connecting(_) | Screen::Login(_) if !draw => None,
             Screen::Login(ls) => {
-                match &ls.browser {
-                    Some(b) => draw_browser(b, &ls.art, ls.atlas, &mut run.renderer, run.scale),
-                    None => draw_login(&ls.login, &ls.art, ls.atlas, &mut run.renderer, run.scale),
-                }
+                draw_start_screen(ls, &mut run.renderer, run.scale);
                 None
             }
             Screen::Connecting(conn) => {
@@ -798,84 +809,6 @@ fn load_art(dir: &AssetDirs, renderer: &mut Renderer) -> Result<(Art, TextureId)
     let (art, size, pixels) = art::load(dir, None)?;
     let atlas = renderer.create_texture(size, size, &pixels);
     Ok((art, atlas))
-}
-
-/// The login form, in the same box the game's own menu wears: Continuum's fill and
-/// three-ply border out of `colors.bm2`, a green heading over a rule, green labels
-/// and white values. Continuum itself opens on a skinned startup screen whose art
-/// is its own and not ours to copy, so this follows the look of the boxes the game
-/// draws for itself instead.
-fn draw_login(login: &Login, art: &Art, atlas: TextureId, r: &mut Renderer, scale: u32) {
-    let c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
-    let w = 46.0 * 8.0;
-    let rows = Login::fields().len() as f32;
-    let h = 20.0 + rows * 14.0 + 54.0;
-    let x = ((c.view_w - w) / 2.0).floor();
-    let top = ((c.view_h - h) / 2.0).floor().max(4.0);
-    c.panel(r, x, top, w, h);
-    c.text_center(
-        r,
-        x + w / 2.0,
-        top + 1.0,
-        color::GREEN,
-        "-= Open SubSpace =-",
-    );
-    c.separator(r, x, top + 13.0, w);
-
-    // Labels end at a fixed column so the values line up under each other.
-    let label_w = 9.0;
-    let value_x = x + 4.0 + (label_w + 2.0) * 8.0;
-    let mut y = top + 20.0;
-    for (i, &field) in Login::fields().iter().enumerate() {
-        let focused = i == login.focus % Login::fields().len();
-        if focused {
-            // The focused row is picked out the way the stat box picks out the
-            // ticked player: a band in the border grey, not a colour of its own.
-            c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, w - 4.0, 13.0);
-        }
-        c.text(
-            r,
-            x + 4.0,
-            y,
-            color::GREEN,
-            &format!("{:>1$}", field.label(), label_w as usize),
-        );
-        let mut value = login.value(field);
-        if focused {
-            value = match field {
-                crate::game::login::Field::Ship => format!("< {value} >"),
-                _ => format!("{value}_"),
-            };
-        }
-        let max = ((x + w - 4.0 - value_x) / 8.0) as usize;
-        let shown: String = if value.chars().count() > max {
-            value.chars().skip(value.chars().count() - max).collect()
-        } else {
-            value
-        };
-        c.text(r, value_x, y, color::WHITE, &shown);
-        y += 14.0;
-    }
-    y += 6.0;
-    if let Some(err) = &login.error {
-        c.text(r, x + 4.0, y, color::RED, err);
-    }
-    y += 16.0;
-    c.separator(r, x, y - 3.0, w);
-    c.text_center(
-        r,
-        x + w / 2.0,
-        y,
-        color::YELLOW,
-        "Enter = Connect   Tab/arrows = Move",
-    );
-    c.text_center(
-        r,
-        x + w / 2.0,
-        y + 12.0,
-        color::YELLOW,
-        "F3 = Zone list   F5 = Sandbox   Esc = Quit",
-    );
 }
 
 impl App {
@@ -1041,7 +974,11 @@ fn utc_stamp(secs: u64) -> String {
     )
 }
 
-/// The zone browser: name, players and ping per zone, the selected one highlighted.
+/// How wide the start-up screen is, in characters of the 8x12 font.
+const START_COLS: f32 = 72.0;
+/// The profile and ships take the left of it; the zone list has the rest.
+const START_LEFT_COLS: f32 = 30.0;
+
 /// Colour for a zone's round trip, banded good / usable / poor, as the originals
 /// coloured them. A zone that has not answered is dimmed rather than coloured: no
 /// answer is not the same as a bad answer.
@@ -1058,46 +995,141 @@ fn ping_color(ping_ms: Option<u32>) -> u32 {
     }
 }
 
-fn draw_browser(
-    b: &crate::game::zones::ZoneBrowser,
-    art: &Art,
-    atlas: TextureId,
-    r: &mut Renderer,
-    scale: u32,
-) {
-    let c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
-    let w = (c.view_w - 48.0).min(72.0 * 8.0);
-    let x = ((c.view_w - w) / 2.0).floor();
-    // The box fits the list rather than the screen, down to a few rows so it does
-    // not jump about while the directories are still answering.
-    let room = ((((c.view_h - 24.0).max(120.0)) - 92.0) / 12.0).floor() as usize;
-    let rows = b.zones.len().clamp(6, room.max(6));
-    let panel_h = 92.0 + rows as f32 * 12.0;
-    let panel_top = ((c.view_h - panel_h) / 2.0).floor().max(12.0);
-    let first = b.selected.saturating_sub(rows - 1);
-    c.panel(r, x, panel_top, w, panel_h);
-    c.text_center(r, x + w / 2.0, panel_top + 1.0, color::GREEN, "-= Zones =-");
-    c.separator(r, x, panel_top + 13.0, w);
+/// The start-up screen: profile, ship, zone list and the way through to the
+/// options, on one screen.
+///
+/// Continuum's start-up screen is a single skinned window carrying all of that --
+/// its skin format names `profile`, `ship1`..`ship8`, `spectate`, `zones`, `trace`,
+/// `play`, `quit`, `macros`, `keydefs` and `options` as hot spots on one surface --
+/// where this client had three screens and made the player walk between them. The
+/// art of that window is Continuum's own and not ours to copy, so this is its
+/// arrangement drawn in the box the game draws for itself.
+fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
+    let c = Canvas::new(&ls.art, ls.atlas, r.size(), scale, (0.0, 0.0));
+    let (login, b) = (&ls.login, &ls.browser);
+    let focus = login.focused();
 
-    let mut y = panel_top + 20.0;
-    c.text(r, x + 4.0, y, color::DARK_RED, "Zone");
-    c.text_right(r, x + w - 4.0, y, color::DARK_RED, "Players  Ping");
+    let w = START_COLS * 8.0;
+    let left_w = START_LEFT_COLS * 8.0;
+    let list_x_off = left_w + 16.0;
+    let list_w = w - list_x_off;
+
+    // Tall enough for whichever column needs more, and for a list worth reading.
+    let rows = b.zones.len().clamp(8, 14);
+    let list_h = 14.0 + rows as f32 * 12.0;
+    let left_h = 14.0 + 4.0 * 14.0 + 10.0 + 14.0 + 2.0 * 40.0 + 14.0;
+    let body_h = list_h.max(left_h);
+    let h = 20.0 + body_h + 56.0;
+    let x = ((c.view_w - w) / 2.0).floor();
+    let top = ((c.view_h - h) / 2.0).floor().max(4.0);
+
+    c.panel(r, x, top, w, h);
+    c.text_center(
+        r,
+        x + w / 2.0,
+        top + 1.0,
+        color::GREEN,
+        "-= Open SubSpace =-",
+    );
+    c.separator(r, x, top + 13.0, w);
+
+    // --- Profile -------------------------------------------------------------------
+    let mut y = top + 20.0;
+    c.text(r, x + 4.0, y, color::DARK_RED, "Profile");
     y += 14.0;
-    let name_chars = ((w - 18.0 * 8.0) / 8.0) as usize;
+    let value_x = x + 4.0 + 10.0 * 8.0;
+    for &field in Login::fields() {
+        let Some(label) = profile_label(field) else {
+            continue;
+        };
+        if focus == field {
+            c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+        }
+        c.text(r, x + 4.0, y, color::GREEN, label);
+        let mut value = login.value(field);
+        if focus == field {
+            value.push('_');
+        }
+        let max = ((left_w - 4.0 - (value_x - x)) / 8.0).max(1.0) as usize;
+        let shown: String = if value.chars().count() > max {
+            value.chars().skip(value.chars().count() - max).collect()
+        } else {
+            value
+        };
+        c.text(r, value_x, y, color::WHITE, &shown);
+        y += 14.0;
+    }
+
+    // --- Ships, as the originals show them: the ships themselves ------------------
+    y += 10.0;
+    c.text(r, x + 4.0, y, color::DARK_RED, "Ship");
+    // The chosen ship is named beside the heading, so the row below is only the
+    // one thing it offers.
+    c.text(
+        r,
+        x + 4.0 + 6.0 * 8.0,
+        y,
+        if focus == crate::game::login::Field::Ship {
+            color::YELLOW
+        } else {
+            color::WHITE
+        },
+        ship_title(login.ship),
+    );
+    y += 14.0;
+    let pitch = 56.0;
+    for kind in 0u8..8 {
+        let (row, col) = ((kind / 4) as f32, (kind % 4) as f32);
+        let (sx, sy) = (x + 6.0 + col * pitch, y + row * 40.0);
+        if login.ship == kind {
+            c.color_rect(r, ui_color::HIGHLIGHT, sx - 2.0, sy - 2.0, 40.0, 40.0);
+        }
+        c.ui(r, ls.art.ship(kind, 0), sx, sy, None, [1.0; 4]);
+    }
+    y += 2.0 * 40.0;
+    let spectating = login.ship == oss_session::SPECTATOR;
+    if spectating {
+        c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+    }
+    c.text(r, x + 6.0, y, color::WHITE, "S = Spectator");
+
+    // --- Zones ---------------------------------------------------------------------
+    let lx = x + list_x_off;
+    let mut ly = top + 20.0;
+    if focus == crate::game::login::Field::Zones {
+        c.color_rect(
+            r,
+            ui_color::HIGHLIGHT,
+            lx - 2.0,
+            ly - 1.0,
+            list_w + 2.0,
+            13.0,
+        );
+    }
+    c.text(r, lx, ly, color::DARK_RED, "Zone");
+    c.text_right(r, x + w - 4.0, ly, color::DARK_RED, "Players  Ping");
+    ly += 14.0;
+    let first = b.selected.saturating_sub(rows - 1);
+    let name_chars = ((list_w - 18.0 * 8.0) / 8.0).max(4.0) as usize;
     for (i, z) in b.zones.iter().enumerate().skip(first).take(rows) {
         if i == b.selected {
-            c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, w - 4.0, 13.0);
+            c.color_rect(
+                r,
+                ui_color::HIGHLIGHT,
+                lx - 2.0,
+                ly - 1.0,
+                list_w + 2.0,
+                13.0,
+            );
         }
         let name: String = z.name.chars().take(name_chars).collect();
-        c.text(r, x + 4.0, y, color::WHITE, &name);
+        c.text(r, lx, ly, color::WHITE, &name);
         // Players and ping are drawn separately so the ping can carry its own
-        // colour, as SubSpace and Continuum did: the column exists so a player can
-        // pick a zone that will play well, and colour is what makes that readable
-        // at a glance instead of by reading numbers.
+        // colour, as SubSpace and Continuum did.
         c.text_right(
             r,
             x + w - 4.0 - 6.0 * 8.0,
-            y,
+            ly,
             color::WHITE,
             &format!("{:>7}", z.players),
         );
@@ -1105,30 +1137,73 @@ fn draw_browser(
         c.text_right(
             r,
             x + w - 4.0,
-            y,
+            ly,
             ping_color(z.ping_ms),
             &format!("{ping:>4}"),
         );
-        y += 12.0;
+        ly += 12.0;
     }
-    let bottom = panel_top + panel_h - 42.0;
-    c.separator(r, x, bottom - 6.0, w);
-    if let Some(z) = b.zones.get(b.selected) {
-        let desc: String = z
-            .description
-            .chars()
-            .take(((w - 8.0) / 8.0) as usize)
-            .collect();
-        c.text(r, x + 4.0, bottom, color::GREEN, &desc);
-    }
-    c.text(r, x + 4.0, bottom + 12.0, color::WHITE, &b.status);
+
+    // --- The foot: what the selected zone is, then what to press -------------------
+    let foot = top + 20.0 + body_h;
+    c.separator(r, x, foot, w);
+    let width = (w / 8.0 - 1.0) as usize;
+    let described: String = b
+        .zones
+        .get(b.selected)
+        .map(|z| z.description.as_str())
+        .unwrap_or_default()
+        .chars()
+        .take(width)
+        .collect();
+    c.text(r, x + 4.0, foot + 6.0, color::GREEN, &described);
+    // The second line is whichever matters more: what went wrong, or how the zone
+    // list is getting on.
+    let (second, colour) = match &login.error {
+        Some(err) => (err.as_str(), color::RED),
+        None => (b.status.as_str(), color::WHITE),
+    };
+    let second: String = second.chars().take(width).collect();
+    c.text(r, x + 4.0, foot + 18.0, colour, &second);
     c.text_center(
         r,
         x + w / 2.0,
-        bottom + 26.0,
+        foot + 32.0,
         color::YELLOW,
-        "Up/Down = Choose   Enter = Use   Esc = Back",
+        "Enter = Play    Tab/arrows = Move    F2 = Options",
     );
+    c.text_center(
+        r,
+        x + w / 2.0,
+        foot + 44.0,
+        color::YELLOW,
+        "F3 = Zones again    F5 = Sandbox    Esc = Quit",
+    );
+}
+
+/// The label for a field of the profile block, or `None` for the fields that are
+/// drawn as something other than a line of text.
+fn profile_label(field: crate::game::login::Field) -> Option<&'static str> {
+    use crate::game::login::Field;
+    match field {
+        Field::Name | Field::Password | Field::Arena | Field::Server => Some(field.label()),
+        Field::Ship | Field::Zones => None,
+    }
+}
+
+/// The selected ship's name, for the line under the ships.
+fn ship_title(ship: u8) -> &'static str {
+    const NAMES: [&str; 8] = [
+        "Warbird",
+        "Javelin",
+        "Spider",
+        "Leviathan",
+        "Terrier",
+        "Weasel",
+        "Lancaster",
+        "Shark",
+    ];
+    NAMES.get(ship as usize).copied().unwrap_or("Spectator")
 }
 
 /// `identities.txt` beside the settings file for your OpenSec identity keys, unless
