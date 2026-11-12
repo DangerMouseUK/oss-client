@@ -14,7 +14,8 @@ who does not. The defaults are Continuum's, so a veteran should not have to read
 | Shift+Tab | Mines |
 | Delete | Multifire |
 | Esc | Menu — 1-8 change ship, S spectate, N zone news, O options, Q quit |
-| Enter | Chat box |
+| Enter | Send what you have typed |
+| F1 | Help pages (F1 turns the page, Esc closes) |
 | F2 | Cycle the stat box views |
 | Page Up / Page Down | Select a player in the stat box (and scroll the chat log while the menu is open) |
 | F3 | Zone browser (on the login screen) |
@@ -30,7 +31,17 @@ While the menu is open the whole chat log is on screen, and Page Up/Down scroll 
 
 ## Chat
 
-Enter opens the chat box. The prefixes are Continuum's:
+There is no chat box to open. Type, and the characters go to the chat line; Enter sends it.
+That is how SubSpace and Continuum work, and the original client's own help says so: "To
+send a public message simply type it, then hit Enter."
+
+One key is both a character and a game key — the backquote, which is repel. It repels while
+the chat line is empty and types a backquote once there is something on the line, which is
+the rule the originals use for any such key, macro keys included. Everything else that flies
+the ship types nothing, so you keep flying, shooting and laying mines while you talk.
+Ctrl+Backspace clears the line.
+
+The prefixes are Continuum's:
 
 | Type | Sends |
 |---|---|
@@ -44,8 +55,8 @@ Enter opens the chat box. The prefixes are Continuum's:
 | `=N` | Change team |
 | `?command` | To the server |
 
-Remote players and `:#squad:name` go through the biller. Up and Down in the chat box bring
-back lines you have sent.
+Remote players and `:#squad:name` go through the biller. Typing `::` on an empty line fills
+in the last person who messaged you, and `::` again walks back through the five before them.
 
 ### Commands the client answers itself
 

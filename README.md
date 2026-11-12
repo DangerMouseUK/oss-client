@@ -49,9 +49,10 @@ browser, **F5** the offline sandbox. Or skip it and go straight in:
 cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --ship 1
 ```
 
-Arrows fly, Shift is the afterburner, Ctrl guns, Tab bombs, Enter opens the chat box and Esc
-the menu. [docs/playing.md](docs/playing.md) has the rest — every key, the chat prefixes, the
-commands the client answers itself, macros and replays.
+Arrows fly, Shift is the afterburner, Ctrl guns, Tab bombs, Esc the menu and F1 the help.
+To talk, just type: the characters go to the chat line as they do in SubSpace and Continuum,
+and Enter sends. [docs/playing.md](docs/playing.md) has the rest — every key, the chat
+prefixes, the commands the client answers itself, macros and replays.
 
 No zone to hand? Run one: [oss-server](https://github.com/DangerMouseUK/oss-server) with no
 arguments is a working zone on port 5000. Or fly on your own:

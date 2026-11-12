@@ -207,7 +207,7 @@ impl Sandbox {
             renderer, dir, tileset, world, objects, 0, scale, audio, None,
         )?;
         s.message(
-            "Welcome to the Open SubSpace sandbox. Press Esc for the menu.",
+            "Welcome to the Open SubSpace sandbox. Type to chat, Esc for the menu.",
             color::GREEN,
         );
         Ok(s)
@@ -306,7 +306,7 @@ impl Sandbox {
             );
         } else {
             s.message(
-                format!("Entered arena {arena}. Enter to chat, Esc for the menu."),
+                format!("Entered arena {arena}. Type to chat, Esc for the menu."),
                 color::GREEN,
             );
         }
