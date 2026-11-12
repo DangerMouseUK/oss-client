@@ -190,6 +190,15 @@ struct PendingImage {
     anim: u32,
 }
 
+/// Whether this `.lvz` entry is audio rather than an image. `wa2` is Continuum's
+/// wave container; `wav` is shipped plainly by some zones.
+fn is_sound(file_name: &str) -> bool {
+    matches!(
+        file_name.rsplit('.').next().unwrap_or_default(),
+        "wav" | "wa2"
+    )
+}
+
 impl Lvz {
     /// Adds the objects and images of one `.lvz` file. Returns how many objects it
     /// added; problems with single images are logged and skipped.
@@ -200,7 +209,13 @@ impl Lvz {
                 Ok(d) => {
                     let file_name = String::from_utf8_lossy(&s.name).to_ascii_lowercase();
                     let stem = file_name.split('.').next().unwrap_or_default().to_string();
-                    if super::art::is_overridable(&stem) {
+                    if is_sound(&file_name) {
+                        // A sound pack names its files after the graphics they go
+                        // with -- `explode0.wav` beside `explode0.bm2` -- so the stem
+                        // alone said "this replaces a standard sheet" and the decoder
+                        // was handed a wave file. Keep it: it is what the sound side
+                        // will want, and `self.files` is where it will look.
+                    } else if super::art::is_overridable(&stem) {
                         match decode_image(&d) {
                             Ok(mut img) => {
                                 img.key_black_transparent();
