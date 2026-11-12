@@ -61,6 +61,13 @@ pub struct Options {
     pub screenshot_at: f32,
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
+    /// `--press`: keys to press at the given times, soonest first (testing).
+    ///
+    /// The start-up screen is the one screen no scripted run could reach past,
+    /// because `--server` goes straight round it and `--send` only types in game.
+    /// This presses its keys, so the path from the form to an arena can be driven
+    /// and photographed rather than described.
+    pub press: Vec<(f32, winit::keyboard::KeyCode)>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
     /// end as its clock passes them.
@@ -154,6 +161,8 @@ struct App {
     egui_state: Option<egui_winit::State>,
     settings: Option<SettingsUi>,
     error: Option<String>,
+    /// How far through [`Options::press`] the clock has got.
+    pressed: usize,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -214,6 +223,7 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         egui_state: None,
         settings: None,
         error: None,
+        pressed: 0,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
@@ -545,6 +555,18 @@ impl App {
         let Some(run) = self.running.as_mut() else {
             return;
         };
+        // Scripted keys, before anything reads the input: pressed and released in
+        // one frame, which is all an edge-triggered screen looks at.
+        let elapsed = run.started.elapsed().as_secs_f32();
+        while let Some((at, key)) = self.options.press.get(self.pressed).copied() {
+            if at > elapsed {
+                break;
+            }
+            log::info!("--press: {key:?}");
+            self.input.key(key, true);
+            self.input.key(key, false);
+            self.pressed += 1;
+        }
         if self.options.autopilot {
             self.input.autopilot(run.started.elapsed().as_secs_f32());
         }
