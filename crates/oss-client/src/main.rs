@@ -47,9 +47,9 @@ Options:
   --mute                    No sound
   --settings                Open the settings screen at start (sandbox)
   --screen <menu|helpN>     Open the menu, or help page N, at start (testing)
-  --directory <host:port>   A directory server for the zone browser (F3 on the
-                            login screen; repeatable; adds to the settings file's)
-  --zones                   Start on the zone browser
+  --directory <host:port>   A directory server for the start-up screen's zone list
+                            (repeatable; adds to the settings file's)
+  --zones                   Start with the zone list selected
   --security <mode>         auto (OpenSec, falling back to VIE), opensec or vie
   --config <file>           Settings file (default: oss-client.ini in the user's
                             settings folder, created on first run)
