@@ -384,6 +384,16 @@ impl Online {
         std::mem::take(&mut self.early_chat)
     }
 
+    /// Tells the zone we are leaving, and puts it on the wire before we go.
+    ///
+    /// Nothing sends this on drop, so without it every quit reached the server as a
+    /// timeout: it keeps the slot and waits the connection out. That is rude on our
+    /// own zone and worse on someone else's.
+    pub fn disconnect(&mut self) {
+        self.session.disconnect();
+        self.flush();
+    }
+
     pub fn flush(&mut self) {
         let now = self.now_ms();
         self.session.flush(now);
