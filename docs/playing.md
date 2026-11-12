@@ -13,7 +13,7 @@ who does not. The defaults are Continuum's, so a veteran should not have to read
 | Tab | Bombs |
 | Shift+Tab | Mines |
 | Delete | Multifire |
-| Esc | Menu — 1-8 change ship, S spectate, N zone news, O options, Q quit |
+| Esc | Menu — 1-8 change ship, S spectate, N zone news, O options, Q quit the game |
 | Enter | Send what you have typed |
 | F1 | Help pages (F1 turns the page, Esc closes) |
 | F2 | Cycle the stat box views |
@@ -68,6 +68,19 @@ As Continuum does, a few `?commands` never reach the server:
 | `?namelen N` | Width of the sender column in chat |
 | `?status` | How far your ship is upgraded |
 | `?news` | Open the zone news (also N in the menu). This one is ours: Continuum opens the news in a window of its own, which this client has no equivalent of |
+| `?quit` | Leave the game for the login screen, the same as Q in the menu. Ours — neither the original client nor ASSS has a `?quit` |
+
+### Leaving
+
+Q in the menu leaves the **game**, not the program: it disconnects and puts you back on
+the login screen, with the zone and name you were playing under still filled in. That is
+what SubSpace and Continuum do — their Quit returns you to the front end, and only the
+front end's own Quit (here, Esc on the login screen) ends the program.
+
+Like both originals, it waits until you have half your energy back before it takes
+effect, so a fight cannot be quit out of; it says `Exiting game...` while it waits, which
+is the original's own wording. Spectators and a dead ship leave at once, and offline
+there is nobody to dodge.
 
 ### Substitutions
 
