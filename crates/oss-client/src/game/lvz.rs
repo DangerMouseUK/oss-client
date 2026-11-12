@@ -20,8 +20,16 @@ use crate::gfx::{Region, Renderer, TextureId};
 
 /// Largest image side we upload (GPU texture limits are at least this).
 const MAX_SIDE: u32 = 4096;
-/// Objects beyond this are ignored (Continuum allows a few thousand per arena).
-const MAX_OBJECTS: usize = 20_000;
+/// Objects beyond this are ignored.
+///
+/// The format's own ceiling: LVZ object ids are `u16`, so a zone can define at most
+/// this many and no more. The bound is here because the count comes off the network
+/// and must not let a zone allocate without end, but it should be the format's limit
+/// rather than one of ours — at 20,000 it was ours, and `SSCXX Chaos/League Zone SVS`
+/// exceeded it, so ten of its files were dropped whole and the only trace was a
+/// warning. Worst case here is 65,536 objects of a few dozen bytes, against the
+/// hundreds of MB of textures a real zone's images already cost.
+const MAX_OBJECTS: usize = 65_536;
 
 /// Number of layers, `BELOW_ALL` (0) to `TOP_MOST` (7).
 pub const LAYERS: u8 = 8;
@@ -244,7 +252,9 @@ impl Lvz {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("{name}: {e}"))?;
         let before = self.objects.len();
+        let mut dropped = 0usize;
         for section in sections {
+            let mut added_here = 0usize;
             let layout = section.layout();
             let base = self.images.len();
             for def in &section.images {
@@ -279,9 +289,13 @@ impl Lvz {
             }
             for o in &section.objects {
                 if self.objects.len() >= MAX_OBJECTS {
-                    log::warn!("{name}: too many LVZ objects; ignoring the rest");
+                    // Counted rather than announced as "the rest": a reader needs to
+                    // know how much of the arena is missing, and this file may be one
+                    // of several that overflow.
+                    dropped += section.objects.len() - added_here;
                     break;
                 }
+                added_here += 1;
                 // The two layouts put the reference and the offset in opposite ends
                 // of the word, so which accessors apply is decided here, once, by the
                 // section's own version.
@@ -334,6 +348,11 @@ impl Lvz {
                     shown_at: shown.then_some(clock),
                 });
             }
+        }
+        if dropped > 0 {
+            log::warn!(
+                "{name}: {dropped} LVZ object(s) dropped, the arena is already at the                  limit of {MAX_OBJECTS}"
+            );
         }
         // This file's own sections may complete images an earlier one asked for.
         self.resolve_waiting(name);
