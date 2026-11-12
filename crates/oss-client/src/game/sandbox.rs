@@ -2138,11 +2138,30 @@ impl Sandbox {
             // The shown count is the useful half: an object whose mode is
             // SHOW_ALWAYS or an arena/zone entry is drawn as soon as the file
             // loads, while a SERVER_CONTROLLED one waits to be toggled.
-            Ok(n) => log::info!(
-                "{name}: {n} LVZ objects ({} of {} shown)",
-                self.lvz.shown().count(),
-                self.lvz.objects.len()
-            ),
+            Ok(n) => {
+                // The waiting count is only meaningful after the arena's last file:
+                // a pack that defines objects in one `.lvz` and their graphics in
+                // another leaves images waiting until the second one lands.
+                let waiting = match self.lvz.unresolved_images() {
+                    0 => String::new(),
+                    n => {
+                        let mut names = self.lvz.unresolved_image_names();
+                        let more = names.len().saturating_sub(4);
+                        names.truncate(4);
+                        let more = if more == 0 {
+                            String::new()
+                        } else {
+                            format!(" and {more} more")
+                        };
+                        format!(", {n} image(s) waiting for {}{more}", names.join(", "))
+                    }
+                };
+                log::info!(
+                    "{name}: {n} LVZ objects ({} of {} shown){waiting}",
+                    self.lvz.shown().count(),
+                    self.lvz.objects.len()
+                )
+            }
             Err(e) => log::warn!("LVZ {e}"),
         }
     }
