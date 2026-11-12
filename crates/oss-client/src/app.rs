@@ -37,8 +37,10 @@ pub enum Mode {
     Sandbox { map: Option<PathBuf>, ship: u8 },
     /// Online, in a zone.
     Zone(Box<ServerOptions>),
-    /// The login screen, optionally with the zone filled in.
-    Login { server: Option<String> },
+    /// The start-up screen, carrying everything the command line asked for so that
+    /// going in through the form reaches the zone with the same options as going in
+    /// straight from the command line.
+    Login(Box<ServerOptions>),
     /// Playing a replay file back.
     Replay(PathBuf),
 }
@@ -187,7 +189,7 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
             oss_assets::locate::read_file(map).map_err(|e| e.to_string())?
         }
         Mode::Sandbox { map: None, .. } => crate::game::default_map::default_map(),
-        Mode::Zone(_) | Mode::Login { .. } | Mode::Replay(_) => Vec::new(),
+        Mode::Zone(_) | Mode::Login(_) | Mode::Replay(_) => Vec::new(),
     };
 
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
@@ -255,15 +257,20 @@ impl App {
         };
         let mut login = match run.front_end.take() {
             Some(login) => login,
+            // This run never passed through the form, so one is made from the
+            // settings and from what the run was playing -- which `Login::load`
+            // lays over the file for us, the same way it does at start-up.
             None => {
+                let base = match &self.options.mode {
+                    Mode::Zone(z) | Mode::Login(z) => z.clone(),
+                    _ => Box::new(Login::default().into_base()),
+                };
                 let mut l = Login::load(
                     self.options.login_file.as_deref(),
                     self.options.player_name.as_deref(),
+                    base,
                 );
                 if let Mode::Zone(opts) = &self.options.mode {
-                    l.server.clone_from(&opts.server);
-                    l.name.clone_from(&opts.name);
-                    l.arena = opts.arena.clone().unwrap_or_default();
                     l.ship = opts.ship;
                 }
                 l
@@ -301,7 +308,7 @@ impl ApplicationHandler for App {
         let title = match &self.options.mode {
             Mode::Sandbox { .. } => "Open SubSpace — sandbox".to_string(),
             Mode::Zone(z) => format!("Open SubSpace — {}", z.server),
-            Mode::Login { .. } => "Open SubSpace".to_string(),
+            Mode::Login(_) => "Open SubSpace".to_string(),
             Mode::Replay(p) => format!("Open SubSpace — replay {}", p.display()),
         };
         let mut attrs = Window::default_attributes()
@@ -353,9 +360,7 @@ impl ApplicationHandler for App {
             }
             Mode::Zone(z) => {
                 let mut z = (**z).clone();
-                z.security = self.options.security;
-                z.known_servers = known_servers_path(&self.options);
-                z.identities = identities_path(&self.options);
+                apply_settings(&self.options, &mut z);
                 let z = &z;
                 let size = window.inner_size();
                 let res = ((size.width / scale) as u16, (size.height / scale) as u16);
@@ -390,7 +395,7 @@ impl ApplicationHandler for App {
                     login: None,
                 }))
             }
-            Mode::Login { server } => {
+            Mode::Login(z) => {
                 let (art, atlas) = match load_art(&self.dir, &mut renderer) {
                     Ok(a) => a,
                     Err(e) => return self.fail(event_loop, e),
@@ -398,10 +403,8 @@ impl ApplicationHandler for App {
                 let mut login = Login::load(
                     self.options.login_file.as_deref(),
                     self.options.player_name.as_deref(),
+                    z.clone(),
                 );
-                if let Some(s) = server {
-                    login.server = s.clone();
-                }
                 if self.options.open_zones {
                     login.focus_zones();
                 }
@@ -609,9 +612,7 @@ impl App {
                     }
                 }
                 Some(Choice::Connect(mut opts)) => {
-                    opts.security = self.options.security;
-                    opts.known_servers = known_servers_path(&self.options);
-                    opts.identities = identities_path(&self.options);
+                    apply_settings(&self.options, &mut opts);
                     if let Some(path) = &self.options.login_file {
                         ls.login.save(path);
                     }
@@ -1204,6 +1205,15 @@ fn ship_title(ship: u8) -> &'static str {
         "Shark",
     ];
     NAMES.get(ship as usize).copied().unwrap_or("Spectator")
+}
+
+/// The parts of a connection that come from the settings file rather than from the
+/// command line or the form. Both ways into a zone go through here, so neither can
+/// be given a different set by accident.
+fn apply_settings(o: &Options, opts: &mut ServerOptions) {
+    opts.security = o.security;
+    opts.known_servers = known_servers_path(o);
+    opts.identities = identities_path(o);
 }
 
 /// `identities.txt` beside the settings file for your OpenSec identity keys, unless

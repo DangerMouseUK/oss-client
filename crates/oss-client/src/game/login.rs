@@ -83,6 +83,15 @@ pub struct Login {
     pub focus: usize,
     /// Shown under the form (a failed connection, a missing field).
     pub error: Option<String>,
+    /// Everything the command line asked for that this form does not own.
+    ///
+    /// [`Self::submit`] lays its own five fields over this rather than building a
+    /// [`ServerOptions`] from nothing, so an option added to that struct reaches
+    /// the zone through this screen without anyone having to remember to carry it.
+    /// That is the whole point: `--freq`, `--follow`, `--attach`, `--record` and
+    /// `--new-user` were all silently dropped by the version that listed fields by
+    /// hand, and a longer list would only have delayed the next one.
+    base: Box<ServerOptions>,
 }
 
 impl Default for Login {
@@ -95,14 +104,33 @@ impl Default for Login {
             ship: 0,
             focus: 0,
             error: None,
+            base: Box::new(ServerOptions {
+                server: String::new(),
+                name: String::new(),
+                password: String::new(),
+                arena: None,
+                ship: oss_session::SPECTATOR,
+                freq: None,
+                follow: None,
+                attach: None,
+                record: None,
+                security: Default::default(),
+                known_servers: None,
+                identities: None,
+                new_user: false,
+            }),
         }
     }
 }
 
 impl Login {
-    /// The form filled from `login.ini` (if any) and a name from the settings.
-    pub fn load(path: Option<&Path>, name: Option<&str>) -> Login {
-        let mut l = Login::default();
+    /// The form filled from `login.ini` (if any), a name from the settings, and
+    /// whatever the command line asked for.
+    pub fn load(path: Option<&Path>, name: Option<&str>, base: Box<ServerOptions>) -> Login {
+        let mut l = Login {
+            base,
+            ..Default::default()
+        };
         if let Some(text) = path.and_then(|p| std::fs::read(p).ok()) {
             for line in String::from_utf8_lossy(&text).lines() {
                 let Some((k, v)) = line.split_once('=') else {
@@ -122,6 +150,24 @@ impl Login {
             && let Some(n) = name
         {
             l.name = n.chars().take(MAX_FIELD).collect();
+        }
+        // What the command line gave wins over what was remembered. The ship is
+        // left alone: the parser cannot tell `--ship spec` from no `--ship` at all,
+        // so overlaying it would quietly discard a remembered choice.
+        let field = |s: &str| -> Option<String> {
+            (!s.is_empty()).then(|| s.chars().take(MAX_FIELD).collect())
+        };
+        if let Some(v) = field(&l.base.server) {
+            l.server = v;
+        }
+        if let Some(v) = field(&l.base.name) {
+            l.name = v;
+        }
+        if let Some(v) = field(&l.base.password) {
+            l.password = v;
+        }
+        if let Some(v) = l.base.arena.as_deref().and_then(field) {
+            l.arena = v;
         }
         // Start where there's something to type.
         l.focus = usize::from(!l.name.is_empty());
@@ -144,6 +190,11 @@ impl Login {
         if let Err(e) = result {
             log::warn!("couldn't save {}: {e}", path.display());
         }
+    }
+
+    /// The empty set of command-line options, for a run that had none.
+    pub fn into_base(self) -> ServerOptions {
+        *self.base
     }
 
     /// Puts the cursor on the zone list (`--zones`).
@@ -241,21 +292,15 @@ impl Login {
             return None;
         }
         self.error = None;
+        // The five fields this form owns, over everything else the command line
+        // asked for. The `..` is what stops the next option being dropped.
         Some(Choice::Connect(Box::new(ServerOptions {
             server: server.to_string(),
             name: self.name.trim().to_string(),
             password: self.password.clone(),
             arena: Some(self.arena.trim().to_string()).filter(|a| !a.is_empty()),
             ship: self.ship,
-            freq: None,
-            follow: None,
-            attach: None,
-            record: None,
-            security: Default::default(),
-            known_servers: None,
-            identities: None,
-            // The login screen has no field for it; `--new-user` is the way in.
-            new_user: false,
+            ..(*self.base).clone()
         })))
     }
 }
@@ -282,9 +327,84 @@ fn parse_ship(v: &str) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// Every option the command line accepts has to survive the trip through this
+    /// screen. It is written as a whole-struct comparison on purpose: the `..base`
+    /// means a field added to [`ServerOptions`] is expected to be carried without
+    /// anyone editing this test, and the five named fields are exactly the ones the
+    /// form is allowed to change. Listing fields by hand is what dropped `--freq`,
+    /// `--follow`, `--attach`, `--record` and `--new-user` in the first place, so
+    /// this test refuses to do it either.
+    #[test]
+    fn the_form_carries_every_option_it_does_not_own() {
+        use std::path::PathBuf;
+        let base = ServerOptions {
+            // The fields the form owns. It replaces all five, so their values here
+            // only have to differ from what the form will put in their place.
+            server: "ignored:1".into(),
+            name: "ignored".into(),
+            password: "ignored".into(),
+            arena: Some("ignored".into()),
+            ship: 7,
+            // Everything else, each set to something no default would produce.
+            freq: Some(42),
+            follow: Some("Someone".into()),
+            attach: Some("Teammate".into()),
+            record: Some(PathBuf::from("visit.ossr")),
+            security: oss_session::security::SecurityMode::OpenSec,
+            known_servers: Some(PathBuf::from("known.txt")),
+            identities: Some(PathBuf::from("ids.txt")),
+            new_user: true,
+        };
+
+        let mut l = Login::load(None, Some("Ace"), Box::new(base.clone()));
+        l.server = "zone.example:5000".into();
+        l.name = "Ace".into();
+        l.password = "pw".into();
+        l.arena = "duel".into();
+        l.ship = 2;
+        let Some(Choice::Connect(got)) = l.input(&[KeyCode::Enter], "", false) else {
+            panic!("expected connect");
+        };
+
+        assert_eq!(
+            *got,
+            ServerOptions {
+                server: "zone.example:5000".into(),
+                name: "Ace".into(),
+                password: "pw".into(),
+                arena: Some("duel".into()),
+                ship: 2,
+                ..base
+            }
+        );
+    }
+
+    #[test]
+    fn the_command_line_fills_the_form_in() {
+        // What the command line gave beats what was remembered, except the ship,
+        // which the parser cannot tell from its own default.
+        let base = ServerOptions {
+            server: "given:5000".into(),
+            name: "Given".into(),
+            password: "pw".into(),
+            arena: Some("duel".into()),
+            ..Login::default().into_base()
+        };
+        let l = Login::load(None, Some("FromSettings"), Box::new(base));
+        assert_eq!(
+            (
+                l.server.as_str(),
+                l.name.as_str(),
+                l.password.as_str(),
+                l.arena.as_str()
+            ),
+            ("given:5000", "Given", "pw", "duel")
+        );
+    }
+
     #[test]
     fn typing_moving_and_connecting() {
-        let mut l = Login::load(None, Some("Ace"));
+        let mut l = Login::load(None, Some("Ace"), Box::new(Login::default().into_base()));
         // A name was remembered, so the cursor starts on the password.
         assert_eq!(l.focused(), Field::Password);
         assert_eq!(l.input(&[], "pw", false), None);
@@ -324,7 +444,7 @@ mod tests {
 
     #[test]
     fn checks_fields_and_remembers_all_but_the_password() {
-        let mut l = Login::load(None, None);
+        let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
         assert_eq!(l.focused(), Field::Name);
         assert_eq!(l.input(&[KeyCode::Enter], "", false), None);
         assert_eq!(l.error.as_deref(), Some("Enter a name"));
@@ -349,7 +469,11 @@ mod tests {
         l.save(&path);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("secret"));
-        let back = Login::load(Some(&path), Some("Other"));
+        let back = Login::load(
+            Some(&path),
+            Some("Other"),
+            Box::new(Login::default().into_base()),
+        );
         assert_eq!(
             (
                 back.server.as_str(),
