@@ -26,7 +26,9 @@ Play online:
   --freq <n>                Team to join (in game: type =n)
   --follow <name>           Spectate, following this player
   --attach <name>           Attach to this teammate as a turret once in play
-  --record <file.ossr>      Record the visit to a replay file
+  --record <file.ossr>      Record the visit to a replay file. The login's
+                            password is replaced with a marker, so a recording
+                            is safe to attach to a bug report
 
 Watch a replay:
   --replay <file.ossr>      Play a recording back (spectating, following its player)
