@@ -206,6 +206,20 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
     }
 }
 
+/// Leaves the zone before the process ends.
+///
+/// `event_loop.exit()` only stops the loop, and nothing in the transport sends a
+/// disconnect on drop, so every quit -- the Esc menu, the window close button, a
+/// finished `--screenshot` run -- reached the server as a timeout and left it
+/// holding the slot. Called on each exit that might have a live session.
+fn leave_zone(screen: &mut Screen) {
+    match screen {
+        Screen::Game(game) => game.disconnect(),
+        Screen::Connecting(conn) => conn.net.disconnect(),
+        _ => {}
+    }
+}
+
 impl App {
     fn fail(&mut self, event_loop: &ActiveEventLoop, msg: String) {
         log::error!("{msg}");
@@ -359,7 +373,12 @@ impl ApplicationHandler for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if let Some(run) = self.running.as_mut() {
+                    leave_zone(&mut run.screen);
+                }
+                event_loop.exit()
+            }
             WindowEvent::Resized(size) => {
                 if let Some(run) = self.running.as_mut() {
                     run.renderer.resize(size.width, size.height);
@@ -625,6 +644,7 @@ impl App {
                     game.update(&mut idle);
                 }
                 if game.quit {
+                    game.disconnect();
                     event_loop.exit();
                     return;
                 }
@@ -694,6 +714,7 @@ impl App {
         }
         // A skipped frame (e.g. occluded window) keeps the capture pending.
         if run.captured && run.renderer.capture.is_none() {
+            leave_zone(&mut run.screen);
             event_loop.exit();
             return;
         }

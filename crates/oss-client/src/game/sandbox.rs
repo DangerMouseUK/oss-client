@@ -2133,6 +2133,13 @@ impl Sandbox {
     }
 
     /// Adds an LVZ file's objects (logged and skipped if it doesn't parse).
+    /// Leaves the zone, when this game is an online one.
+    pub fn disconnect(&mut self) {
+        if let Some(net) = self.net.as_mut() {
+            net.disconnect();
+        }
+    }
+
     pub fn load_lvz(&mut self, name: &str, data: &[u8]) {
         match self.lvz.add_file(name, data, self.clock) {
             // The shown count is the useful half: an object whose mode is
