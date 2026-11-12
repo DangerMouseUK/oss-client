@@ -1041,6 +1041,22 @@ fn utc_stamp(secs: u64) -> String {
 }
 
 /// The zone browser: name, players and ping per zone, the selected one highlighted.
+/// Colour for a zone's round trip, banded good / usable / poor, as the originals
+/// coloured them. A zone that has not answered is dimmed rather than coloured: no
+/// answer is not the same as a bad answer.
+///
+/// The exact thresholds the original used are not recorded here, so these are picked
+/// to be useful against what live zones actually return — the ones measured today sat
+/// between 72 and 115 ms. The fidelity point is that the column is coloured at all.
+fn ping_color(ping_ms: Option<u32>) -> u32 {
+    match ping_ms {
+        None => color::DARK_RED,
+        Some(ms) if ms <= 100 => color::GREEN,
+        Some(ms) if ms <= 250 => color::YELLOW,
+        Some(_) => color::RED,
+    }
+}
+
 fn draw_browser(
     b: &crate::game::zones::ZoneBrowser,
     art: &Art,
@@ -1073,13 +1089,24 @@ fn draw_browser(
         }
         let name: String = z.name.chars().take(name_chars).collect();
         c.text(r, x + 4.0, y, color::WHITE, &name);
+        // Players and ping are drawn separately so the ping can carry its own
+        // colour, as SubSpace and Continuum did: the column exists so a player can
+        // pick a zone that will play well, and colour is what makes that readable
+        // at a glance instead of by reading numbers.
+        c.text_right(
+            r,
+            x + w - 4.0 - 6.0 * 8.0,
+            y,
+            color::WHITE,
+            &format!("{:>7}", z.players),
+        );
         let ping = z.ping_ms.map_or_else(|| "-".to_string(), |p| p.to_string());
         c.text_right(
             r,
             x + w - 4.0,
             y,
-            color::WHITE,
-            &format!("{:>7}  {ping:>4}", z.players),
+            ping_color(z.ping_ms),
+            &format!("{ping:>4}"),
         );
         y += 12.0;
     }
@@ -1127,5 +1154,21 @@ mod tests {
         assert_eq!(utc_stamp(0), "1970-01-01-000000");
         assert_eq!(utc_stamp(951_782_400), "2000-02-29-000000");
         assert_eq!(utc_stamp(1_798_765_432), "2027-01-01-010352");
+    }
+
+    #[test]
+    fn ping_is_banded_by_quality() {
+        use crate::game::view::color;
+        // Unanswered is dimmed, not red: it is not a bad ping, it is no ping.
+        assert_eq!(super::ping_color(None), color::DARK_RED);
+        assert_eq!(super::ping_color(Some(0)), color::GREEN);
+        // The zones measured against live servers sit around here.
+        assert_eq!(super::ping_color(Some(72)), color::GREEN);
+        assert_eq!(super::ping_color(Some(115)), color::YELLOW);
+        // Band edges land on the better side.
+        assert_eq!(super::ping_color(Some(100)), color::GREEN);
+        assert_eq!(super::ping_color(Some(101)), color::YELLOW);
+        assert_eq!(super::ping_color(Some(250)), color::YELLOW);
+        assert_eq!(super::ping_color(Some(251)), color::RED);
     }
 }
