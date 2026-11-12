@@ -44,6 +44,21 @@ impl UdpDriver {
         self.server
     }
 
+    /// The port the socket was bound to, which the login reports. Zero if the
+    /// socket cannot say.
+    pub fn bound_port(&self) -> u16 {
+        self.socket.local_addr().map(|a| a.port()).unwrap_or(0)
+    }
+
+    /// The server's IPv4 address as a host-order `u32`, which is how the login
+    /// carries it. Zero for IPv6, which the field cannot represent.
+    pub fn server_ip(&self) -> u32 {
+        match self.server {
+            SocketAddr::V4(v4) => u32::from(*v4.ip()),
+            SocketAddr::V6(_) => 0,
+        }
+    }
+
     /// Milliseconds since this driver was created (the session's clock).
     pub fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
@@ -52,6 +67,10 @@ impl UdpDriver {
     /// Receives everything waiting, ticks the session and sends what it queued.
     /// Never blocks. Returns an error only for unexpected socket failures.
     pub fn pump(&mut self, session: &mut Session) -> std::io::Result<()> {
+        // Before anything the session might do, including sending its login:
+        // this driver is the only thing that knows either value, and telling
+        // it here means no caller has to remember to. Two stores per pump.
+        session.set_local_endpoint(self.server_ip(), self.bound_port());
         loop {
             match self.socket.recv(&mut self.buf) {
                 Ok(n) => {
@@ -91,5 +110,37 @@ impl UdpDriver {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The login's `server_ip` is the IPv4 address as a host-order `u32`, and
+    /// these two are read off real captures rather than derived: a client
+    /// dialling 127.0.0.1 put `01 00 00 7F` at offset 89, and one dialling
+    /// Trench Wars at 207.148.16.165 put 0xCF9410A5 there.
+    #[test]
+    fn the_server_address_encodes_the_way_a_real_client_sends_it() {
+        let d = |s: &str| -> u32 {
+            match s.parse::<SocketAddr>().expect("addr") {
+                SocketAddr::V4(v4) => u32::from(*v4.ip()),
+                SocketAddr::V6(_) => 0,
+            }
+        };
+        assert_eq!(d("127.0.0.1:5000"), 0x7F00_0001);
+        assert_eq!(d("127.0.0.1:5000").to_le_bytes(), [0x01, 0x00, 0x00, 0x7F]);
+        assert_eq!(d("207.148.16.165:5400"), 0xCF94_10A5);
+        assert_eq!(d("[::1]:5000"), 0, "IPv6 cannot be carried in the field");
+    }
+
+    /// A driver reports a real bound port, and hands both to the session
+    /// before the session can send anything — so no caller has to remember.
+    #[test]
+    fn a_driver_tells_the_session_its_endpoint() {
+        let d = UdpDriver::connect("127.0.0.1:5000").expect("connect");
+        assert_ne!(d.bound_port(), 0, "the OS gave us an ephemeral port");
+        assert_eq!(d.server_ip(), 0x7F00_0001);
     }
 }

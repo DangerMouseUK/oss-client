@@ -378,6 +378,10 @@ struct MapInfo {
 pub struct Session {
     conn: Connection,
     cfg: SessionConfig,
+    /// The zone's address and our own bound port, for the login's tail.
+    /// `(0, 0)` until a driver supplies them; see
+    /// [`Session::set_local_endpoint`].
+    endpoint: (u32, u16),
     state: State,
     pid: Option<i16>,
     players: BTreeMap<i16, Player>,
@@ -421,11 +425,30 @@ impl Session {
         Self::with_handshake(cfg, now_ms, Box::new(VieClientHandshake::new(seed)))
     }
 
+    /// Tell the session what address it is dialling and which local port it is
+    /// dialling from, so the login can carry them.
+    ///
+    /// The login's tail reports both, and some servers read them: a zero
+    /// server address together with a zero port is taken to mean a SOCKS5
+    /// proxy, and the port is compared with the datagram's source port to
+    /// detect NAT. Neither is knowable here — `oss_net` owns no socket — so
+    /// whatever drives the socket supplies them. [`crate::udp::UdpDriver`] does it
+    /// for you; a caller driving its own socket should call this before the
+    /// session connects, and one that does not simply reports zeros, as it did
+    /// before this existed.
+    ///
+    /// `server_ip` is the IPv4 address as a host-order `u32` (what
+    /// `u32::from(Ipv4Addr)` gives); 0 for IPv6, which the field cannot carry.
+    pub fn set_local_endpoint(&mut self, server_ip: u32, bound_port: u16) {
+        self.endpoint = (server_ip, bound_port);
+    }
+
     /// A session with any client handshake (e.g. unencrypted, or a private cipher).
     pub fn with_handshake(cfg: SessionConfig, now_ms: u64, handshake: Box<dyn Handshake>) -> Self {
         Self {
             conn: Connection::client(Config::client(), handshake, now_ms),
             cfg,
+            endpoint: (0, 0),
             state: State::Connecting,
             pid: None,
             players: BTreeMap::new(),
@@ -707,9 +730,18 @@ impl Session {
             unknown1: 0,
             client_version: form.version,
             field444: 444,
-            field555: 555,
-            permission_id: self.cfg.machine_id,
-            reserved: [0; 12],
+            // Zero, as a real client sends for an `INADDR_ANY` bind -- not the
+            // 555 this used to carry, which is not an address.
+            bound_ip: 0,
+            // A real client sends zero here. This used to repeat `machine_id`,
+            // and it is the one field in this range ASSS reads (`core.c`,
+            // `p->permid = pkt->D2`), where it feeds the alias database.
+            permission_id: 0,
+            server_ip: self.endpoint.0,
+            bound_port: self.endpoint.1,
+            redirect_id: 0,
+            using_proxy: 0,
+            unused: 0,
             cont_id: form.continuum_id,
         };
         self.send(&login, true);
