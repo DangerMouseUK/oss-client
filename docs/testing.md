@@ -76,3 +76,10 @@ oss-client --server 127.0.0.1:5000 --name Pilot --ship 1 \
 
 The screenshots in [the README](../README.md) were taken this way, against the zone that
 ships in [oss-server](https://github.com/DangerMouseUK/oss-server).
+
+**Use `--screenshot`, not F11, for anything you intend to publish.** F11 and Print Screen
+print the full path of the file they just wrote into the chat log, so the *next* frame you
+take shows a local path — `C:\Users\<name>\AppData\Roaming\OpenSubSpace\screenshots\…` or
+its equivalent — in the bottom-left corner. That is how a machine path reaches a public
+repository. `--screenshot` writes the file and exits without announcing it, and a frame
+taken in a fresh session has an empty chat log anyway.

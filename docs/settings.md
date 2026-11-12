@@ -38,10 +38,13 @@ files overrides only those:
    built from a checkout (any profile, so `cargo run --release` works too)
 4. a Continuum install found automatically (Steam or the standard paths)
 
-`assets/classic` in this repository is the default set, so a fresh clone plays with no
-Continuum install anywhere. If you do have one, `--continuum-dir` gives you the
-graphics and sounds you are used to: `oss-assets` reads Continuum's own `.bm2` and `.wa2`
-containers as well as `.bmp`, `.png`, `.jpg`, `.gif` and `.wav`.
+`assets/classic` in this repository holds Continuum's own graphics and sounds, bundled so
+that a fresh clone plays with no Continuum install anywhere. They are not this project's
+work and are not covered by its GPL licence;
+[assets/classic/README.md](../assets/classic/README.md) says what they are and whose. If you
+have an install of your own, `--continuum-dir` uses it instead: `oss-assets` reads
+Continuum's `.bm2` and `.wa2` containers as well as `.bmp`, `.png`, `.jpg`, `.gif` and
+`.wav`.
 
 ## LVZ
 
