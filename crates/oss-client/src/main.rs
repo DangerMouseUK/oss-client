@@ -262,24 +262,33 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             }
             app::Mode::Sandbox { map, ship }
         }
-        (false, Some(server)) => app::Mode::Zone(Box::new(ServerOptions {
-            server,
-            // Filled from the settings file if not given; checked in `apply_config`.
-            name: name.unwrap_or_default(),
-            password,
-            arena,
-            ship: ship.unwrap_or(oss_session::SPECTATOR),
-            freq,
-            follow,
-            attach,
-            record,
-            security: security.unwrap_or_default(),
-            known_servers: None,
-            identities: None,
-            new_user,
-        })),
-        // No --server or --sandbox: the login screen.
-        (false, None) => app::Mode::Login { server: None },
+        // Built once, for both ways in. The start-up screen fills in who you are
+        // and where you are going on top of this, so an option added here reaches
+        // the zone whether or not that screen was used -- which is what went wrong
+        // when the screen built its own and five options were dropped on the floor.
+        (false, server) => {
+            let opts = Box::new(ServerOptions {
+                server: server.unwrap_or_default(),
+                // Filled from the settings file if not given; checked in `apply_config`.
+                name: name.unwrap_or_default(),
+                password,
+                arena,
+                ship: ship.unwrap_or(oss_session::SPECTATOR),
+                freq,
+                follow,
+                attach,
+                record,
+                security: security.unwrap_or_default(),
+                known_servers: None,
+                identities: None,
+                new_user,
+            });
+            if opts.server.is_empty() {
+                app::Mode::Login(opts)
+            } else {
+                app::Mode::Zone(opts)
+            }
+        }
     };
     Ok(Some(app::Options {
         mode,
@@ -359,12 +368,10 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     {
         match cfg.name {
             Some(name) => z.name = name,
-            // No name anywhere: ask on the login screen.
-            None => {
-                opts.mode = app::Mode::Login {
-                    server: Some(z.server.clone()),
-                }
-            }
+            // No name anywhere: ask on the start-up screen, carrying everything
+            // else the command line asked for rather than starting again from
+            // nothing.
+            None => opts.mode = app::Mode::Login(z.clone()),
         }
     }
     Ok(())
@@ -376,6 +383,42 @@ mod tests {
 
     fn parse(s: &str) -> Result<Option<app::Options>, String> {
         parse_args(s.split_whitespace().map(String::from))
+    }
+
+    /// The start-up screen is a way into a zone like any other, so what the command
+    /// line asked for has to reach it. Every one of these was dropped on the floor
+    /// by the version that built the screen its own options: a player who typed
+    /// `--record` and then used the form got no recording and no complaint.
+    #[test]
+    fn the_start_up_screen_is_given_what_the_command_line_asked_for() {
+        let o = parse("--record visit.ossr --freq 3 --follow Ace --attach Mate --new-user")
+            .unwrap()
+            .unwrap();
+        let app::Mode::Login(z) = &o.mode else {
+            panic!("no --server: the start-up screen")
+        };
+        assert_eq!(
+            z.record.as_deref(),
+            Some(PathBuf::from("visit.ossr").as_path())
+        );
+        assert_eq!(z.freq, Some(3));
+        assert_eq!(z.follow.as_deref(), Some("Ace"));
+        assert_eq!(z.attach.as_deref(), Some("Mate"));
+        assert!(z.new_user);
+
+        // And when a zone was named but no name was found anywhere, the screen is
+        // asked for the name -- not for everything else over again.
+        let mut o = parse("--server x:1 --record visit.ossr --freq 3")
+            .unwrap()
+            .unwrap();
+        finish_options(&mut o, config::Config::default()).unwrap();
+        let app::Mode::Login(z) = &o.mode else {
+            panic!("no name: ask for one")
+        };
+        assert_eq!(
+            (z.server.as_str(), z.freq, z.record.is_some()),
+            ("x:1", Some(3), true)
+        );
     }
 
     #[test]
@@ -397,7 +440,7 @@ mod tests {
         let mut o = parse("--server x:1").unwrap().unwrap();
         finish_options(&mut o, config::Config::default()).unwrap();
         assert!(
-            matches!(&o.mode, app::Mode::Login { server: Some(s) } if s == "x:1"),
+            matches!(&o.mode, app::Mode::Login(z) if z.server == "x:1"),
             "no name: ask for one"
         );
         let cfg = config::Config {
@@ -414,7 +457,7 @@ mod tests {
         assert!(parse("--sandbox m.lvl --ship spec").is_err());
         assert!(matches!(
             parse("").unwrap().unwrap().mode,
-            app::Mode::Login { server: None }
+            app::Mode::Login(z) if z.server.is_empty()
         ));
         assert!(parse("--help").unwrap().is_none());
     }
