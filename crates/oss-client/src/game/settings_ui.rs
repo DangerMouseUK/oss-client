@@ -34,6 +34,44 @@ pub struct SettingsUi {
     name: String,
 }
 
+/// Continuum's own UI colours, out of its `colors.bm2`: the near-black green it
+/// fills a panel with, the greys of a panel border, and the green one tone up that
+/// marks a picked row. This is the one screen built on egui rather than on the
+/// game's own text, so it is dressed to match the boxes either side of it.
+fn theme(ctx: &egui::Context) {
+    use egui::Color32 as C;
+    const FILL: C = C::from_rgb(10, 25, 10);
+    const RAISED: C = C::from_rgb(24, 57, 16);
+    const BORDER1: C = C::from_rgb(132, 132, 132);
+    const BORDER3: C = C::from_rgb(82, 82, 82);
+
+    let mut v = egui::Visuals::dark();
+    v.window_fill = FILL;
+    v.panel_fill = FILL;
+    v.extreme_bg_color = C::from_rgb(6, 16, 6);
+    v.faint_bg_color = RAISED;
+    v.window_stroke = egui::Stroke::new(1.0, BORDER1);
+    v.selection.bg_fill = RAISED;
+    v.selection.stroke = egui::Stroke::new(1.0, BORDER1);
+    v.widgets.noninteractive.bg_fill = FILL;
+    v.widgets.noninteractive.weak_bg_fill = FILL;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER3);
+    v.widgets.inactive.bg_fill = RAISED;
+    v.widgets.inactive.weak_bg_fill = RAISED;
+    v.widgets.hovered.bg_fill = C::from_rgb(36, 82, 24);
+    v.widgets.hovered.weak_bg_fill = C::from_rgb(36, 82, 24);
+    v.widgets.active.bg_fill = C::from_rgb(48, 107, 32);
+    v.widgets.active.weak_bg_fill = C::from_rgb(48, 107, 32);
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+    ] {
+        w.bg_stroke = egui::Stroke::new(1.0, BORDER1);
+    }
+    ctx.set_visuals(v);
+}
+
 pub fn binding_label(b: &Binding) -> String {
     let prefix = match b.mods {
         Mods::Any => "",
@@ -116,8 +154,9 @@ impl SettingsUi {
 
     /// Draws the window; returns what the player chose.
     pub fn show(&mut self, ctx: &egui::Context) -> UiAction {
+        theme(ctx);
         let mut action = UiAction::None;
-        egui::Window::new("Settings")
+        egui::Window::new("-= Settings =-")
             .collapsible(false)
             .resizable(true)
             .default_size([560.0, 520.0])

@@ -21,11 +21,40 @@ pub mod color {
     pub const PINK: u32 = 7;
 }
 
+/// Rows of `colors.bm2`, Continuum's UI palette. The names are nullspace's
+/// `ColorType`.
+pub mod ui_color {
+    /// Innermost and lightest ply of a panel border.
+    pub const BORDER1: u32 = 1;
+    pub const BORDER2: u32 = 2;
+    /// Outermost and darkest ply.
+    pub const BORDER3: u32 = 3;
+    /// Panel fill: Continuum's near-black green.
+    pub const BACKGROUND: u32 = 16;
+    /// The next tone of that green up, which the file keeps right beside the fill.
+    /// nullspace has no name for it; it is used here for the row a list has picked
+    /// out, where a colour of our own would be the only thing on screen that is not
+    /// Continuum's.
+    pub const HIGHLIGHT: u32 = 17;
+}
+
+/// What a panel is drawn in when `colors.bm2` is missing from the asset folder, so
+/// a box still reads as a box. These are what Continuum's own file holds.
+const FALLBACK: [[f32; 4]; 5] = [
+    [0.518, 0.518, 0.518, 1.0],
+    [0.420, 0.388, 0.388, 1.0],
+    [0.322, 0.322, 0.322, 1.0],
+    [0.039, 0.098, 0.039, 1.0],
+    [0.094, 0.224, 0.063, 1.0],
+];
+
 /// Maps game pixels to physical pixels for one frame.
 pub struct Canvas {
     pub atlas: TextureId,
     pub white: Region,
     pub font: Region,
+    /// `colors.bm2`; empty when the asset folder has no such file.
+    pub colors: Region,
     pub scale: f32,
     /// Camera centre in game pixels.
     pub cam: (f32, f32),
@@ -52,6 +81,7 @@ impl Canvas {
             atlas,
             white: art.white,
             font: art.tallfont,
+            colors: art.colors,
             scale,
             cam,
             cam_phys: ((cam.0 * scale).round(), (cam.1 * scale).round()),
@@ -169,6 +199,58 @@ impl Canvas {
 
     pub fn rect(&self, r: &mut Renderer, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
         self.ui(r, self.white, x, y, Some((w, h)), color);
+    }
+
+    /// Fills a rectangle with one row of `colors.bm2`.
+    pub fn color_rect(&self, r: &mut Renderer, row: u32, x: f32, y: f32, w: f32, h: f32) {
+        if self.colors.w == 0 {
+            let fallback = match row {
+                ui_color::BORDER1 => FALLBACK[0],
+                ui_color::BORDER2 => FALLBACK[1],
+                ui_color::BORDER3 => FALLBACK[2],
+                ui_color::HIGHLIGHT => FALLBACK[4],
+                _ => FALLBACK[3],
+            };
+            self.rect(r, x, y, w, h, fallback);
+            return;
+        }
+        // One texel of a row, stretched: the row is a flat colour, so this is the
+        // colour. (nullspace `Colors::GetRenderable` takes the same single texel.)
+        let texel = self.colors.frame(1, 1, row * self.colors.w);
+        self.ui(r, texel, x, y, Some((w, h)), [1.0; 4]);
+    }
+
+    /// A panel in Continuum's own colours: its near-black green fill inside the
+    /// three-ply border every box in the game wears. `x`, `y`, `w` and `h` are the
+    /// inside of the panel; the border is drawn in the three pixels around it, so
+    /// leave room. Ported from nullspace's `Graphics::DrawBorder`, which is where
+    /// the ply order and the one-pixel steps come from.
+    pub fn panel(&self, r: &mut Renderer, x: f32, y: f32, w: f32, h: f32) {
+        self.color_rect(r, ui_color::BACKGROUND, x, y, w, h);
+        // The first two plies are whole rectangles, one pixel apart. The third is
+        // the same again but stops short of the corners, which is what rounds them.
+        for (d, row) in [(1.0, ui_color::BORDER1), (2.0, ui_color::BORDER2)] {
+            self.color_rect(r, row, x - d, y - d, 1.0, h + d * 2.0);
+            self.color_rect(r, row, x + w + d - 1.0, y - d, 1.0, h + d * 2.0);
+            self.color_rect(r, row, x - d, y - d, w + d * 2.0, 1.0);
+            self.color_rect(r, row, x - d, y + h + d - 1.0, w + d * 2.0, 1.0);
+        }
+        let b3 = ui_color::BORDER3;
+        self.color_rect(r, b3, x - 3.0, y - 1.0, 1.0, h + 2.0);
+        self.color_rect(r, b3, x + w + 2.0, y - 1.0, 1.0, h + 2.0);
+        self.color_rect(r, b3, x - 1.0, y - 3.0, w + 2.0, 1.0);
+        self.color_rect(r, b3, x - 1.0, y + h + 2.0, w + 2.0, 1.0);
+    }
+
+    /// A one-pixel rule across a panel, as Continuum draws under a title.
+    pub fn separator(&self, r: &mut Renderer, x: f32, y: f32, w: f32) {
+        self.color_rect(r, ui_color::BORDER1, x, y, w, 1.0);
+    }
+
+    /// Text centred on `cx`.
+    pub fn text_center(&self, r: &mut Renderer, cx: f32, y: f32, color: u32, s: &str) {
+        let w = s.chars().count() as f32 * 8.0;
+        self.text(r, (cx - w / 2.0).floor(), y, color, s);
     }
 
     /// Draws text with Continuum's 8×12 font in one of the [`color`] rows.

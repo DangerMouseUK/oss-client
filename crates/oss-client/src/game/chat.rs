@@ -198,8 +198,6 @@ const MAX_WRAP: usize = 16;
 const FULL_LINES: usize = 64;
 /// Private senders remembered for `:` cycling (nullspace `PrivateHistory`).
 const PRIVATE_HISTORY: usize = 5;
-/// Lines you typed that are kept for Up/Down recall (ours, not Continuum's).
-const SENT_HISTORY: usize = 32;
 
 /// Chat colours by message type, as `(sender column, text)`; the font's colour rows
 /// are the same eight in the same order as nullspace's `TextColor`, so these are
@@ -371,14 +369,12 @@ pub fn input_color(line: &str) -> u32 {
 #[derive(Debug, Clone)]
 pub struct ChatLog {
     entries: Vec<Message>,
-    /// The line being typed, if the box is open.
-    pub input: Option<String>,
+    /// The line being typed. There is no "chat mode": characters always land here,
+    /// as in SubSpace and Continuum, and the line is only drawn once it has
+    /// something in it (nullspace `ChatController::Render`, `if (input[0] != 0)`).
+    pub input: String,
     /// Rows scrolled back from the newest (ours; Continuum cannot scroll).
     scroll: usize,
-    /// Lines sent earlier, oldest first.
-    sent: Vec<String>,
-    /// How far back Up/Down has walked `sent`.
-    recall: Option<usize>,
     /// Names that messaged you privately, newest first.
     privates: Vec<String>,
     /// Width of the sender column (`?namelen`).
@@ -391,10 +387,8 @@ impl Default for ChatLog {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            input: None,
+            input: String::new(),
             scroll: 0,
-            sent: Vec::new(),
-            recall: None,
             privates: Vec::new(),
             namelen: DEFAULT_NAMELEN,
             completing: None,
@@ -493,26 +487,10 @@ impl ChatLog {
         self.scroll = 0;
     }
 
-    /// Opens the chat box.
-    pub fn start_typing(&mut self) {
-        self.input = Some(String::new());
-        self.recall = None;
-        self.completing = None;
-    }
-
-    /// Escape: closes the box, keeping nothing.
-    pub fn cancel(&mut self) {
-        self.input = None;
-        self.recall = None;
-        self.completing = None;
-    }
-
     /// A typed character. `:` on a line that already starts with `:` fills in a
     /// recent private sender instead, as Continuum does.
     pub fn type_char(&mut self, c: char) {
-        let Some(line) = self.input.as_mut() else {
-            return;
-        };
+        let line = &mut self.input;
         if c.is_control() || line.chars().count() >= MAX_CHAT {
             return;
         }
@@ -530,62 +508,30 @@ impl ChatLog {
 
     /// Backspace; with Ctrl the whole line goes (nullspace).
     pub fn backspace(&mut self, ctrl: bool) {
-        if let Some(line) = self.input.as_mut() {
-            if ctrl {
-                line.clear();
-            } else {
-                line.pop();
-            }
-            self.completing = None;
+        if ctrl {
+            self.input.clear();
+        } else {
+            self.input.pop();
         }
-    }
-
-    /// Up/Down while typing: walks the lines you sent earlier (ours).
-    pub fn recall(&mut self, back: bool) {
-        if self.input.is_none() || self.sent.is_empty() {
-            return;
-        }
-        let next = match (self.recall, back) {
-            (None, true) => Some(self.sent.len() - 1),
-            (None, false) => None,
-            (Some(i), true) => Some(i.saturating_sub(1)),
-            (Some(i), false) if i + 1 < self.sent.len() => Some(i + 1),
-            (Some(_), false) => None,
-        };
-        self.recall = next;
-        self.input = Some(match next {
-            Some(i) => self.sent[i].clone(),
-            None => String::new(),
-        });
         self.completing = None;
     }
 
-    /// Enter: takes the line, closes the box and remembers it for recall.
+    /// Enter: takes the line and leaves the chat line empty again.
     pub fn submit(&mut self) -> String {
-        let line = self.input.take().unwrap_or_default();
-        self.recall = None;
         self.completing = None;
-        let line = line.trim().to_string();
-        if !line.is_empty() && self.sent.last() != Some(&line) {
-            self.sent.push(line.clone());
-            if self.sent.len() > SENT_HISTORY {
-                self.sent.remove(0);
-            }
-        }
-        line
+        let line = std::mem::take(&mut self.input);
+        line.trim().to_string()
     }
 
     /// Tab: completes `:partial` to a player name, cycling on repeats.
     pub fn complete_name(&mut self, names: &[&str]) {
-        let Some(line) = self.input.clone() else {
-            return;
-        };
+        let line = self.input.clone();
         let (base, n) = match self.completing.take() {
             Some((base, n)) => (base, n + 1),
             None => (line, 0),
         };
         if let Some(done) = complete(&base, names, n) {
-            self.input = Some(done);
+            self.input = done;
             self.completing = Some((base, n));
         }
     }
@@ -784,52 +730,39 @@ mod tests {
     }
 
     #[test]
-    fn typing_history_and_private_cycling() {
+    fn typing_and_private_cycling() {
         let mut log = ChatLog::default();
-        log.start_typing();
+        // No box to open: a fresh log is already taking characters.
+        assert_eq!(log.input, "");
         for c in "hello".chars() {
             log.type_char(c);
         }
         log.backspace(false);
-        assert_eq!(log.input.as_deref(), Some("hell"));
+        assert_eq!(log.input, "hell");
         // Ctrl+Backspace clears the line (nullspace).
         log.backspace(true);
-        assert_eq!(log.input.as_deref(), Some(""));
+        assert_eq!(log.input, "");
         for c in "first".chars() {
             log.type_char(c);
         }
+        // Enter sends and leaves the line empty, ready for the next one.
         assert_eq!(log.submit(), "first");
-        log.start_typing();
-        for c in "second".chars() {
-            log.type_char(c);
-        }
-        assert_eq!(log.submit(), "second");
-        // Ours: Up walks back through what was sent, Down returns.
-        log.start_typing();
-        log.recall(true);
-        assert_eq!(log.input.as_deref(), Some("second"));
-        log.recall(true);
-        assert_eq!(log.input.as_deref(), Some("first"));
-        log.recall(false);
-        assert_eq!(log.input.as_deref(), Some("second"));
-        log.recall(false);
-        assert_eq!(log.input.as_deref(), Some(""));
-        log.cancel();
+        assert_eq!(log.input, "");
+        assert_eq!(log.submit(), "");
 
         // Continuum: ':' on a line that starts with ':' fills in a recent private
         // sender, and cycles back through the last five.
         log.saw_private("Alpha");
         log.saw_private("Bravo");
         assert_eq!(log.last_private(), Some("Bravo"));
-        log.start_typing();
         log.type_char(':');
-        assert_eq!(log.input.as_deref(), Some(":"));
+        assert_eq!(log.input, ":");
         log.type_char(':');
-        assert_eq!(log.input.as_deref(), Some(":Bravo:"));
+        assert_eq!(log.input, ":Bravo:");
         log.type_char(':');
-        assert_eq!(log.input.as_deref(), Some(":Alpha:"));
+        assert_eq!(log.input, ":Alpha:");
         log.type_char(':');
-        assert_eq!(log.input.as_deref(), Some(":Bravo:"));
+        assert_eq!(log.input, ":Bravo:");
     }
 
     #[test]

@@ -105,6 +105,9 @@ pub struct Sandbox {
     news: Vec<String>,
     news_open: bool,
     news_scroll: usize,
+    /// The F1 help pages are up, and which one.
+    help_open: bool,
+    help_page: usize,
     /// Macro keys: binding and the line they send.
     pub macros: Vec<(super::input::Binding, String)>,
     /// Accessibility: colour palette and extra interface scale.
@@ -360,6 +363,8 @@ impl Sandbox {
             news: Vec::new(),
             news_open: false,
             news_scroll: 0,
+            help_open: false,
+            help_page: 0,
             macros: Vec::new(),
             palette: Default::default(),
             ui_scale_extra: 0,
@@ -618,18 +623,33 @@ impl Sandbox {
 
         let mut edges = input.take_edges();
         let pressed = input.take_pressed();
-        let typed = std::mem::take(&mut input.typed);
         let mods = (input.shift(), input.ctrl());
+        // With nothing on the chat line a key the game uses is the game's, so its
+        // character is dropped; once the line has something on it the same key types
+        // (nullspace `OnCharacter`). The key that typed each character is kept all
+        // the way from the window event, so this holds on any keyboard layout.
+        let typing = !self.chat.input.is_empty();
+        let typed: Vec<char> = std::mem::take(&mut input.typed)
+            .into_iter()
+            .filter(|&(key, _)| {
+                typing
+                    || !key.is_some_and(|k| {
+                        input.key_is_bound(k, mods.0, mods.1) || self.is_macro_key(k, mods)
+                    })
+            })
+            .map(|(_, c)| c)
+            .collect();
         self.ui_input(&mut edges, &pressed, &typed, mods);
+        input.set_typing(!self.chat.input.is_empty());
         self.big_radar = !self.menu && input.action_held(Action::BigRadar);
         if self.spectating
             && !self.menu
-            && self.chat.input.is_none()
+            && self.chat.input.is_empty()
             && edges.contains(&Action::XRadar)
         {
             self.toggle_spec_xradar();
         }
-        if self.spectating && !self.menu && self.chat.input.is_none() {
+        if self.spectating && !self.menu && self.chat.input.is_empty() {
             let step = SPEC_SPEED * dt.as_secs_f32() * if input.shift() { 3.0 } else { 1.0 };
             let (dx, dy) = (
                 input.action_held(Action::Right) as i32 as f32
@@ -704,8 +724,9 @@ impl Sandbox {
                 ShipInput::default()
             } else {
                 let mut i = input.ship_input(&edges);
-                if self.chat.input.is_some() {
-                    // Tab completes names while typing rather than firing.
+                if !self.chat.input.is_empty() {
+                    // Tab completes names while typing rather than firing. The rest
+                    // of the ship keys carry on: in SubSpace you fly while you talk.
                     (i.bomb, i.mine) = (false, false);
                 }
                 i
@@ -852,43 +873,39 @@ impl Sandbox {
         })
     }
 
-    /// Menu, chat box and other non-flying keys.
+    /// Menu, chat and other non-flying keys.
+    ///
+    /// There is no chat mode. Characters always land on the chat line, which is what
+    /// SubSpace's own help tells the player: "To send a public message simply type
+    /// it, then hit Enter." Enter sends; it opens nothing. A key that is both a
+    /// character and a game key (the backquote for repel, a macro key) is settled by
+    /// whether the line already has something on it, which is nullspace's rule in
+    /// `OnCharacter`; the caller has already dropped the characters the game took.
+    /// It is also why the menu's single letters work: they are live only while the
+    /// menu is up.
     fn ui_input(
         &mut self,
         edges: &mut Vec<Action>,
         pressed: &[KeyCode],
-        typed: &str,
+        typed: &[char],
         (shift, ctrl): (bool, bool),
     ) {
-        if self.chat.input.is_some() && pressed.contains(&KeyCode::Tab) {
-            self.complete_name();
-        }
-        if self.chat.input.is_some() {
-            for c in typed.chars() {
-                self.chat.type_char(c);
-            }
-            let mut send = false;
-            let mut cancel = false;
+        if self.help_open {
             for key in pressed {
                 match key {
-                    KeyCode::Backspace => self.chat.backspace(ctrl),
-                    KeyCode::Enter | KeyCode::NumpadEnter => send = true,
-                    KeyCode::Escape => cancel = true,
-                    // Ours: walk back through the lines you sent earlier.
-                    KeyCode::ArrowUp => self.chat.recall(true),
-                    KeyCode::ArrowDown => self.chat.recall(false),
+                    // "F1 = More help": the pages turn, then the help goes away.
+                    KeyCode::F1 => self.help_page += 1,
+                    KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter => {
+                        self.help_open = false
+                    }
                     _ => {}
                 }
             }
-            // While typing, the Escape key closes the chat box rather than the menu,
-            // and toggles bound to keys that also type text are ignored.
-            edges.retain(|a| !matches!(a, Action::Menu));
-            if cancel {
-                self.chat.cancel();
-            } else if send {
-                let line = self.chat.submit();
-                self.send_chat_line(&line);
+            if self.help_page >= help_pages(self.online()).len() {
+                self.help_open = false;
+                self.help_page = 0;
             }
+            edges.clear();
             return;
         }
         if self.news_open {
@@ -921,41 +938,57 @@ impl Sandbox {
         if self.menu {
             for key in pressed {
                 match key {
-                    KeyCode::KeyQ => self.quit = true,
-                    KeyCode::KeyO => {
-                        self.open_settings = true;
+                    // Keys that type nothing never reach Continuum's menu, so they
+                    // leave it up: F1 opens the help, and PgUp/PgDn scroll the log
+                    // the menu has put on screen (ours; Continuum cannot scroll).
+                    KeyCode::F1 => {
+                        self.help_open = true;
+                        self.help_page = 0;
                         self.menu = false;
                     }
-                    KeyCode::KeyS if self.online() => {
-                        self.request_ship(SPECTATOR);
-                        self.menu = false;
-                    }
-                    KeyCode::KeyN if !self.news.is_empty() => {
-                        self.news_open = true;
-                        self.news_scroll = 0;
-                        self.menu = false;
-                    }
-                    // Ours: the full log is on screen with the menu open, so this
-                    // is where scrolling it belongs. Continuum cannot scroll at all.
                     KeyCode::PageUp => self.chat.scroll_by(1),
                     KeyCode::PageDown => self.chat.scroll_by(-1),
-                    k => {
-                        if let Some(n) = digit(*k) {
-                            self.request_ship(n - 1);
-                            self.menu = false;
-                        }
-                    }
+                    _ => {}
                 }
+            }
+            // The menu answers to typed characters, and whichever one comes is the
+            // last: "Any other key to resume game", which then types as usual.
+            for &c in typed {
+                let handled = self.menu_key(c);
+                self.menu = false;
+                if !handled {
+                    self.chat.type_char(c);
+                }
+            }
+            if !self.menu {
+                self.chat.scroll_to_bottom();
             }
             edges.clear();
             return;
         }
-        if pressed
-            .iter()
-            .any(|k| matches!(k, KeyCode::Enter | KeyCode::NumpadEnter))
-        {
-            self.chat.start_typing();
-            return;
+        // The chat line is always live. Tab finishes a name on it rather than
+        // dropping a bomb, but only once there is something to finish.
+        if !self.chat.input.is_empty() && pressed.contains(&KeyCode::Tab) {
+            self.complete_name();
+        }
+        for &c in typed {
+            self.chat.type_char(c);
+        }
+        let mut send = false;
+        for key in pressed {
+            match key {
+                KeyCode::Backspace => self.chat.backspace(ctrl),
+                KeyCode::Enter | KeyCode::NumpadEnter => send = true,
+                KeyCode::F1 => {
+                    self.help_open = true;
+                    self.help_page = 0;
+                }
+                _ => {}
+            }
+        }
+        if send {
+            let line = self.chat.submit();
+            self.send_chat_line(&line);
         }
         self.run_macros(pressed, shift, ctrl);
         for e in edges.iter() {
@@ -1070,12 +1103,27 @@ impl Sandbox {
         self.chat.complete_name(&refs);
     }
 
-    /// Macro keys (from the settings file): send their line when pressed.
+    /// Whether `key` would fire a macro, and so belongs to the game rather than to
+    /// the chat line while that line is empty.
+    fn is_macro_key(&self, key: KeyCode, (shift, ctrl): (bool, bool)) -> bool {
+        self.macros
+            .iter()
+            .any(|(b, _)| b.key == key && b.mods.matches(shift, ctrl, b.key))
+    }
+
+    /// Macro keys (from the settings file): send their line when pressed. A macro on
+    /// a key that types gives way to the chat line once that line has something on
+    /// it, exactly as a binding does.
     fn run_macros(&mut self, pressed: &[KeyCode], shift: bool, ctrl: bool) {
+        let typing = !self.chat.input.is_empty();
         let lines: Vec<String> = self
             .macros
             .iter()
-            .filter(|(b, _)| pressed.contains(&b.key) && b.mods.matches(shift, ctrl, b.key))
+            .filter(|(b, _)| {
+                pressed.contains(&b.key)
+                    && b.mods.matches(shift, ctrl, b.key)
+                    && !(typing && super::input::yields_to_chat(*b))
+            })
             .map(|(_, text)| text.clone())
             .collect();
         for line in lines {
@@ -2484,6 +2532,9 @@ impl Sandbox {
         if self.news_open {
             self.draw_news(&ui, r);
         }
+        if self.help_open {
+            self.draw_help(&ui, r);
+        }
         StarParams {
             camera: [cam.0, cam.1],
             scale: c.scale,
@@ -2578,7 +2629,8 @@ impl Sandbox {
         // The log stops short of the radar, as in Continuum, and wraps there.
         let width = chat_width(c);
         let mut rows = ChatLog::visible_rows(c.view_h, self.menu);
-        if let Some(line) = &self.chat.input {
+        if !self.chat.input.is_empty() {
+            let line = &self.chat.input;
             // The line being typed wraps too, but cuts at the edge instead of at a
             // space so the cursor stays with the characters (nullspace).
             let colour = chat::input_color(line);
@@ -2661,53 +2713,210 @@ impl Sandbox {
         }
     }
 
-    fn draw_menu(&self, c: &Canvas, r: &mut Renderer) {
-        let mut lines = vec![
-            if self.online() { "Menu" } else { "Sandbox" },
-            "",
-            "1-8   Change ship",
-        ];
-        if self.online() {
-            lines.push("S     Spectate");
-        }
-        if !self.news.is_empty() {
-            lines.push("N     Zone news");
-        }
-        lines.extend([
-            "O     Options (video, sound, keys, macros)",
-            "Q     Quit",
-            "Esc   Back to game",
-            "Enter Chat ('team, :name:private, ?help)",
-            "      ?go [arena], ?namelen N, ?status, ?news",
-            "      PgUp/PgDn here scrolls the chat log",
-            "",
-            "Arrows fly, Shift afterburner, Ctrl guns, Tab bombs,",
-            "Shift+Tab mines, Shift+Ctrl repel, Delete multifire,",
-            "Shift+Delete burst, Insert warp, Shift+Insert portal,",
-            "Home stealth, Shift+Home cloak, End x-radar,",
-            "Shift+End antiwarp, F3 rocket, F4 brick, F5 decoy,",
-            "F6 thor, Alt big radar, Ctrl +/- scale, F12 fps",
-            "F2 stat box, PgUp/PgDn select, /text to selected,",
-            "F7 attach to selected (again: detach), Ctrl+F7 shake off,",
-            "Print Screen or F11 saves a screenshot",
-        ]);
-        let w = 54.0 * 8.0;
-        let h = lines.len() as f32 * 14.0 + 16.0;
-        let (x, y) = (
-            ((c.view_w - w) / 2.0).floor(),
-            ((c.view_h - h) / 2.0).floor(),
-        );
-        c.rect(r, x - 8.0, y - 8.0, w + 16.0, h, [0.0, 0.0, 0.0, 0.85]);
-        for (i, line) in lines.iter().enumerate() {
-            c.text(
-                r,
-                x,
-                y + i as f32 * 14.0,
-                if i == 0 { color::YELLOW } else { color::WHITE },
-                line,
-            );
+    /// Puts one of the in-game screens up at start, so a screenshot can catch it
+    /// (`--screen`, for testing).
+    pub fn open_screen(&mut self, screen: Option<crate::app::StartScreen>) {
+        match screen {
+            Some(crate::app::StartScreen::Menu) => self.menu = true,
+            Some(crate::app::StartScreen::Help) => {
+                self.help_open = true;
+                self.help_page = 0;
+            }
+            None => {}
         }
     }
+
+    /// One of the menu's own keys, or `false` for "any other key".
+    fn menu_key(&mut self, ch: char) -> bool {
+        match ch.to_ascii_lowercase() {
+            'q' => self.quit = true,
+            'o' => self.open_settings = true,
+            's' if self.online() => self.request_ship(SPECTATOR),
+            'n' if !self.news.is_empty() => {
+                self.news_open = true;
+                self.news_scroll = 0;
+            }
+            d @ '1'..='8' => self.request_ship(d as u8 - b'1'),
+            _ => return false,
+        }
+        true
+    }
+
+    /// The menu, in the box SubSpace and Continuum draw it in: keys down the left,
+    /// ships down the right from column 26, and the line that says any other key
+    /// puts it away. The wording and the columns are the original client's own
+    /// (`SUBSPACE.EXE`, the block of strings beginning `-= Menu =-`); the frame,
+    /// the fill and the rule under the title are Continuum's, out of `colors.bm2`.
+    /// Only the entries this client actually has are listed.
+    fn draw_menu(&self, c: &Canvas, r: &mut Renderer) {
+        let ships = [
+            "Ships",
+            "1 = Warbird",
+            "2 = Javelin",
+            "3 = Spider",
+            "4 = Leviathan",
+            "5 = Terrier",
+            "6 = Weasel",
+            "7 = Lancaster",
+            "8 = Shark",
+        ];
+        let mut keys = vec!["Q  = Quit", "F1 = Help", "F2 = Stat box"];
+        if !self.news.is_empty() {
+            keys.push(" N = Zone news");
+        }
+        keys.push(" O = Options");
+        keys.push("F12= Frame rate");
+        let rows = keys.len().max(ships.len() + usize::from(self.online()));
+
+        // 40 characters across, as the original's longest line is, and up at the
+        // top of the screen: the menu puts the whole message log on screen beneath
+        // it, which is the point of it being out of the way (nullspace keeps the
+        // same `(centred, y = 3)`).
+        let w = 40.0 * 8.0;
+        let h = 20.0 + (rows as f32 + 2.0) * 12.0;
+        let x = ((c.view_w - w) / 2.0).floor();
+        let y = 4.0;
+        c.panel(r, x, y, w, h);
+        c.text_center(r, x + w / 2.0, y + 1.0, color::GREEN, "-= Menu =-");
+        c.separator(r, x, y + 13.0, w);
+
+        let row_y = |i: usize| y + 18.0 + i as f32 * 12.0;
+        for (i, line) in keys.iter().enumerate() {
+            c.text(r, x + 2.0, row_y(i), color::WHITE, line);
+        }
+        // The ships sit at column 26 of the box, where the original puts them, with
+        // their heading in dark red and spectator under the eighth.
+        let ship_x = x + 2.0 + 26.0 * 8.0;
+        for (i, line) in ships.iter().enumerate() {
+            let colour = if i == 0 {
+                color::DARK_RED
+            } else {
+                color::WHITE
+            };
+            c.text(r, ship_x, row_y(i), colour, line);
+        }
+        if self.online() {
+            c.text(r, ship_x, row_y(ships.len()), color::WHITE, "S = Spectator");
+        }
+        c.text(
+            r,
+            x + 2.0,
+            row_y(rows),
+            color::WHITE,
+            "PgUp/PgDn = Scroll messages",
+        );
+        c.text_center(
+            r,
+            x + w / 2.0,
+            row_y(rows + 1),
+            color::YELLOW,
+            "Any other key to resume game",
+        );
+    }
+
+    /// The F1 help, which is where the key list lives in SubSpace and Continuum
+    /// rather than in the menu. F1 turns the page and the last page closes it.
+    fn draw_help(&self, c: &Canvas, r: &mut Renderer) {
+        let pages = help_pages(self.online());
+        let Some((title, lines)) = pages.get(self.help_page) else {
+            return;
+        };
+        let w = 54.0 * 8.0;
+        let h = 20.0 + (lines.len() as f32 + 2.0) * 12.0;
+        let x = ((c.view_w - w) / 2.0).floor();
+        let y = ((c.view_h - h) / 2.0).floor().max(4.0);
+        c.panel(r, x, y, w, h);
+        c.text_center(r, x + w / 2.0, y + 1.0, color::GREEN, title);
+        c.separator(r, x, y + 13.0, w);
+        for (i, line) in lines.iter().enumerate() {
+            c.text(r, x + 2.0, y + 18.0 + i as f32 * 12.0, color::WHITE, line);
+        }
+        let footer = if self.help_page + 1 < pages.len() {
+            "F1 = More help        Esc = Back to game"
+        } else {
+            "F1 or Esc = Back to game"
+        };
+        c.text_center(
+            r,
+            x + w / 2.0,
+            y + 18.0 + (lines.len() as f32 + 1.0) * 12.0,
+            color::YELLOW,
+            footer,
+        );
+    }
+}
+
+/// The help pages, laid out as the original client's are: a key list first, then
+/// the commands. The keys are this client's defaults; a changed key table is shown
+/// on the settings screen, which is the one place that knows it.
+fn help_pages(online: bool) -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut keys = vec![
+        "ARROWS = Movement",
+        "CTRL   = Fire guns",
+        "TAB    = Fire bomb (if available)",
+        "HOME   = Toggle stealth",
+        "END    = Toggle x-radar",
+        "DELETE = Toggle multi-fire",
+        "INSERT = Warp (full energy)",
+        "SHIFT  = Modifier key:",
+        "  -ARROWS = Afterburners",
+        "  -HOME   = Toggle cloak",
+        "  -END    = Toggle antiwarp",
+        "  -TAB    = Lay mine",
+        "  -DELETE = Burst",
+        "  -CTRL   = Repel (or the ` key)",
+        "  -INSERT = Drop portal",
+        "F1     = More help",
+        "F3     = Fire rocket",
+        "F4     = Drop brick",
+        "F5     = Drop decoy",
+        "F6     = Thor's hammer",
+        "F7     = Attach/Detach (CTRL+F7 shakes turrets off)",
+        "ENTER  = Send message",
+        "ESC    = Menu display",
+    ];
+    if !online {
+        keys.retain(|k| !k.starts_with("F7"));
+    }
+    let ours = vec![
+        "F2        = Stat box mode",
+        "PGUP/PGDN = Change ticked player",
+        "ALT       = Whole-map radar while held",
+        "CTRL +/-  = Zoom in and out",
+        "F12       = Frame rate",
+        "F11 or PRINT SCREEN = Save a screenshot",
+        "",
+        "Messages",
+        "  Type a message and press ENTER to send it. There is",
+        "  no key to open the chat line: the characters go there",
+        "  as you type, as they do in SubSpace and Continuum.",
+        "  'message       = to your team (// also works)",
+        "  /message       = to the ticked player",
+        "  :name:message  = to that player by name (TAB finishes",
+        "                   a name, :: fills in the last one)",
+        "  ;channel;msg   = to a chat channel",
+        "  \"message       = to the enemy team",
+    ];
+    let commands = vec![
+        "?go [arena]   = Switch arena (no name: the next public)",
+        "?arena        = List the arenas",
+        "?namelen=x    = Letters shown of a name",
+        "?lines=x      = Message lines on screen",
+        "?status       = Your ship's status",
+        "?ping         = Your ping time",
+        "?news         = The zone's news",
+        "?help         = What the zone offers",
+        "",
+        "Macros are set on the settings screen (O on the menu),",
+        "and %selfname, %tickname, %freq, %bounty, %flags,",
+        "%energy, %killer, %killed, %coord and %squad are",
+        "replaced in anything you send.",
+    ];
+    vec![
+        ("-= Help: keys =-", keys),
+        ("-= Help: this client =-", ours),
+        ("-= Help: commands =-", commands),
+    ]
 }
 
 /// How many characters wide the chat area is: the view minus the radar beside it,
@@ -2752,20 +2961,6 @@ fn add_own_ship(world: &mut World, id: u16, ship: u8, freq: u16) {
     } else {
         world.add_ship(id, ship, freq);
     }
-}
-
-fn digit(key: KeyCode) -> Option<u8> {
-    Some(match key {
-        KeyCode::Digit1 => 1,
-        KeyCode::Digit2 => 2,
-        KeyCode::Digit3 => 3,
-        KeyCode::Digit4 => 4,
-        KeyCode::Digit5 => 5,
-        KeyCode::Digit6 => 6,
-        KeyCode::Digit7 => 7,
-        KeyCode::Digit8 => 8,
-        _ => return None,
-    })
 }
 
 #[derive(Default)]

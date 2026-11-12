@@ -249,6 +249,91 @@ impl Mods {
     }
 }
 
+/// Whether a key puts a character on the chat line when pressed on its own.
+///
+/// SubSpace and Continuum have no chat mode: a key like `` ` `` (repel) is both a
+/// game key and a character, and which one it is depends on whether the chat line
+/// already has something on it. This is the test for "could be a character",
+/// decided by the key's place on the keyboard rather than by the layout, so it
+/// holds wherever the character itself differs.
+pub fn types_text(key: KeyCode) -> bool {
+    use KeyCode as K;
+    matches!(
+        key,
+        K::Backquote
+            | K::Minus
+            | K::Equal
+            | K::BracketLeft
+            | K::BracketRight
+            | K::Backslash
+            | K::Semicolon
+            | K::Quote
+            | K::Comma
+            | K::Period
+            | K::Slash
+            | K::Space
+            | K::IntlBackslash
+            | K::IntlRo
+            | K::IntlYen
+            | K::KeyA
+            | K::KeyB
+            | K::KeyC
+            | K::KeyD
+            | K::KeyE
+            | K::KeyF
+            | K::KeyG
+            | K::KeyH
+            | K::KeyI
+            | K::KeyJ
+            | K::KeyK
+            | K::KeyL
+            | K::KeyM
+            | K::KeyN
+            | K::KeyO
+            | K::KeyP
+            | K::KeyQ
+            | K::KeyR
+            | K::KeyS
+            | K::KeyT
+            | K::KeyU
+            | K::KeyV
+            | K::KeyW
+            | K::KeyX
+            | K::KeyY
+            | K::KeyZ
+            | K::Digit0
+            | K::Digit1
+            | K::Digit2
+            | K::Digit3
+            | K::Digit4
+            | K::Digit5
+            | K::Digit6
+            | K::Digit7
+            | K::Digit8
+            | K::Digit9
+            | K::Numpad0
+            | K::Numpad1
+            | K::Numpad2
+            | K::Numpad3
+            | K::Numpad4
+            | K::Numpad5
+            | K::Numpad6
+            | K::Numpad7
+            | K::Numpad8
+            | K::Numpad9
+            | K::NumpadAdd
+            | K::NumpadSubtract
+            | K::NumpadMultiply
+            | K::NumpadDivide
+    )
+}
+
+/// Whether a binding loses to the chat line while something is being typed.
+/// A Ctrl binding does not: Ctrl and a key put no character on the line.
+pub fn yields_to_chat(b: Binding) -> bool {
+    b.mods != Mods::Ctrl && types_text(b.key)
+}
+
 fn mods_match(mods: Mods, shift: bool, ctrl: bool, key: KeyCode) -> bool {
     // A modifier key never counts as its own modifier (Ctrl alone is not "Ctrl+Ctrl").
     let is_shift = matches!(key, KeyCode::ShiftLeft | KeyCode::ShiftRight);
@@ -424,8 +509,14 @@ pub struct InputState {
     edges: Vec<Action>,
     /// Raw key presses since the UI last looked (menus, chat).
     pressed: Vec<KeyCode>,
-    /// Text typed since the UI last looked.
-    pub typed: String,
+    /// Characters typed since the UI last looked, each with the key that typed it.
+    /// The key is kept because a key can be both a character and a game key, and
+    /// only the chat line can say which it is this time; see
+    /// [`Sandbox::ui_input`](crate::game::sandbox::Sandbox).
+    pub typed: Vec<(Option<KeyCode>, char)>,
+    /// The chat line has something on it, so keys that type characters belong to
+    /// it rather than to the game.
+    typing: bool,
     pad: PadState,
 }
 
@@ -450,7 +541,8 @@ impl InputState {
             held: HashSet::new(),
             edges: Vec::new(),
             pressed: Vec::new(),
-            typed: String::new(),
+            typed: Vec::new(),
+            typing: false,
             pad: PadState::default(),
         }
     }
@@ -460,13 +552,13 @@ impl InputState {
             if self.held.insert(code) {
                 self.pressed.push(code);
                 let (shift, ctrl) = (self.shift(), self.ctrl());
+                let typing = self.typing;
                 for a in Action::ALL {
-                    if self
-                        .bindings
-                        .get(a)
-                        .iter()
-                        .any(|b| b.key == code && mods_match(b.mods, shift, ctrl, code))
-                    {
+                    if self.bindings.get(a).iter().any(|b| {
+                        b.key == code
+                            && mods_match(b.mods, shift, ctrl, code)
+                            && !(typing && yields_to_chat(*b))
+                    }) {
                         self.edges.push(a);
                     }
                 }
@@ -497,18 +589,35 @@ impl InputState {
         self.held(KeyCode::ControlLeft) || self.held(KeyCode::ControlRight)
     }
 
+    /// Tells the key table whether the chat line has something on it. While it
+    /// has, keys that type characters are the chat line's and drive nothing.
+    pub fn set_typing(&mut self, typing: bool) {
+        self.typing = typing;
+    }
+
+    /// Whether `key` with these modifiers is bound to anything, and so is the
+    /// game's rather than a character when the chat line is empty.
+    pub fn key_is_bound(&self, key: KeyCode, shift: bool, ctrl: bool) -> bool {
+        Action::ALL.into_iter().any(|a| {
+            self.bindings
+                .get(a)
+                .iter()
+                .any(|b| b.key == key && mods_match(b.mods, shift, ctrl, key))
+        })
+    }
+
     /// Whether any binding of `action` is held right now.
     pub fn action_held(&self, action: Action) -> bool {
         let (shift, ctrl) = (self.shift(), self.ctrl());
-        self.bindings
+        self.bindings.get(action).iter().any(|b| {
+            self.held(b.key)
+                && mods_match(b.mods, shift, ctrl, b.key)
+                && !(self.typing && yields_to_chat(*b))
+        }) || self
+            .pad_bindings
             .get(action)
             .iter()
-            .any(|b| self.held(b.key) && mods_match(b.mods, shift, ctrl, b.key))
-            || self
-                .pad_bindings
-                .get(action)
-                .iter()
-                .any(|b| self.pad_held.contains(b))
+            .any(|b| self.pad_held.contains(b))
     }
 
     /// Takes the raw key presses since the last call.
@@ -609,6 +718,83 @@ impl InputState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_is_the_chat_line_s_only_once_there_is_a_line() {
+        // SubSpace and Continuum have no chat mode, so the keyboard is shared. The
+        // backquote is the case the stock table actually has: repel, and a
+        // character. Which one it is depends on whether anything is typed yet.
+        let mut i = InputState::default();
+        i.key(KeyCode::Backquote, true);
+        assert!(i.action_held(Action::Repel), "empty line: the key repels");
+
+        i.set_typing(true);
+        assert!(
+            !i.action_held(Action::Repel),
+            "with something typed, the key is a character"
+        );
+        // Everything that types nothing carries on, so you fly while you talk.
+        i.key(KeyCode::ArrowUp, true);
+        i.key(KeyCode::ControlLeft, true);
+        i.key(KeyCode::Tab, true);
+        let ship = i.ship_input(&[]);
+        assert!(ship.forward && ship.gun && ship.bomb);
+
+        i.set_typing(false);
+        assert!(
+            i.action_held(Action::Repel),
+            "line sent: the key repels again"
+        );
+    }
+
+    #[test]
+    fn a_ctrl_binding_keeps_its_key_while_typing() {
+        // Ctrl and a key put no character on the line, so there is nothing to lose
+        // to: zoom stays on Ctrl+= and Ctrl+- whatever is being typed.
+        let mut i = InputState::default();
+        i.set_typing(true);
+        i.key(KeyCode::ControlLeft, true);
+        i.take_edges();
+        i.key(KeyCode::Equal, true);
+        assert!(i.take_edges().contains(&Action::ZoomIn));
+    }
+
+    #[test]
+    fn keys_that_type_are_the_ones_with_a_character_on_them() {
+        assert!(types_text(KeyCode::Backquote));
+        assert!(types_text(KeyCode::KeyQ));
+        assert!(types_text(KeyCode::Digit1));
+        assert!(types_text(KeyCode::Space));
+        assert!(!types_text(KeyCode::Tab));
+        assert!(!types_text(KeyCode::Escape));
+        assert!(!types_text(KeyCode::ArrowUp));
+        assert!(!types_text(KeyCode::F1));
+        assert!(!types_text(KeyCode::PageUp));
+        // Which is what decides whether a binding gives way.
+        let q = Binding {
+            key: KeyCode::KeyQ,
+            mods: Mods::Any,
+        };
+        assert!(yields_to_chat(q));
+        assert!(!yields_to_chat(Binding {
+            mods: Mods::Ctrl,
+            ..q
+        }));
+        assert!(!yields_to_chat(Binding {
+            key: KeyCode::F3,
+            mods: Mods::Any,
+        }));
+    }
+
+    #[test]
+    fn a_bound_key_is_known_as_one() {
+        let i = InputState::default();
+        assert!(i.key_is_bound(KeyCode::Backquote, false, false));
+        assert!(i.key_is_bound(KeyCode::Tab, false, false));
+        assert!(!i.key_is_bound(KeyCode::KeyQ, false, false));
+        assert!(!i.key_is_bound(KeyCode::Equal, false, false));
+        assert!(i.key_is_bound(KeyCode::Equal, false, true));
+    }
 
     #[test]
     fn modifiers_split_shared_keys() {
