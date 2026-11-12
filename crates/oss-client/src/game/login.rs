@@ -448,6 +448,60 @@ mod tests {
         assert!(shown.contains("<redacted>"), "and say so: {shown}");
     }
 
+    /// The merged start-up screen walked the way a person walks it: tab down the
+    /// profile typing as you go, pick a ship, and press Enter.
+    ///
+    /// This is not a substitute for somebody actually sitting at it — nobody has —
+    /// but the submit path had no coverage of its own at all, and the commit that
+    /// merged the three screens changed it. Everything here goes through
+    /// `input`, so the focus order, the typing and the Enter are exercised rather
+    /// than the fields being set from the outside.
+    #[test]
+    fn a_person_walking_the_form_arrives_at_the_right_zone() {
+        let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
+        assert_eq!(l.focused(), Field::Name, "no saved name: start at the name");
+
+        l.input(&[], "Ace", false);
+        l.input(&[KeyCode::Tab], "", false);
+        assert_eq!(l.focused(), Field::Password);
+        l.input(&[], "pw", false);
+        l.input(&[KeyCode::Tab], "", false);
+        assert_eq!(l.focused(), Field::Arena);
+        l.input(&[], "duel", false);
+        l.input(&[KeyCode::Tab], "", false);
+        assert_eq!(l.focused(), Field::Server);
+
+        // Clear what was remembered and type an address, one key at a time.
+        for _ in 0..l.server.chars().count() {
+            l.input(&[KeyCode::Backspace], "", false);
+        }
+        assert_eq!(l.server, "");
+        l.input(&[], "zone.example:5000", false);
+
+        l.input(&[KeyCode::Tab], "", false);
+        assert_eq!(l.focused(), Field::Ship);
+        l.input(&[KeyCode::ArrowRight], "", false);
+        assert_eq!(l.value(Field::Ship), "2", "right moves on a ship");
+
+        // And on to the zone list, where Enter still plays rather than being eaten.
+        l.input(&[KeyCode::Tab], "", false);
+        assert_eq!(l.focused(), Field::Zones);
+        let Some(Choice::Connect(opts)) = l.input(&[KeyCode::Enter], "", false) else {
+            panic!("Enter on the form should play");
+        };
+        assert_eq!(
+            (
+                opts.server.as_str(),
+                opts.name.as_str(),
+                opts.password.as_str(),
+                opts.arena.as_deref(),
+                opts.ship
+            ),
+            ("zone.example:5000", "Ace", "pw", Some("duel"), 1)
+        );
+        assert_eq!(l.error, None);
+    }
+
     #[test]
     fn typing_moving_and_connecting() {
         let mut l = Login::load(None, Some("Ace"), Box::new(Login::default().into_base()));
