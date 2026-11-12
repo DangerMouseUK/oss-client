@@ -120,7 +120,13 @@ impl Default for Login {
             name: String::new(),
             password: String::new(),
             arena: String::new(),
-            ship: 0,
+            // Spectator, which is what `--ship` documents for an online
+            // default, what the `base` options eight lines below already use,
+            // and what a real client sends on a first visit: you arrive
+            // watching and pick a ship once you are in. This said 0, which is
+            // Warbird, so a zone reached through this screen was asked to
+            // spawn us straight into a ship.
+            ship: SPECTATOR,
             focus: 0,
             error: None,
             base: Box::new(ServerOptions {
@@ -160,7 +166,9 @@ impl Login {
                     "server" if !v.is_empty() => l.server = v,
                     "name" => l.name = v,
                     "arena" => l.arena = v,
-                    "ship" => l.ship = parse_ship(&v).unwrap_or(0),
+                    // Same fallback as the default above: an unreadable
+                    // `ship` in the file must not quietly mean Warbird.
+                    "ship" => l.ship = parse_ship(&v).unwrap_or(SPECTATOR),
                     _ => {}
                 }
             }
@@ -480,6 +488,8 @@ mod tests {
 
         l.input(&[KeyCode::Tab], "", false);
         assert_eq!(l.focused(), Field::Ship);
+        // From a known ship, so this tests the movement and not the default.
+        l.ship = 0;
         l.input(&[KeyCode::ArrowRight], "", false);
         assert_eq!(l.value(Field::Ship), "2", "right moves on a ship");
 
@@ -515,6 +525,7 @@ mod tests {
             false,
         );
         assert_eq!(l.focused(), Field::Ship);
+        l.ship = 0;
         l.input(&[KeyCode::ArrowLeft], "x", false);
         assert_eq!(l.value(Field::Ship), "spec");
         l.input(&[KeyCode::ArrowRight, KeyCode::ArrowRight], "", false);
@@ -540,6 +551,64 @@ mod tests {
             Some(Choice::RefreshZones)
         );
         assert_eq!(l.input(&[KeyCode::Escape], "", false), Some(Choice::Quit));
+    }
+
+    /// Both ship fallbacks are spectator.
+    ///
+    /// The form used to default to 0 while the `ServerOptions` it carries
+    /// defaulted to `SPECTATOR` eight lines below -- two contradictory
+    /// defaults in one function -- and a malformed `ship` in `login.ini` fell
+    /// back to 0 as well. 0 is Warbird, so reaching a zone through this
+    /// screen asked it to spawn us straight into a ship, while
+    /// `--server --name` asked to spectate. A capture of a real client shows
+    /// it spectating on a first visit.
+    #[test]
+    fn an_unset_or_unreadable_ship_means_spectator_not_warbird() {
+        let base = || Login::default().base;
+        assert_eq!(Login::default().ship, SPECTATOR, "the form's own default");
+        assert_eq!(
+            Login::default().base.ship,
+            SPECTATOR,
+            "and the options it carries, which already agreed"
+        );
+
+        let dir = std::env::temp_dir().join(format!("oss-login-ship-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let ini = dir.join("login.ini");
+
+        std::fs::write(
+            &ini,
+            "ship = not-a-ship
+",
+        )
+        .expect("write");
+        assert_eq!(
+            Login::load(Some(&ini), None, base()).ship,
+            SPECTATOR,
+            "an unreadable ship must not quietly mean Warbird"
+        );
+
+        // A ship the player really did choose still survives a round trip.
+        std::fs::write(
+            &ini,
+            "ship = 3
+",
+        )
+        .expect("write");
+        assert_eq!(
+            Login::load(Some(&ini), None, base()).ship,
+            2,
+            "ship 3 is index 2"
+        );
+        std::fs::write(
+            &ini,
+            "ship = spec
+",
+        )
+        .expect("write");
+        assert_eq!(Login::load(Some(&ini), None, base()).ship, SPECTATOR);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
