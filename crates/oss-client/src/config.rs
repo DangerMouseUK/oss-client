@@ -332,7 +332,7 @@ fn binding_name(b: &Binding) -> String {
     format!("{prefix}{:?}", b.key)
 }
 
-fn key_from_name(name: &str) -> Option<KeyCode> {
+pub(crate) fn key_from_name(name: &str) -> Option<KeyCode> {
     KEYS.iter()
         .copied()
         .find(|k| format!("{k:?}").eq_ignore_ascii_case(name))

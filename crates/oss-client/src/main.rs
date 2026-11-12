@@ -49,6 +49,8 @@ Options:
   --mute                    No sound
   --settings                Open the settings screen at start (sandbox)
   --screen <menu|helpN>     Open the menu, or help page N, at start (testing)
+  --press <secs>:<key>      Press this key <secs> in, by its settings-file name
+                            (Enter, Tab, ArrowDown...; repeatable; testing)
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
@@ -110,6 +112,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut replay = None;
     let mut open_settings = false;
     let mut open_screen = None;
+    let mut press: Vec<(f32, winit::keyboard::KeyCode)> = Vec::new();
     let mut directories = Vec::new();
     let mut open_zones = false;
     let mut security = None;
@@ -191,6 +194,19 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--record" => record = Some(PathBuf::from(value("--record")?)),
             "--replay" => replay = Some(PathBuf::from(value("--replay")?)),
             "--settings" => open_settings = true,
+            "--press" => {
+                let arg = value("--press")?;
+                let (at, name) = arg
+                    .split_once(':')
+                    .ok_or("--press needs <seconds>:<key>, e.g. 3:Enter")?;
+                let at: f32 = at
+                    .trim()
+                    .parse()
+                    .map_err(|_| "--press needs <seconds>:<key>, e.g. 3:Enter")?;
+                let key = config::key_from_name(name.trim())
+                    .ok_or_else(|| format!("--press: no key called {}", name.trim()))?;
+                press.push((at, key));
+            }
             "--screen" => {
                 let name = value("--screen")?;
                 open_screen = Some(match name.as_str() {
@@ -217,6 +233,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     }
     // Soonest last, so the game screen pops them off the end as the clock passes.
     send.sort_by(|a, b| b.0.total_cmp(&a.0));
+    // Soonest first: the app walks this one forwards.
+    press.sort_by(|a, b| a.0.total_cmp(&b.0));
     if let Some(path) = replay {
         if sandbox || server.is_some() {
             return Err("--replay can't be combined with --sandbox or --server".into());
@@ -231,6 +249,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             screenshot,
             screenshot_at,
             autopilot,
+            press: press.clone(),
             send: send.clone(),
             mute,
             volume: 60,
@@ -300,6 +319,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         screenshot,
         screenshot_at,
         autopilot,
+        press,
         send,
         mute,
         volume: 60,
@@ -419,6 +439,27 @@ mod tests {
             (z.server.as_str(), z.freq, z.record.is_some()),
             ("x:1", Some(3), true)
         );
+    }
+
+    /// `--press` exists so the start-up screen can be driven at all: `--server`
+    /// goes straight round it and `--send` only types once you are in a game.
+    #[test]
+    fn scripted_key_presses_parse_and_sort() {
+        let o = parse("--press 4:Enter --press 2:ArrowDown --press 3:Tab")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            o.press,
+            vec![
+                (2.0, winit::keyboard::KeyCode::ArrowDown),
+                (3.0, winit::keyboard::KeyCode::Tab),
+                (4.0, winit::keyboard::KeyCode::Enter),
+            ],
+            "soonest first, because the app walks the list forwards"
+        );
+        assert!(parse("--press Enter").is_err(), "no time");
+        assert!(parse("--press soon:Enter").is_err(), "time is not a number");
+        assert!(parse("--press 3:Nonesuch").is_err(), "no such key");
     }
 
     #[test]
