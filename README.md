@@ -89,8 +89,8 @@ Graphics and sounds are looked up, file by file, in this order:
 
 1. `--assets-dir <dir>` / `OSS_ASSETS_DIR` (your own folder; it may hold only some files)
 2. `--continuum-dir <dir>` / `OSS_CONTINUUM_DIR` (a Continuum install)
-3. `assets/classic` next to the program (and the repository's `assets/classic` in
-   development builds)
+3. `assets/classic` next to the program (and the repository's `assets/classic`, for a
+   binary built from the checkout — any profile, so `cargo run --release` works too)
 4. a Continuum install found automatically (Steam or standard paths)
 
 Run the sandbox on the built-in arena, or on any `.lvl` map:

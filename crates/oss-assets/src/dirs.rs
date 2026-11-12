@@ -3,7 +3,7 @@
 //! 1. `--assets-dir` / `OSS_ASSETS_DIR` (a folder of your own; may hold only some files)
 //! 2. `--continuum-dir` / `OSS_CONTINUUM_DIR` (a Continuum install)
 //! 3. `assets/classic` next to the executable
-//! 4. the repository's `assets/classic` (development builds)
+//! 4. the repository's `assets/classic`, for a binary built from the checkout
 //! 5. an automatically discovered Continuum install
 //!
 //! Each file is taken from the first folder that has it, so a folder early in the list
@@ -26,7 +26,10 @@ pub struct AssetSearch {
     pub assets_dir: Option<PathBuf>,
     /// `--continuum-dir`.
     pub continuum_dir: Option<PathBuf>,
-    /// The repository's bundled folder, for development builds.
+    /// The repository's bundled folder, for a binary built from the checkout.
+    /// Set it in every profile: a release build run from the repository needs it
+    /// just as much as a debug one, since neither copies the folder next to the
+    /// executable.
     pub dev_dir: Option<PathBuf>,
     /// Also try to find a Continuum install automatically.
     pub discover_install: bool,
