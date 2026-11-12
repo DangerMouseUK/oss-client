@@ -277,6 +277,10 @@ impl Online {
                     }
                 }
                 SessionEvent::LoggedIn => {
+                    // Logged, because its absence is a diagnostic hole: without it a
+                    // log cannot distinguish "the zone refused us" from "it took us
+                    // and dropped us later".
+                    log::info!("logged in to {}", self.server);
                     self.status = "Entering arena...".into();
                     // Continuum takes the zone's news on login, and only when its
                     // checksum differs from the copy it kept.
@@ -367,17 +371,26 @@ impl Online {
                         log::warn!("couldn't cache the zone news: {e}");
                     }
                 }
-                SessionEvent::Closed(reason) if self.error.is_none() => {
-                    let handshake = matches!(reason, oss_session::Reason::HandshakeFailed(_));
-                    self.error = Some(if handshake && self.pinned {
-                        format!(
-                            "{} didn't prove the OpenSec key on record. If the zone really \
+                SessionEvent::Closed(reason) => {
+                    // Logged before anything else is decided. A disconnect used to
+                    // reach only the login screen, so the log simply stopped
+                    // mid-session with no reason in it -- which looks complete, and
+                    // is worse than no log at all. Diagnosing one meant
+                    // screenshotting the window: no use to anyone reading the log
+                    // afterwards, and impossible headless.
+                    log::warn!("disconnected from {}: {reason:?}", self.server);
+                    if self.error.is_none() {
+                        let handshake = matches!(reason, oss_session::Reason::HandshakeFailed(_));
+                        self.error = Some(if handshake && self.pinned {
+                            format!(
+                                "{} didn't prove the OpenSec key on record. If the zone really \
                              changed its key, remove its line from known_servers.txt.",
-                            self.server
-                        )
-                    } else {
-                        format!("Disconnected ({reason:?})")
-                    });
+                                self.server
+                            )
+                        } else {
+                            format!("Disconnected ({reason:?})")
+                        });
+                    }
                 }
                 // Keep chat that arrives before the game screen exists; see
                 // `early_chat`. `ready()` needs the arena, its settings and its
