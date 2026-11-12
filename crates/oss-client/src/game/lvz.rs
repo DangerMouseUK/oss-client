@@ -173,6 +173,21 @@ pub struct Lvz {
     pub art_overrides: HashMap<String, Image>,
     /// Set when `art_overrides` changed and the atlas needs rebuilding.
     pub art_changed: bool,
+    /// Every non-object section seen in this arena's `.lvz` files, by lowercase
+    /// name. Kept across files because an image definition may name a file that
+    /// another `.lvz` supplies; dropped by [`Lvz::clear`] with the rest.
+    files: HashMap<String, Vec<u8>>,
+    /// Image definitions whose file has not arrived yet: (slot, request).
+    unresolved: Vec<(usize, PendingImage)>,
+}
+
+/// An image definition waiting for the `.lvz` that carries its file.
+struct PendingImage {
+    /// Lowercase file name the definition asked for.
+    file: String,
+    x_count: u32,
+    y_count: u32,
+    anim: u32,
 }
 
 impl Lvz {
@@ -180,7 +195,6 @@ impl Lvz {
     /// added; problems with single images are logged and skipped.
     pub fn add_file(&mut self, name: &str, bytes: &[u8], clock: f32) -> Result<usize, String> {
         let file = LvzFile::parse(bytes).map_err(|e| format!("{name}: {e}"))?;
-        let mut files: HashMap<String, Vec<u8>> = HashMap::new();
         for s in file.sections.iter().filter(|s| !s.is_object_section()) {
             match s.data() {
                 Ok(d) => {
@@ -197,7 +211,7 @@ impl Lvz {
                             Err(e) => log::warn!("{name}: {file_name}: {e}"),
                         }
                     }
-                    files.insert(file_name, d);
+                    self.files.insert(file_name, d);
                 }
                 Err(e) => log::warn!("{name}: {}: {e}", String::from_utf8_lossy(&s.name)),
             }
@@ -222,42 +236,30 @@ impl Lvz {
                 let file_name = String::from_utf8_lossy(&def.name).to_ascii_lowercase();
                 let anim = def.animation_time.max(0) as u32;
                 let (xc, yc) = (def.x_count.max(1) as u32, def.y_count.max(1) as u32);
-                let fitted = match files.get(&file_name).map(|d| decode_image(d)) {
-                    Some(Ok(mut img)) => {
-                        // Pure black is transparent in every LVZ image, as in Continuum.
-                        img.key_black_transparent();
-                        let (w, h) = (img.width, img.height);
-                        let fitted = fit_sheet(img, xc, yc, anim);
-                        if fitted.is_none() {
-                            log::warn!("{name}: {file_name} ({w}x{h}) has frames too large");
-                        }
-                        fitted
-                    }
-                    Some(Err(e)) => {
-                        log::warn!("{name}: {file_name}: {e}");
-                        None
-                    }
-                    None => {
-                        log::warn!("{name}: image {file_name} isn't in the file");
-                        None
-                    }
+                let want = PendingImage {
+                    file: file_name,
+                    x_count: xc,
+                    y_count: yc,
+                    anim,
                 };
-                match fitted {
-                    Some((img, layout)) => {
-                        self.pending.push((self.images.len(), img));
-                        self.images.push(layout);
-                    }
-                    // Keep the slot so later image numbers still line up.
-                    None => self.images.push(LvzImage {
-                        texture: None,
-                        width: 0,
-                        height: 0,
-                        frame_w: 0,
-                        frame_h: 0,
-                        frames: 0,
-                        cols: 1,
-                        anim,
-                    }),
+                let slot = self.images.len();
+                // Keep the slot either way so later image numbers still line up.
+                self.images.push(LvzImage {
+                    texture: None,
+                    width: 0,
+                    height: 0,
+                    frame_w: 0,
+                    frame_h: 0,
+                    frames: 0,
+                    cols: 1,
+                    anim,
+                });
+                if !self.resolve(slot, &want, name) {
+                    // The file may be in a `.lvz` that has not arrived: a pack
+                    // commonly splits objects and graphics into separate files, and
+                    // the object file is often listed first. Try again as each
+                    // later file lands.
+                    self.unresolved.push((slot, want));
                 }
             }
             for o in &section.objects {
@@ -318,6 +320,8 @@ impl Lvz {
                 });
             }
         }
+        // This file's own sections may complete images an earlier one asked for.
+        self.resolve_waiting(name);
         Ok(self.objects.len() - before)
     }
 
@@ -325,12 +329,77 @@ impl Lvz {
     /// standard sheets they replaced. The GPU textures go back to the renderer on the
     /// next [`Lvz::upload`]; before this existed they stayed on the GPU for the rest
     /// of the session every time the player changed arena.
+    /// Decodes `want` into image slot `slot`, if its file has been seen. Returns
+    /// whether it is now resolved.
+    fn resolve(&mut self, slot: usize, want: &PendingImage, from: &str) -> bool {
+        let Some(data) = self.files.get(&want.file) else {
+            return false;
+        };
+        let mut img = match decode_image(data) {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("{from}: {}: {e}", want.file);
+                // Decoding will not start working; stop asking.
+                return true;
+            }
+        };
+        // Pure black is transparent in every LVZ image, as in Continuum.
+        img.key_black_transparent();
+        let (w, h) = (img.width, img.height);
+        match fit_sheet(img, want.x_count, want.y_count, want.anim) {
+            Some((img, layout)) => {
+                self.pending.push((slot, img));
+                if let Some(s) = self.images.get_mut(slot) {
+                    *s = layout;
+                }
+            }
+            None => log::warn!("{from}: {} ({w}x{h}) has frames too large", want.file),
+        }
+        true
+    }
+
+    /// Retries every image still waiting for its file. Called as each `.lvz` lands,
+    /// so a pack that defines objects in one file and their graphics in another
+    /// resolves whichever order the two arrive in.
+    fn resolve_waiting(&mut self, from: &str) {
+        if self.unresolved.is_empty() {
+            return;
+        }
+        for (slot, want) in std::mem::take(&mut self.unresolved) {
+            if !self.resolve(slot, &want, from) {
+                self.unresolved.push((slot, want));
+            }
+        }
+    }
+
+    /// Image definitions whose file has not turned up in any `.lvz` yet. Non-zero
+    /// after the last file of an arena means those graphics are genuinely missing.
+    pub fn unresolved_images(&self) -> usize {
+        self.unresolved.len()
+    }
+
+    /// The files those definitions are still waiting for, without repeats. Worth
+    /// naming: after the last file of an arena these are the images the zone
+    /// references and does not ship.
+    pub fn unresolved_image_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .unresolved
+            .iter()
+            .map(|(_, w)| w.file.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     pub fn clear(&mut self) {
         self.freed
             .extend(self.images.iter().filter_map(|i| i.texture));
         self.images.clear();
         self.objects.clear();
         self.pending.clear();
+        self.files.clear();
+        self.unresolved.clear();
         if !self.art_overrides.is_empty() {
             self.art_overrides.clear();
             self.art_changed = true;
@@ -544,6 +613,78 @@ mod tests {
             ],
         }
         .to_bytes()
+    }
+
+    /// A real pack splits objects and graphics into separate `.lvz` files, and the
+    /// object file is often listed first. Resolving an image only inside the file
+    /// that declared it lost the lot: against SSCJ MetalGear CTF that was 246
+    /// warnings over 65 images -- the zone's scoreboard, timer and stat overlay.
+    #[test]
+    fn an_image_may_live_in_another_lvz() {
+        // One file holds only the object section, the other only the graphic.
+        let objects_only = LvzFile {
+            sections: vec![Section::objects(&ObjectSection {
+                version: *b"CLV2",
+                objects: vec![ObjectData::map(7, 8000, 8100)],
+                images: vec![ImageDef {
+                    x_count: 2,
+                    y_count: 1,
+                    animation_time: 100,
+                    name: b"Sheet.BMP".to_vec(),
+                }],
+            })],
+        }
+        .to_bytes();
+        let graphics_only = LvzFile {
+            sections: vec![Section::new(b"sheet.bmp", 0, &sheet())],
+        }
+        .to_bytes();
+
+        // Either order must end with the image resolved: the graphics file can
+        // land before the object file or after it.
+        for (first, second, order) in [
+            (&objects_only, &graphics_only, "objects first"),
+            (&graphics_only, &objects_only, "graphics first"),
+        ] {
+            let mut lvz = Lvz::default();
+            lvz.add_file("obj.lvz", first, 0.0).unwrap();
+            lvz.add_file("gfx.lvz", second, 0.0).unwrap();
+            assert_eq!(lvz.unresolved_images(), 0, "{order}: still waiting");
+            assert_eq!(lvz.images.len(), 1, "{order}");
+            let img = &lvz.images[0];
+            assert_eq!((img.width, img.height), (4, 2), "{order}: not decoded");
+            assert_eq!(img.frames, 2, "{order}");
+            assert!(
+                lvz.pending.iter().any(|(i, _)| *i == 0),
+                "{order}: not queued for upload"
+            );
+        }
+    }
+
+    /// An image nothing supplies stays counted, so the caller can say so.
+    #[test]
+    fn a_missing_image_is_reported_not_forgotten() {
+        let objects_only = LvzFile {
+            sections: vec![Section::objects(&ObjectSection {
+                version: *b"CLV2",
+                objects: vec![ObjectData::map(7, 8000, 8100)],
+                images: vec![ImageDef {
+                    x_count: 1,
+                    y_count: 1,
+                    animation_time: 0,
+                    name: b"nowhere.bmp".to_vec(),
+                }],
+            })],
+        }
+        .to_bytes();
+        let mut lvz = Lvz::default();
+        lvz.add_file("obj.lvz", &objects_only, 0.0).unwrap();
+        assert_eq!(lvz.unresolved_images(), 1);
+        // The slot is still there, so later image numbers line up.
+        assert_eq!(lvz.images.len(), 1);
+        // And an arena change forgets it rather than carrying it over.
+        lvz.clear();
+        assert_eq!(lvz.unresolved_images(), 0);
     }
 
     #[test]
