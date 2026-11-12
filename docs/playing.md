@@ -3,6 +3,12 @@
 Everything the client does at the keyboard, for someone who knows SubSpace and for someone
 who does not. The defaults are Continuum's, so a veteran should not have to read this.
 
+**The keys below are those defaults.** Change one on the settings screen and this page
+cannot know: **F1 in the game is the one place that shows the keys you actually have**,
+because it reads them out of the table rather than having them written down beside it.
+That is how Continuum's own help works, and it is why this page says "the defaults"
+rather than "the keys".
+
 ## Flying
 
 | Key | Does |
