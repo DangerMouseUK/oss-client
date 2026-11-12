@@ -269,6 +269,9 @@ impl Sandbox {
             .unwrap_or_else(|| "(public)".into());
         net.flush();
         let files = std::mem::take(&mut net.files);
+        // Anything the zone said while the connecting screen was up, which had
+        // nowhere to show it.
+        let early_chat = net.take_early_chat();
         let mut s = Self::build(
             renderer,
             dir,
@@ -282,6 +285,14 @@ impl Sandbox {
         )?;
         for (name, data) in files {
             s.load_lvz(&name, &data);
+        }
+        for ev in early_chat {
+            if let SessionEvent::Chat {
+                kind, name, text, ..
+            } = ev
+            {
+                s.chat_message(kind, name, text);
+            }
         }
         s.spectating = spectating;
         s.spec_cam = (8192.0, 8192.0);

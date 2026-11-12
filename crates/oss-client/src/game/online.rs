@@ -75,6 +75,14 @@ pub struct Online {
     pub attach: Option<String>,
     /// LVZ files received and not yet loaded by the game: (name, bytes).
     pub files: Vec<(String, Vec<u8>)>,
+    /// Chat that arrived before there was a game screen to show it in.
+    ///
+    /// While the client is still connecting, `pump()` is driven by the connecting
+    /// screen, which has nowhere to put chat and drops what `pump()` returns. The
+    /// zone has already said things by then -- a login that answers
+    /// `NO_SCORES` reports it there -- so those lines are kept here and the game
+    /// takes them with [`Online::take_early_chat`] when it starts.
+    early_chat: Vec<SessionEvent>,
     /// OpenSec keys on record, and whether this server's was already known.
     known: KnownServers,
     pinned: bool,
@@ -153,6 +161,7 @@ impl Online {
             follow: opts.follow.clone(),
             attach: opts.attach.clone(),
             files: Vec::new(),
+            early_chat: Vec::new(),
             known,
             pinned: pin.is_some(),
             server: opts.server.clone(),
@@ -187,6 +196,7 @@ impl Online {
             follow: recorder,
             attach: None,
             files: Vec::new(),
+            early_chat: Vec::new(),
             known: KnownServers::default(),
             pinned: false,
             server: String::new(),
@@ -341,6 +351,11 @@ impl Online {
                         format!("Disconnected ({reason:?})")
                     });
                 }
+                // Keep chat that arrives before the game screen exists; see
+                // `early_chat`. `ready()` needs the arena, its settings and its
+                // files, so anything the zone says during login would otherwise
+                // be dropped by the connecting screen.
+                SessionEvent::Chat { .. } if !self.ready() => self.early_chat.push(ev.clone()),
                 _ => {}
             }
             out.push(ev);
@@ -360,6 +375,13 @@ impl Online {
             && self.map.is_some()
             && self.session.settings().is_some()
             && !self.session.downloads_pending()
+    }
+
+    /// Chat the zone sent before the game screen existed, in arrival order, taken
+    /// once. The game shows these as its first lines so nothing the zone said
+    /// during login is lost.
+    pub fn take_early_chat(&mut self) -> Vec<SessionEvent> {
+        std::mem::take(&mut self.early_chat)
     }
 
     pub fn flush(&mut self) {
