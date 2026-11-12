@@ -134,6 +134,9 @@ struct Running {
     /// The window can't be seen (minimised/covered); Windows then stops sending
     /// redraws, so the game is driven from `about_to_wait` without drawing.
     occluded: bool,
+    /// The login form to come back to when the player leaves the game, as it was
+    /// when they went in. `None` when the run never passed through it.
+    front_end: Option<Login>,
 }
 
 struct App {
@@ -235,6 +238,49 @@ impl App {
         log::error!("{msg}");
         self.error = Some(msg);
         event_loop.exit();
+    }
+
+    /// Leaves the game for the front end, which is where SubSpace and Continuum
+    /// put you when you pick Quit on the menu: the program only ends when you quit
+    /// the front end itself.
+    ///
+    /// The form comes back as it was on the way in. A run that started straight in
+    /// a zone (`--server`) or in the sandbox never saw one, so one is made from the
+    /// settings and from what that run was playing -- the originals always have a
+    /// front end to come back to, and vanishing is the thing being fixed.
+    fn back_to_front_end(&mut self) -> Result<(), String> {
+        let Some(run) = self.running.as_mut() else {
+            return Ok(());
+        };
+        let mut login = match run.front_end.take() {
+            Some(login) => login,
+            None => {
+                let mut l = Login::load(
+                    self.options.login_file.as_deref(),
+                    self.options.player_name.as_deref(),
+                );
+                if let Mode::Zone(opts) = &self.options.mode {
+                    l.server.clone_from(&opts.server);
+                    l.name.clone_from(&opts.name);
+                    l.arena = opts.arena.clone().unwrap_or_default();
+                    l.ship = opts.ship;
+                }
+                l
+            }
+        };
+        login.error = None;
+        let (art, atlas) = load_art(&self.dir, &mut run.renderer)?;
+        run.screen = Screen::Login(Box::new(LoginScreen {
+            login,
+            art,
+            atlas,
+            browser: None,
+        }));
+        run.window.set_title("Open SubSpace");
+        self.settings = None;
+        self.input.clear();
+        run.window.request_redraw();
+        Ok(())
     }
 
     fn audio(&self) -> Option<Audio> {
@@ -372,6 +418,7 @@ impl ApplicationHandler for App {
             window,
             renderer,
             screen,
+            front_end: None,
             scale,
             started: std::time::Instant::now(),
             captured: false,
@@ -625,6 +672,9 @@ impl App {
             let Screen::Connecting(conn) = std::mem::replace(&mut run.screen, Screen::Empty) else {
                 unreachable!()
             };
+            // Kept for the way back: leaving the game returns to this form.
+            let conn = *conn;
+            run.front_end = conn.login;
             let audio = if audio_wanted {
                 Audio::new(&self.dir, self.options.volume)
             } else {
@@ -662,9 +712,11 @@ impl App {
                     let mut idle = InputState::new(Default::default());
                     game.update(&mut idle);
                 }
-                if game.quit {
+                if game.leave {
                     game.disconnect();
-                    event_loop.exit();
+                    if let Err(e) = self.back_to_front_end() {
+                        return self.fail(event_loop, e);
+                    }
                     return;
                 }
                 if std::mem::take(&mut game.open_settings) {

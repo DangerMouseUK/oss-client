@@ -145,7 +145,12 @@ pub struct Sandbox {
     pub(super) show_fps: bool,
     pub(super) big_radar: bool,
     fps: FpsCounter,
-    pub quit: bool,
+    /// The player asked to leave. In SubSpace and Continuum the menu's Q goes back
+    /// to the front end rather than ending the program, and it waits until you have
+    /// half your energy, so that quitting cannot dodge a death.
+    leaving: bool,
+    /// The wait is over: the app takes you back to the front end.
+    pub leave: bool,
     /// The player chose Options in the menu; the app opens the settings screen.
     pub open_settings: bool,
     /// The player asked for a screenshot; the app saves the next frame.
@@ -387,7 +392,8 @@ impl Sandbox {
             show_fps: false,
             big_radar: false,
             fps: FpsCounter::default(),
-            quit: false,
+            leaving: false,
+            leave: false,
             open_settings: false,
             screenshot_request: false,
             scale: scale.max(1),
@@ -716,6 +722,9 @@ impl Sandbox {
 
         self.pump_network();
 
+        if self.leaving && self.can_leave() {
+            self.leave = true;
+        }
         self.acc += dt;
         self.sync_clock();
         let mut ticks = 0;
@@ -1266,6 +1275,13 @@ impl Sandbox {
                 self.show_status();
                 true
             }
+            // Ours, and the same thing in a zone as offline: leave for the front
+            // end, exactly as Q on the menu does. Neither the original client nor
+            // ASSS has a `?quit`, so no zone is waiting for one.
+            "?quit" if rest.is_empty() => {
+                self.request_leave();
+                true
+            }
             "?news" if rest.is_empty() => {
                 if self.news.is_empty() {
                     self.message("This zone has no news.", color::YELLOW);
@@ -1342,7 +1358,7 @@ impl Sandbox {
                     _ => self.message("Usage: ?prize <1-28 or name, e.g. Thor>", color::YELLOW),
                 }
             }
-            Some("?quit") => self.quit = true,
+            Some("?quit") => self.request_leave(),
             Some(c) if c.starts_with('?') => {
                 self.message(format!("Unknown command {c}; try ?help"), color::YELLOW)
             }
@@ -2726,10 +2742,39 @@ impl Sandbox {
         }
     }
 
+    /// Q on the menu, or `?quit`: leave the game and go back to the front end.
+    ///
+    /// Not out of the program -- that is the front end's own Quit. nullspace does
+    /// the same, returning its `Run` loop to `GameScreen::MainMenu` when `Game`
+    /// ends, and only the main menu breaks the loop.
+    fn request_leave(&mut self) {
+        if self.leaving {
+            return;
+        }
+        self.leaving = true;
+        if !self.can_leave() {
+            // The original client's own wording, shown while it waits
+            // (`SUBSPACE.EXE`, and nullspace's `Game::Update`).
+            self.message("Exiting game...", color::YELLOW);
+        }
+    }
+
+    /// Whether leaving is allowed yet: half your energy, as both originals ask, so
+    /// that a losing fight cannot be quit out of. Spectators and a dead ship may go
+    /// at once, and offline there is nobody to dodge.
+    fn can_leave(&self) -> bool {
+        let me = self.me();
+        may_leave(
+            self.online() && !self.spectating && me.is_alive(),
+            me.energy_points(),
+            me.stats.max_energy as i32,
+        )
+    }
+
     /// One of the menu's own keys, or `false` for "any other key".
     fn menu_key(&mut self, ch: char) -> bool {
         match ch.to_ascii_lowercase() {
-            'q' => self.quit = true,
+            'q' => self.request_leave(),
             'o' => self.open_settings = true,
             's' if self.online() => self.request_ship(SPECTATOR),
             'n' if !self.news.is_empty() => {
@@ -2844,6 +2889,17 @@ impl Sandbox {
             footer,
         );
     }
+}
+
+/// Whether a player may leave the game yet.
+///
+/// Both originals make you wait until half your energy is back before the menu's Q
+/// takes effect, so that a fight being lost cannot be quit out of: nullspace's
+/// `Game::Update` tests `self->energy >= half_energy` with `half_energy` half the
+/// ship's maximum, and shows "Exiting game..." until then. `in_a_fight` is false
+/// for a spectator, a dead ship and an offline game, where there is nobody to dodge.
+fn may_leave(in_a_fight: bool, energy: i32, max_energy: i32) -> bool {
+    !in_a_fight || energy * 2 >= max_energy
 }
 
 /// The help pages, laid out as the original client's are: a key list first, then
@@ -2985,9 +3041,22 @@ impl FpsCounter {
 
 #[cfg(test)]
 mod tests {
+    use super::may_leave;
     use super::spawn_area;
     use super::view::lerp_direction;
     use oss_proto::settings::{ClientSettings, SpawnPosition};
+
+    #[test]
+    fn quitting_waits_for_half_your_energy() {
+        // In a fight: half the ship's maximum, which is nullspace's test.
+        assert!(!may_leave(true, 499, 1000));
+        assert!(may_leave(true, 500, 1000));
+        assert!(may_leave(true, 1000, 1000));
+        // Spectating, dead or offline: nothing to dodge, so go at once.
+        assert!(may_leave(false, 0, 1000));
+        // A ship with no maximum at all must not trap the player in the game.
+        assert!(may_leave(true, 0, 0));
+    }
 
     #[test]
     fn team_spawns_and_radar_mode_halves() {
