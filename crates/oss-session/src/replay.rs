@@ -23,6 +23,37 @@ pub struct Recorder {
     buf: Vec<u8>,
 }
 
+/// What replaces a recorded password. A marker rather than zeros, so a reader of
+/// the file can tell the field was redacted instead of wondering whether the
+/// player left it blank. Exactly [`PASSWORD_LEN`] bytes, so nothing shifts.
+const PASSWORD_MARKER: &[u8; 32] = b"[password redacted on recording]";
+
+/// Offset and length of the password in a login packet. `0x09` and `0x24` share
+/// the prefix: kind, flags, then a 32-byte name, then the password.
+const PASSWORD_AT: usize = 34;
+const PASSWORD_LEN: usize = 32;
+
+/// A copy of `data` with the password blanked, when `data` is a login.
+///
+/// A replay is the natural thing to attach to a bug report or hand to someone
+/// else, and the login packet carries the password as the client sent it -- in
+/// clear, for a VIE login or a Continuum one without a biller identity. Recording
+/// it verbatim turns a debugging aid into a credential leak, and nothing about
+/// the file would warn anyone. Nothing replays a login, so removing it costs the
+/// recording nothing.
+fn redacted_login(data: &[u8]) -> Option<Vec<u8>> {
+    let kind = *data.first()?;
+    if kind != oss_proto::c2s::kind::LOGIN && kind != oss_proto::c2s::kind::CONT_LOGIN {
+        return None;
+    }
+    if data.len() < PASSWORD_AT + PASSWORD_LEN {
+        return None;
+    }
+    let mut safe = data.to_vec();
+    safe[PASSWORD_AT..PASSWORD_AT + PASSWORD_LEN].copy_from_slice(PASSWORD_MARKER);
+    Some(safe)
+}
+
 impl Recorder {
     /// Starts a recording into `out` at session time `now_ms`, with `meta` key/value
     /// pairs (zone, arena, player, client, started...).
@@ -77,7 +108,10 @@ impl Recorder {
     }
 
     pub fn client_packet(&mut self, now_ms: u64, data: &[u8]) {
-        self.write(RecordKind::ClientPacket, now_ms, data);
+        match redacted_login(data) {
+            Some(safe) => self.write(RecordKind::ClientPacket, now_ms, &safe),
+            None => self.write(RecordKind::ClientPacket, now_ms, data),
+        }
     }
 
     pub fn file(&mut self, now_ms: u64, name: &str, contents: &[u8]) {
@@ -163,4 +197,53 @@ impl Player {
 /// Whether a replay file is compressed (for information only; both kinds play).
 pub fn is_compressed(data: &[u8]) -> bool {
     data.len() >= 6 && u16::from_le_bytes([data[4], data[5]]) & FLAG_COMPRESSED != 0
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::{PASSWORD_AT, PASSWORD_LEN, PASSWORD_MARKER, redacted_login};
+
+    fn login(kind: u8, len: usize) -> Vec<u8> {
+        let mut p = vec![0u8; len];
+        p[0] = kind;
+        p[PASSWORD_AT..PASSWORD_AT + PASSWORD_LEN]
+            .copy_from_slice(b"hunter2hunter2hunter2hunter2hunt");
+        p
+    }
+
+    #[test]
+    fn a_recorded_login_does_not_carry_the_password() {
+        // Both forms: the 101-byte VIE 0x09 and the 165-byte Continuum 0x24.
+        for (kind, len) in [(0x09u8, 101usize), (0x24, 165)] {
+            let raw = login(kind, len);
+            let safe = redacted_login(&raw).expect("a login should be redacted");
+            assert_eq!(safe.len(), raw.len(), "length must not shift");
+            assert_eq!(
+                &safe[PASSWORD_AT..PASSWORD_AT + PASSWORD_LEN],
+                PASSWORD_MARKER
+            );
+            assert!(
+                !safe.windows(7).any(|w| w == b"hunter2"),
+                "the password survived in a {kind:#04x} login"
+            );
+            // Everything outside the field is untouched, so the replay is unchanged.
+            assert_eq!(safe[..PASSWORD_AT], raw[..PASSWORD_AT]);
+            assert_eq!(
+                safe[PASSWORD_AT + PASSWORD_LEN..],
+                raw[PASSWORD_AT + PASSWORD_LEN..]
+            );
+        }
+    }
+
+    #[test]
+    fn other_packets_are_recorded_untouched() {
+        // Not a login: left alone, so nothing else in the recording changes.
+        let mut position = vec![0u8; 101];
+        position[0] = 0x03;
+        assert!(redacted_login(&position).is_none());
+        // A login too short to hold the field is left alone rather than panicking;
+        // the data comes off the network and may be anything.
+        assert!(redacted_login(&[0x24, 0x00, 0x01]).is_none());
+        assert!(redacted_login(&[]).is_none());
+    }
 }
