@@ -10,7 +10,9 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use oss_net::{Config, Connection, Event as NetEvent, VieClientHandshake};
 use oss_proto::directory::{ZoneList, ZoneListRequest};
@@ -181,22 +183,79 @@ fn any_for(addr: SocketAddr) -> SocketAddr {
     }
 }
 
+/// One answered ping, timed when the datagram arrived.
+struct Pong {
+    from: SocketAddr,
+    players: u32,
+    ping_ms: u32,
+}
+
 /// Pings zones on their game port + 1 (population and latency), without blocking.
+///
+/// A reader thread owns the receiving half and stamps each pong as it lands.
+/// Polling the socket from the caller's loop instead made the figure
+/// `round trip + however long until the caller next looked`, which is a whole
+/// frame in a client that polls once per frame. That is not just an offset: pongs
+/// arriving inside one frame all get the same timestamp, so zones that genuinely
+/// differ are shown as equal. Measured against live zones, two groups 32 ms apart
+/// (78 ms and 110 ms) were both displayed as 93 ms.
 pub struct ZonePinger {
     socket: UdpSocket,
     start: Instant,
     /// Ping port per zone (index into the list given to [`ZonePinger::ping`]).
     targets: Vec<Option<SocketAddr>>,
+    /// Filled by the reader thread, drained by [`ZonePinger::update`].
+    inbox: Arc<Mutex<Vec<Pong>>>,
+    /// Cleared on drop so the reader stops.
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for ZonePinger {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+    }
 }
 
 impl ZonePinger {
     pub fn new() -> std::io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0)))?;
-        socket.set_nonblocking(true)?;
+        let reader = socket.try_clone()?;
+        // A timeout rather than a blocking read, so the thread notices `running`
+        // going false and ends instead of outliving the browser.
+        reader.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let start = Instant::now();
+        let inbox: Arc<Mutex<Vec<Pong>>> = Arc::default();
+        let running = Arc::new(AtomicBool::new(true));
+        {
+            let (inbox, running) = (Arc::clone(&inbox), Arc::clone(&running));
+            std::thread::Builder::new()
+                .name("zone-pinger".into())
+                .spawn(move || {
+                    let mut buf = [0u8; 64];
+                    while running.load(Ordering::Relaxed) {
+                        let Ok((8, from)) = reader.recv_from(&mut buf) else {
+                            continue;
+                        };
+                        // Stamped here, the moment it arrived.
+                        let now = start.elapsed().as_millis() as u32;
+                        let players = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                        let sent = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                        if let Ok(mut q) = inbox.lock() {
+                            q.push(Pong {
+                                from,
+                                players,
+                                ping_ms: now.wrapping_sub(sent),
+                            });
+                        }
+                    }
+                })?;
+        }
         Ok(Self {
             socket,
-            start: Instant::now(),
+            start,
             targets: Vec::new(),
+            inbox,
+            running,
         })
     }
 
@@ -215,27 +274,23 @@ impl ZonePinger {
         }
     }
 
-    /// Reads pongs and updates population and ping in `zones`.
-    pub fn update(&mut self, zones: &mut [ZoneInfo]) {
-        let mut buf = [0u8; 64];
-        loop {
-            match self.socket.recv_from(&mut buf) {
-                Ok((8, from)) => {
-                    let players = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                    let sent = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                    let now = self.start.elapsed().as_millis() as u32;
-                    if let Some(i) = self.targets.iter().position(|t| *t == Some(from))
-                        && let Some(z) = zones.get_mut(i)
-                    {
-                        z.players = players;
-                        z.ping_ms = Some(now.wrapping_sub(sent));
-                    }
-                }
-                Ok(_) => {}
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => break,
+    /// Applies whatever the reader has collected. Returns whether any population
+    /// changed, so a caller showing a sorted list knows to sort it again.
+    pub fn update(&mut self, zones: &mut [ZoneInfo]) -> bool {
+        let Ok(mut inbox) = self.inbox.lock() else {
+            return false;
+        };
+        let mut population_changed = false;
+        for pong in inbox.drain(..) {
+            if let Some(i) = self.targets.iter().position(|t| *t == Some(pong.from))
+                && let Some(z) = zones.get_mut(i)
+            {
+                population_changed |= z.players != pong.players;
+                z.players = pong.players;
+                z.ping_ms = Some(pong.ping_ms);
             }
         }
+        population_changed
     }
 }
 

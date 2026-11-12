@@ -26,6 +26,9 @@ pub struct ZoneBrowser {
     fetches: Vec<(String, DirectoryClient)>,
     pub zones: Vec<ZoneInfo>,
     pub selected: usize,
+    /// Whether the player has moved the selection. Until they have, the highlight
+    /// belongs on the top row and should follow the sort, not a particular zone.
+    touched: bool,
     /// Progress or problems, shown under the list.
     pub status: String,
     pinger: Option<ZonePinger>,
@@ -56,6 +59,7 @@ impl ZoneBrowser {
             fetches,
             zones: Vec::new(),
             selected: 0,
+            touched: false,
             status: status.join("  "),
             pinger: ZonePinger::new().ok(),
             last_ping: None,
@@ -99,12 +103,23 @@ impl ZoneBrowser {
         if self.fetches.is_empty() && self.status.starts_with("Fetching") {
             self.status = format!("{} zones", self.zones.len());
         }
+        // The pings carry the real populations; the directory's figures were only a
+        // starting point. Re-sort when they disagree, or the list ends up ordered by
+        // one set of numbers while displaying another -- which is how a 5-player
+        // zone came to sit below a 4-player one.
+        let mut population_changed = false;
         if let Some(p) = self.pinger.as_mut() {
-            p.update(&mut self.zones);
-            if !self.zones.is_empty() && self.last_ping.is_none_or(|t| t.elapsed() > PING_EVERY) {
-                p.ping(&self.zones);
-                self.last_ping = Some(Instant::now());
-            }
+            population_changed = p.update(&mut self.zones);
+        }
+        if population_changed {
+            self.sort();
+        }
+        if let Some(p) = self.pinger.as_mut()
+            && !self.zones.is_empty()
+            && self.last_ping.is_none_or(|t| t.elapsed() > PING_EVERY)
+        {
+            p.ping(&self.zones);
+            self.last_ping = Some(Instant::now());
         }
     }
 
@@ -116,9 +131,28 @@ impl ZoneBrowser {
                 self.zones.push(z);
             }
         }
+        self.sort();
+        self.last_ping = None;
+    }
+
+    /// Orders by population, busiest first, keeping whatever the player had
+    /// highlighted under the highlight: re-sorting out from under a selection
+    /// would move the row they were about to choose.
+    fn sort(&mut self) {
+        // Only once they have chosen a row is there anything to keep: before that
+        // the highlight marks "the top of the list", and pinning it to whichever
+        // zone happened to be first while the directories were still arriving left
+        // it stranded on an arbitrary one.
+        let chosen = self
+            .touched
+            .then(|| self.zones.get(self.selected).map(|z| z.address.clone()))
+            .flatten();
         self.zones
             .sort_by(|a, b| b.players.cmp(&a.players).then(a.name.cmp(&b.name)));
-        self.last_ping = None;
+        match chosen.and_then(|a| self.zones.iter().position(|z| z.address == a)) {
+            Some(i) => self.selected = i,
+            None => self.selected = 0,
+        }
     }
 
     /// Keys: Up/Down choose, Enter picks, Esc goes back.
@@ -127,13 +161,21 @@ impl ZoneBrowser {
             match k {
                 KeyCode::Escape => return Some(BrowserChoice::Back),
                 KeyCode::ArrowDown => {
+                    self.touched = true;
                     self.selected = (self.selected + 1).min(self.zones.len().saturating_sub(1))
                 }
-                KeyCode::ArrowUp => self.selected = self.selected.saturating_sub(1),
+                KeyCode::ArrowUp => {
+                    self.touched = true;
+                    self.selected = self.selected.saturating_sub(1)
+                }
                 KeyCode::PageDown => {
+                    self.touched = true;
                     self.selected = (self.selected + 10).min(self.zones.len().saturating_sub(1))
                 }
-                KeyCode::PageUp => self.selected = self.selected.saturating_sub(10),
+                KeyCode::PageUp => {
+                    self.touched = true;
+                    self.selected = self.selected.saturating_sub(10)
+                }
                 KeyCode::Enter | KeyCode::NumpadEnter => {
                     if let Some(z) = self.zones.get(self.selected) {
                         return Some(BrowserChoice::Pick(z.address.clone()));
@@ -158,6 +200,48 @@ mod tests {
             players,
             ping_ms: None,
         }
+    }
+
+    /// The directory's populations are a starting point; the pings carry the real
+    /// ones. Sorting only on insert left the list ordered by the first set while
+    /// showing the second -- live, a 5-player zone sat below a 4-player one.
+    #[test]
+    fn a_refreshed_population_reorders_the_list() {
+        let mut b = ZoneBrowser::open(&[]);
+        b.add(vec![
+            zone("Busy", "127.0.0.1:6000", 40),
+            zone("Middling", "127.0.0.1:7000", 4),
+            zone("Quiet", "127.0.0.1:5000", 1),
+        ]);
+        assert_eq!(names(&b), ["Busy", "Middling", "Quiet"]);
+
+        // The player is pointing at the one about to move.
+        b.input(&[KeyCode::ArrowDown, KeyCode::ArrowDown]);
+        assert_eq!(b.zones[b.selected].name, "Quiet");
+        // A ping says Quiet is really the second busiest.
+        b.zones[2].players = 9;
+        b.sort();
+
+        assert_eq!(names(&b), ["Busy", "Quiet", "Middling"]);
+        // ... and the highlight followed the zone, not the row number.
+        assert_eq!(b.zones[b.selected].name, "Quiet");
+    }
+
+    /// Until the player picks a row the highlight means "top of the list", so it
+    /// must follow the sort rather than stay on whichever zone arrived first.
+    #[test]
+    fn an_untouched_selection_stays_at_the_top() {
+        let mut b = ZoneBrowser::open(&[]);
+        b.add(vec![zone("Quiet", "127.0.0.1:5000", 1)]);
+        assert_eq!(b.zones[b.selected].name, "Quiet");
+        // A busier zone arrives from a second directory and takes the top row.
+        b.add(vec![zone("Busy", "127.0.0.1:6000", 40)]);
+        assert_eq!(b.selected, 0);
+        assert_eq!(b.zones[b.selected].name, "Busy");
+    }
+
+    fn names(b: &ZoneBrowser) -> Vec<&str> {
+        b.zones.iter().map(|z| z.name.as_str()).collect()
     }
 
     #[test]
