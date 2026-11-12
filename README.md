@@ -11,8 +11,9 @@ protocol the existing zones speak — it has played on a zone running **subgame*
 server software, and it plays on
 [oss-server](https://github.com/DangerMouseUK/oss-server). It is cross-platform, it runs at
 whatever resolution and refresh rate your display has, it takes a gamepad, and it does not
-need a copy of Continuum to start: a default graphics and sound set ships in
-`assets/classic`, and a Continuum install overrides it if you point at one.
+need a Continuum install to start: Continuum's own graphics and sounds are bundled in
+`assets/classic` ([what they are, and whose](assets/classic/README.md)), and an install of
+your own overrides them if you point at one.
 
 ![Flying in the bundled zone](docs/images/arena.png)
 
@@ -205,6 +206,13 @@ tools can reuse it. The split across the three repositories is deliberate:
 [oss-core](https://github.com/DangerMouseUK/oss-core) is MIT so that anyone's bot, tool or
 alternative client can build on it whatever licence they use, while the client and server
 are GPL because they follow ASSS, whose own GPL source may be ported into them.
+
+**The graphics and sounds in `assets/classic` are Continuum's own**, bundled so that the
+client is playable from a fresh clone, as other SubSpace clients do. They are not this
+project's work, they are **not covered by the GPL above**, and no ownership of them is
+claimed — [assets/classic/README.md](assets/classic/README.md) says so in full. They are a
+convenience rather than a dependency: point the client at a Continuum install or at your own
+asset folder and it needs nothing from that directory.
 
 SubSpace and Continuum are the names of the original games; this project is an independent,
 compatible implementation and is not affiliated with their authors.
