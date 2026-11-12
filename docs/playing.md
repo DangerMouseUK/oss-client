@@ -65,7 +65,7 @@ As Continuum does, a few `?commands` never reach the server:
 | Command | Does |
 |---|---|
 | `?go [arena]` | Change arena (no argument: the public arena) |
-| `?namelen N` | Width of the sender column in chat |
+| `?namelen N` | Width of the sender column in chat (`?namelen=N` works too: nullspace takes the space, SubSpace's own help documents the `=`) |
 | `?status` | How far your ship is upgraded |
 | `?news` | Open the zone news (also N in the menu). This one is ours: Continuum opens the news in a window of its own, which this client has no equivalent of |
 | `?quit` | Leave the game for the login screen, the same as Q in the menu. Ours — neither the original client nor ASSS has a `?quit` |

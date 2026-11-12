@@ -287,7 +287,10 @@ impl SettingsUi {
             }
         });
         egui::CollapsingHeader::new("Macros").show(ui, |ui| {
-            ui.label("A key sends its line as chat (same prefixes as the chat box).");
+            ui.label("A key sends its line as chat (the prefixes you would type yourself).");
+            ui.label(
+                "A macro on a key that types a character only fires while the chat line is empty.",
+            );
             let mut remove = None;
             egui::Grid::new("macros").striped(true).show(ui, |ui| {
                 for (i, (b, text)) in self.cfg.macros.iter_mut().enumerate() {

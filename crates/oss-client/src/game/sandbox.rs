@@ -1247,6 +1247,14 @@ impl Sandbox {
             Some((w, r)) => (w, r.trim()),
             None => (line, ""),
         };
+        // Both forms, because both originals taught one: nullspace takes
+        // "?namelen x" with a space, and SubSpace's own F1 help documents
+        // "?namelen=x". A player who types the one we did not take got no reply at
+        // all, because the line went to the zone, which has no such command.
+        let (word, rest) = match word.split_once('=') {
+            Some((w, r)) if rest.is_empty() => (w, r.trim()),
+            _ => (word, rest),
+        };
         match word.to_ascii_lowercase().as_str() {
             // Offline there is no arena and no ship to report on, so these fall
             // through to the sandbox's own command list instead of being swallowed.
@@ -1265,7 +1273,6 @@ impl Sandbox {
                 );
                 true
             }
-            // Continuum takes "?namelen N" only, with the space.
             "?namelen" if !rest.is_empty() => {
                 let reply = self.chat.set_namelen(rest);
                 self.message(reply, color::GREEN);
@@ -1735,7 +1742,7 @@ impl Sandbox {
                         .as_ref()
                         .and_then(|n| n.error.clone())
                         .unwrap_or_default();
-                    self.message(format!("{msg}. Press Esc, then Q to quit."), color::RED);
+                    self.message(format!("{msg}. Press Esc, then Q to go back."), color::RED);
                 }
                 _ => {}
             }
@@ -1745,7 +1752,7 @@ impl Sandbox {
             .as_ref()
             .map(|n| n.session.players().count() as u32);
         if self.net.as_mut().is_some_and(|n| n.replay_just_ended()) {
-            self.message("End of the replay. Esc then Q to quit.", color::YELLOW);
+            self.message("End of the replay. Esc then Q to go back.", color::YELLOW);
         }
         let files = self
             .net
@@ -2942,6 +2949,9 @@ fn help_pages(online: bool) -> Vec<(&'static str, Vec<&'static str>)> {
         "F12       = Frame rate",
         "F11 or PRINT SCREEN = Save a screenshot",
         "",
+        "These are the keys as they come. If you have changed any,",
+        "the settings screen is the one place that knows yours.",
+        "",
         "Messages",
         "  Type a message and press ENTER to send it. There is",
         "  no key to open the chat line: the characters go there",
@@ -2954,14 +2964,16 @@ fn help_pages(online: bool) -> Vec<(&'static str, Vec<&'static str>)> {
         "  \"message       = to the enemy team",
     ];
     let commands = vec![
-        "?go [arena]   = Switch arena (no name: the next public)",
-        "?arena        = List the arenas",
-        "?namelen=x    = Letters shown of a name",
-        "?lines=x      = Message lines on screen",
-        "?status       = Your ship's status",
-        "?ping         = Your ping time",
-        "?news         = The zone's news",
-        "?help         = What the zone offers",
+        "This client answers these itself:",
+        "  ?go [arena]  = Switch arena (no name: the next public)",
+        "  ?namelen x   = Letters shown of a name (=x also works)",
+        "  ?status      = Your ship's status",
+        "  ?news        = The zone's news",
+        "  ?quit        = Leave for the login screen, as Q does",
+        "",
+        "Anything else beginning with ? goes to the zone, and the",
+        "zone decides what it does. ?help there lists what yours",
+        "offers, which differs from zone to zone.",
         "",
         "Macros are set on the settings screen (O on the menu),",
         "and %selfname, %tickname, %freq, %bounty, %flags,",
