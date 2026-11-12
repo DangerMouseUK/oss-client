@@ -46,6 +46,7 @@ Options:
   --fullscreen              Borderless fullscreen
   --mute                    No sound
   --settings                Open the settings screen at start (sandbox)
+  --screen <menu|help>      Open the menu or the help pages at start (testing)
   --directory <host:port>   A directory server for the zone browser (F3 on the
                             login screen; repeatable; adds to the settings file's)
   --zones                   Start on the zone browser
@@ -106,6 +107,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut record = None;
     let mut replay = None;
     let mut open_settings = false;
+    let mut open_screen = None;
     let mut directories = Vec::new();
     let mut open_zones = false;
     let mut security = None;
@@ -187,6 +189,14 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--record" => record = Some(PathBuf::from(value("--record")?)),
             "--replay" => replay = Some(PathBuf::from(value("--replay")?)),
             "--settings" => open_settings = true,
+            "--screen" => {
+                let name = value("--screen")?;
+                open_screen = Some(match name.as_str() {
+                    "menu" => app::StartScreen::Menu,
+                    "help" => app::StartScreen::Help,
+                    _ => return Err("--screen must be menu or help".into()),
+                });
+            }
             "--directory" => directories.push(value("--directory")?),
             "--zones" => open_zones = true,
             "--security" => {
@@ -221,6 +231,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             bindings: Default::default(),
             settings_path: None,
             open_settings,
+            open_screen,
             macros: Vec::new(),
             palette: Default::default(),
             ui_scale: 0,
@@ -280,6 +291,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         bindings: Default::default(),
         settings_path: None,
         open_settings,
+        open_screen,
         macros: Vec::new(),
         palette: Default::default(),
         ui_scale: 0,

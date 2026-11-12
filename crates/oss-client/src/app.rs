@@ -19,8 +19,16 @@ use crate::game::login::{Choice, Login};
 use crate::game::online::{Online, ServerOptions};
 use crate::game::sandbox::Sandbox;
 use crate::game::settings_ui::{SettingsUi, UiAction};
-use crate::game::view::{Canvas, color};
+use crate::game::view::{Canvas, color, ui_color};
 use crate::gfx::{FrameError, Renderer, TextureId, UiFrame};
+
+/// An in-game screen `--screen` can put up at start, so that a screenshot can
+/// catch one without a key being pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartScreen {
+    Menu,
+    Help,
+}
 
 /// What to play.
 pub enum Mode {
@@ -64,6 +72,8 @@ pub struct Options {
     pub settings_path: Option<PathBuf>,
     /// `--settings`: open the settings screen at start.
     pub open_settings: bool,
+    /// An in-game screen to open as soon as the game starts (testing).
+    pub open_screen: Option<StartScreen>,
     /// Macro keys from the settings file.
     pub macros: Vec<(crate::game::input::Binding, String)>,
     /// Directory servers for the zone browser.
@@ -279,6 +289,7 @@ impl ApplicationHandler for App {
                         s.aim_bot = self.options.autopilot;
                         s.scripted = self.options.send.clone();
                         s.open_settings = self.options.open_settings;
+                        s.open_screen(self.options.open_screen);
                         for path in &self.options.lvz {
                             match oss_assets::locate::read_file(path) {
                                 Ok(data) => s.load_lvz(&path.display().to_string(), &data),
@@ -433,11 +444,15 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
-                if let PhysicalKey::Code(code) = event.physical_key {
+                let code = match event.physical_key {
+                    PhysicalKey::Code(code) => Some(code),
+                    _ => None,
+                };
+                if let Some(code) = code {
                     self.input.key(code, down);
                 }
                 if down && let Some(text) = &event.text {
-                    self.input.typed.push_str(text);
+                    self.input.typed.extend(text.chars().map(|c| (code, c)));
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop, true),
@@ -487,7 +502,10 @@ impl App {
         // Login: wait for a choice.
         if let Screen::Login(ls) = &mut run.screen {
             let pressed = self.input.take_pressed();
-            let typed = std::mem::take(&mut self.input.typed);
+            let typed: String = std::mem::take(&mut self.input.typed)
+                .into_iter()
+                .map(|(_, c)| c)
+                .collect();
             self.input.take_edges();
             let choice = if let Some(b) = ls.browser.as_mut() {
                 b.pump();
@@ -616,6 +634,7 @@ impl App {
                 Ok(mut s) => {
                     s.aim_bot = self.options.autopilot;
                     s.scripted = self.options.send.clone();
+                    s.open_screen(self.options.open_screen);
                     // `--lvz` applies online too, so a zone's own file can be tried
                     // against a real arena (and so an arena change has something to
                     // tear down on a zone that serves none).
@@ -728,58 +747,82 @@ fn load_art(dir: &AssetDirs, renderer: &mut Renderer) -> Result<(Art, TextureId)
     Ok((art, atlas))
 }
 
-/// The login form, centred.
+/// The login form, in the same box the game's own menu wears: Continuum's fill and
+/// three-ply border out of `colors.bm2`, a green heading over a rule, green labels
+/// and white values. Continuum itself opens on a skinned startup screen whose art
+/// is its own and not ours to copy, so this follows the look of the boxes the game
+/// draws for itself instead.
 fn draw_login(login: &Login, art: &Art, atlas: TextureId, r: &mut Renderer, scale: u32) {
     let c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
-    let w = 52.0 * 8.0;
+    let w = 46.0 * 8.0;
     let rows = Login::fields().len() as f32;
-    let h = 30.0 + rows * 16.0 + 70.0;
+    let h = 20.0 + rows * 14.0 + 54.0;
     let x = ((c.view_w - w) / 2.0).floor();
-    let mut y = ((c.view_h - h) / 2.0).floor();
-    c.rect(
+    let top = ((c.view_h - h) / 2.0).floor().max(4.0);
+    c.panel(r, x, top, w, h);
+    c.text_center(
         r,
-        x - 10.0,
-        y - 10.0,
-        w + 20.0,
-        h + 20.0,
-        [0.0, 0.0, 0.0, 0.85],
+        x + w / 2.0,
+        top + 1.0,
+        color::GREEN,
+        "-= Open SubSpace =-",
     );
-    c.text(r, x, y, color::YELLOW, "Open SubSpace");
-    y += 26.0;
+    c.separator(r, x, top + 13.0, w);
+
+    // Labels end at a fixed column so the values line up under each other.
+    let label_w = 9.0;
+    let value_x = x + 4.0 + (label_w + 2.0) * 8.0;
+    let mut y = top + 20.0;
     for (i, &field) in Login::fields().iter().enumerate() {
         let focused = i == login.focus % Login::fields().len();
-        let label = format!("{:>9}", field.label());
-        c.text(r, x, y, color::GREEN, &label);
+        if focused {
+            // The focused row is picked out the way the stat box picks out the
+            // ticked player: a band in the border grey, not a colour of its own.
+            c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, w - 4.0, 13.0);
+        }
+        c.text(
+            r,
+            x + 4.0,
+            y,
+            color::GREEN,
+            &format!("{:>1$}", field.label(), label_w as usize),
+        );
         let mut value = login.value(field);
         if focused {
             value = match field {
                 crate::game::login::Field::Ship => format!("< {value} >"),
                 _ => format!("{value}_"),
             };
-            c.rect(r, x + 84.0, y - 2.0, w - 84.0, 14.0, [0.2, 0.25, 0.45, 0.8]);
         }
-        let max = ((w - 92.0) / 8.0) as usize;
+        let max = ((x + w - 4.0 - value_x) / 8.0) as usize;
         let shown: String = if value.chars().count() > max {
             value.chars().skip(value.chars().count() - max).collect()
         } else {
             value
         };
-        c.text(r, x + 88.0, y, color::WHITE, &shown);
-        y += 16.0;
+        c.text(r, value_x, y, color::WHITE, &shown);
+        y += 14.0;
     }
-    y += 10.0;
+    y += 6.0;
     if let Some(err) = &login.error {
-        c.text(r, x, y, color::RED, err);
+        c.text(r, x + 4.0, y, color::RED, err);
     }
-    y += 20.0;
-    c.text(
+    y += 16.0;
+    c.separator(r, x, y - 3.0, w);
+    c.text_center(
         r,
-        x,
+        x + w / 2.0,
         y,
-        color::WHITE,
-        "Enter connect   Tab/arrows move   F3 zone list",
+        color::YELLOW,
+        "Enter = Connect   Tab/arrows = Move",
     );
-    c.text(r, x, y + 14.0, color::WHITE, "F5 sandbox   Esc quit");
+    c.text_center(
+        r,
+        x + w / 2.0,
+        y + 12.0,
+        color::YELLOW,
+        "F3 = Zone list   F5 = Sandbox   Esc = Quit",
+    );
 }
 
 impl App {
@@ -954,51 +997,57 @@ fn draw_browser(
     scale: u32,
 ) {
     let c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
-    let w = (c.view_w - 40.0).min(72.0 * 8.0);
+    let w = (c.view_w - 48.0).min(72.0 * 8.0);
     let x = ((c.view_w - w) / 2.0).floor();
-    let rows = (((c.view_h - 120.0) / 14.0).floor() as usize).max(3);
-    let top = b.selected.saturating_sub(rows - 1);
-    let mut y = 30.0;
-    c.rect(
-        r,
-        x - 10.0,
-        y - 10.0,
-        w + 20.0,
-        c.view_h - 40.0,
-        [0.0, 0.0, 0.0, 0.85],
-    );
-    c.text(r, x, y, color::YELLOW, "Zones");
-    c.text_right(r, x + w, y, color::GREEN, "Players  Ping");
-    y += 22.0;
-    let name_chars = ((w - 14.0 * 8.0) / 8.0) as usize;
-    for (i, z) in b.zones.iter().enumerate().skip(top).take(rows) {
+    // The box fits the list rather than the screen, down to a few rows so it does
+    // not jump about while the directories are still answering.
+    let room = ((((c.view_h - 24.0).max(120.0)) - 92.0) / 12.0).floor() as usize;
+    let rows = b.zones.len().clamp(6, room.max(6));
+    let panel_h = 92.0 + rows as f32 * 12.0;
+    let panel_top = ((c.view_h - panel_h) / 2.0).floor().max(12.0);
+    let first = b.selected.saturating_sub(rows - 1);
+    c.panel(r, x, panel_top, w, panel_h);
+    c.text_center(r, x + w / 2.0, panel_top + 1.0, color::GREEN, "-= Zones =-");
+    c.separator(r, x, panel_top + 13.0, w);
+
+    let mut y = panel_top + 20.0;
+    c.text(r, x + 4.0, y, color::DARK_RED, "Zone");
+    c.text_right(r, x + w - 4.0, y, color::DARK_RED, "Players  Ping");
+    y += 14.0;
+    let name_chars = ((w - 18.0 * 8.0) / 8.0) as usize;
+    for (i, z) in b.zones.iter().enumerate().skip(first).take(rows) {
         if i == b.selected {
-            c.rect(r, x - 4.0, y - 2.0, w + 8.0, 14.0, [0.2, 0.25, 0.45, 0.8]);
+            c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, w - 4.0, 13.0);
         }
         let name: String = z.name.chars().take(name_chars).collect();
-        c.text(r, x, y, color::WHITE, &name);
+        c.text(r, x + 4.0, y, color::WHITE, &name);
         let ping = z.ping_ms.map_or_else(|| "-".to_string(), |p| p.to_string());
         c.text_right(
             r,
-            x + w,
+            x + w - 4.0,
             y,
             color::WHITE,
             &format!("{:>7}  {ping:>4}", z.players),
         );
-        y += 14.0;
+        y += 12.0;
     }
-    let bottom = c.view_h - 46.0;
+    let bottom = panel_top + panel_h - 42.0;
+    c.separator(r, x, bottom - 6.0, w);
     if let Some(z) = b.zones.get(b.selected) {
-        let desc: String = z.description.chars().take((w / 8.0) as usize).collect();
-        c.text(r, x, bottom - 14.0, color::GREEN, &desc);
+        let desc: String = z
+            .description
+            .chars()
+            .take(((w - 8.0) / 8.0) as usize)
+            .collect();
+        c.text(r, x + 4.0, bottom, color::GREEN, &desc);
     }
-    c.text(r, x, bottom, color::WHITE, &b.status);
-    c.text(
+    c.text(r, x + 4.0, bottom + 12.0, color::WHITE, &b.status);
+    c.text_center(
         r,
-        x,
-        bottom + 14.0,
-        color::WHITE,
-        "Up/Down choose   Enter use   Esc back",
+        x + w / 2.0,
+        bottom + 26.0,
+        color::YELLOW,
+        "Up/Down = Choose   Enter = Use   Esc = Back",
     );
 }
 

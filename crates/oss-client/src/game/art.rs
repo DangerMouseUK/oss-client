@@ -38,6 +38,10 @@ pub struct Art {
     pub gradient: Region,
     pub engyfont: Region,
     pub tallfont: Region,
+    /// `colors.bm2`: Continuum's UI palette, one colour per row and 128 columns of
+    /// animation. Rows 1-3 are the three plies of a panel border and row 16 is the
+    /// panel fill, which is what gives every box in the game its look.
+    pub colors: Region,
     pub prizes: Region,
     pub shrapnel: Region,
     pub wall: Region,
@@ -170,6 +174,15 @@ pub fn load_with(
         None => dir.load_graphic("tiles").map_err(|e| e.to_string())?,
     };
     art.tiles = add(&prepare_tileset(tileset))?;
+    // Loaded before the sheet helper below, because black is a colour here (row 0
+    // is "blank") and must not be keyed out.
+    art.colors = match dir.load_graphic("colors") {
+        Ok(img) => add(&img)?,
+        Err(e) => {
+            log::warn!("{e}");
+            Region::default()
+        }
+    };
 
     let mut sheet = |name: &str, required: bool| -> Result<Region, String> {
         if let Some(img) = overrides.get(&name.to_ascii_lowercase()) {
