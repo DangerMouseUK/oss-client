@@ -2,6 +2,7 @@
 //! maps, LVZ files and the zone's news; or a replay file played back through the
 //! same session code.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -28,7 +29,9 @@ enum Source {
 }
 
 /// How to reach a zone and who to be.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is written out rather than derived so the password cannot be printed.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerOptions {
     pub server: String,
     pub name: String,
@@ -53,6 +56,29 @@ pub struct ServerOptions {
     /// Register the name on login instead of expecting the zone to know it
     /// ([`SessionConfig::new_user`]).
     pub new_user: bool,
+}
+
+/// Everything but the password, which prints as `<redacted>`. Redacted at the
+/// field rather than on the type: the rest is what anyone debugging a connection
+/// came for.
+impl fmt::Debug for ServerOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerOptions")
+            .field("server", &self.server)
+            .field("name", &self.name)
+            .field("password", &oss_proto::wire::Redacted)
+            .field("arena", &self.arena)
+            .field("ship", &self.ship)
+            .field("freq", &self.freq)
+            .field("follow", &self.follow)
+            .field("attach", &self.attach)
+            .field("record", &self.record)
+            .field("security", &self.security)
+            .field("known_servers", &self.known_servers)
+            .field("identities", &self.identities)
+            .field("new_user", &self.new_user)
+            .finish()
+    }
 }
 
 pub struct Online {

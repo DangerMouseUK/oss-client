@@ -19,6 +19,7 @@ pub mod test_zone;
 pub mod udp;
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 
 use oss_net::{
     CipherKind, Config, Connection, DisconnectReason, Event as NetEvent, Handshake,
@@ -27,6 +28,7 @@ use oss_net::{
 use oss_proto::c2s::{self, GoArena, Login, MapRequest, SecurityResponse, SetFreq, SetShip};
 use oss_proto::s2c::ChatBody;
 use oss_proto::s2c::{self, MapFilename, login_code};
+use oss_proto::wire::Redacted;
 use oss_proto::{C2SPosition, ClientSettings, FixedStr, Packet, S2CPacket, WeaponInfo, checksum};
 
 pub use client::{ClientProfile, LoginForm, Profile, SecurityAnswer, SecurityChallenge, VieClient};
@@ -39,7 +41,10 @@ pub use oss_proto::s2c::BallPosition;
 pub const SPECTATOR: u8 = 8;
 
 /// Who to log in as and where to go.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written out rather than derived so the password cannot be printed.
+/// See the impl below.
+#[derive(Clone)]
 pub struct SessionConfig {
     pub name: String,
     pub password: String,
@@ -73,6 +78,29 @@ pub struct SessionConfig {
     /// which it expects from the encryption, not from the packet's type byte, and
     /// drops a mismatched login without saying so. See [`mod@client`].
     pub client: Profile,
+}
+
+/// Everything but the password, which prints as `<redacted>`.
+///
+/// This is the config handed to a [`Session`], so it is the likeliest of all of
+/// them to be logged while someone is working out why a connection failed. Redacted
+/// at the field rather than on the type: every other field is worth reading, and a
+/// type that prints nothing is a type nobody can debug.
+impl fmt::Debug for SessionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionConfig")
+            .field("name", &self.name)
+            .field("password", &Redacted)
+            .field("arena", &self.arena)
+            .field("ship", &self.ship)
+            .field("resolution", &self.resolution)
+            .field("machine_id", &self.machine_id)
+            .field("timezone_bias", &self.timezone_bias)
+            .field("want_lvz", &self.want_lvz)
+            .field("new_user", &self.new_user)
+            .field("client", &self.client)
+            .finish()
+    }
 }
 
 impl Default for SessionConfig {
@@ -1647,6 +1675,26 @@ fn login_message(code: u8) -> &'static str {
         login_code::NO_NAME => "no name",
         login_code::TOO_MANY_DEMO | login_code::NO_DEMO => "demo version not allowed",
         _ => "login refused",
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::SessionConfig;
+
+    /// This is the config handed to a [`Session`], so of all of them it is the one
+    /// most likely to be logged while someone works out why a connection failed.
+    #[test]
+    fn the_session_config_cannot_print_its_password() {
+        let cfg = SessionConfig {
+            name: "Ace".into(),
+            password: "hunter2-in-the-clear".into(),
+            ..Default::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("hunter2"), "printed it: {shown}");
+        assert!(shown.contains("<redacted>"), "and says so: {shown}");
+        assert!(shown.contains("Ace"), "the rest is still readable: {shown}");
     }
 }
 

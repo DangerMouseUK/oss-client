@@ -12,6 +12,7 @@
 //! arena and ship (never the password) are remembered in `login.ini` beside the
 //! settings.
 
+use std::fmt;
 use std::path::Path;
 
 use winit::keyboard::KeyCode;
@@ -71,7 +72,8 @@ pub enum Choice {
     Quit,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// `Debug` is written out rather than derived so the password cannot be printed.
+#[derive(Clone, PartialEq)]
 pub struct Login {
     pub server: String,
     pub name: String,
@@ -92,6 +94,23 @@ pub struct Login {
     /// `--new-user` were all silently dropped by the version that listed fields by
     /// hand, and a longer list would only have delayed the next one.
     base: Box<ServerOptions>,
+}
+
+/// Everything but the password, which prints as `<redacted>`. The `base` behind it
+/// carries one too and redacts its own.
+impl fmt::Debug for Login {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Login")
+            .field("server", &self.server)
+            .field("name", &self.name)
+            .field("password", &oss_proto::wire::Redacted)
+            .field("arena", &self.arena)
+            .field("ship", &self.ship)
+            .field("focus", &self.focus)
+            .field("error", &self.error)
+            .field("base", &self.base)
+            .finish()
+    }
 }
 
 impl Default for Login {
@@ -400,6 +419,33 @@ mod tests {
             ),
             ("given:5000", "Given", "pw", "duel")
         );
+    }
+
+    /// A derived `Debug` on anything holding a password is a leak waiting for the
+    /// first `log::debug!`, and the first one is always added by someone chasing a
+    /// different bug. Both of these are printed whenever an `assert_eq!` on them
+    /// fails, so the leak had a live path even with no logging at all.
+    #[test]
+    fn neither_the_form_nor_the_options_can_print_the_password() {
+        let mut l = Login::load(None, Some("Ace"), Box::new(Login::default().into_base()));
+        l.password = "hunter2-in-the-clear".into();
+        let shown = format!("{l:?}");
+        assert!(!shown.contains("hunter2"), "the form printed it: {shown}");
+        assert!(shown.contains("<redacted>"), "and says so: {shown}");
+        // The rest is still readable, which is the point of redacting the field
+        // rather than the type.
+        assert!(shown.contains("Ace"), "the name is still there: {shown}");
+
+        let opts = ServerOptions {
+            password: "hunter2-in-the-clear".into(),
+            ..Login::default().into_base()
+        };
+        let shown = format!("{opts:?}");
+        assert!(
+            !shown.contains("hunter2"),
+            "the options printed it: {shown}"
+        );
+        assert!(shown.contains("<redacted>"), "and say so: {shown}");
     }
 
     #[test]
