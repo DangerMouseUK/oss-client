@@ -29,3 +29,11 @@ Rust game client for SubSpace/Continuum. Licence **GPL-2.0-or-later**; `oss-asse
   **rewrites oss-core in place**, across a repo boundary and without saying so. Plain
   `cargo fmt` at the workspace root covers exactly this repo's four crates, which is what
   is wanted. Verified 2026-11-11 with `cargo fmt --all --verbose --check`.
+  **And the writing form reformats every file in the workspace, including ones another
+  session has uncommitted.** Harmless while one session worked at a time; not harmless now.
+  On 2026-11-12 two sessions reformatted each other's in-progress files within one hour, in
+  opposite directions, and neither could have known. **When you may not be alone in the
+  checkout, run `cargo fmt --check` first** — it names the files it would change — and use
+  the writing form only when that list is your own; verify your own files with
+  `rustfmt --check --edition 2024 <file>`. Saying afterwards that someone else's file was
+  dirty does not un-reformat it.
