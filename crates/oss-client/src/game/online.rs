@@ -75,6 +75,11 @@ pub struct Online {
     pub attach: Option<String>,
     /// LVZ files received and not yet loaded by the game: (name, bytes).
     pub files: Vec<(String, Vec<u8>)>,
+    /// Transfers started and finished for this arena, so the progress line can say
+    /// where it is in the set. A zone sends a map and anything up to a dozen LVZ
+    /// files, and a bare percentage that restarts at each one reads as a fault.
+    transfers_started: usize,
+    transfers_done: usize,
     /// Chat that arrived before there was a game screen to show it in.
     ///
     /// While the client is still connecting, `pump()` is driven by the connecting
@@ -162,6 +167,8 @@ impl Online {
             attach: opts.attach.clone(),
             files: Vec::new(),
             early_chat: Vec::new(),
+            transfers_started: 0,
+            transfers_done: 0,
             known,
             pinned: pin.is_some(),
             server: opts.server.clone(),
@@ -197,6 +204,8 @@ impl Online {
             attach: None,
             files: Vec::new(),
             early_chat: Vec::new(),
+            transfers_started: 0,
+            transfers_done: 0,
             known: KnownServers::default(),
             pinned: false,
             server: String::new(),
@@ -278,29 +287,45 @@ impl Online {
                     self.error = Some(format!("Login failed: {message}"))
                 }
                 SessionEvent::MapNeeded { name, .. } => {
+                    // The arena's content starts here, so the count starts here too.
+                    self.transfers_started = 0;
+                    self.transfers_done = 0;
                     if self
                         .stored_file(name)
                         .is_some_and(|d| self.session.use_cached_map(&d))
                     {
                         log::info!("map {name} from cache");
                     } else {
+                        self.transfers_started += 1;
                         self.status = format!("Downloading {name}...");
                         self.session.download_map();
                     }
                 }
-                SessionEvent::MapProgress { received, total } if *total > 0 => {
-                    self.status = format!("Downloading... {}%", received * 100 / total);
+                SessionEvent::TransferProgress {
+                    name,
+                    received,
+                    total,
+                } if *total > 0 => {
+                    self.status = progress_line(
+                        name,
+                        *received,
+                        *total,
+                        self.transfers_done,
+                        self.transfers_started,
+                    );
                 }
                 SessionEvent::MapReady {
                     name,
                     data,
                     downloaded,
                 } => {
-                    if *downloaded
-                        && !self.is_replay()
-                        && let Err(e) = self.cache.store(name, data)
-                    {
-                        log::warn!("couldn't cache map {name}: {e}");
+                    if *downloaded {
+                        self.transfers_done += 1;
+                        if !self.is_replay()
+                            && let Err(e) = self.cache.store(name, data)
+                        {
+                            log::warn!("couldn't cache map {name}: {e}");
+                        }
                     }
                     self.map = Some((name.clone(), data.clone()));
                 }
@@ -315,6 +340,7 @@ impl Online {
                         if cached.is_some_and(|d| self.session.use_cached_file(&f.name, &d)) {
                             log::info!("{} from cache", f.name);
                         } else {
+                            self.transfers_started += 1;
                             self.session.download_file(&f.name);
                         }
                     }
@@ -324,11 +350,13 @@ impl Online {
                     data,
                     downloaded,
                 } => {
-                    if *downloaded
-                        && !self.is_replay()
-                        && let Err(e) = self.cache.store(name, data)
-                    {
-                        log::warn!("couldn't cache {name}: {e}");
+                    if *downloaded {
+                        self.transfers_done += 1;
+                        if !self.is_replay()
+                            && let Err(e) = self.cache.store(name, data)
+                        {
+                            log::warn!("couldn't cache {name}: {e}");
+                        }
                     }
                     self.files.push((name.clone(), data.clone()));
                 }
@@ -400,5 +428,94 @@ impl Online {
         if let Source::Live(d) = &mut self.source {
             let _ = d.send_pending(&mut self.session);
         }
+    }
+}
+
+/// How far through the arena's whole set of transfers we are.
+///
+/// Across the set, not within the current file: a zone sends a map and up to a
+/// dozen LVZ files, and a per-file percentage restarts at every one of them. The
+/// first person to watch it reported the figures "rapidly bounce randomly between
+/// 0 and 100 about 20-30 times", which is exactly what a dozen restarts look like.
+/// This rises once and never falls back.
+///
+/// `done` is the number finished, so `done * 100` is the ground already covered and
+/// the current file contributes its own fraction of one slot.
+fn overall_percent(received: usize, total: usize, done: usize, started: usize) -> usize {
+    let within_file = (received * 100).checked_div(total).unwrap_or(0);
+    match started {
+        // Nothing to average over: the one file's own progress is the honest answer.
+        0 | 1 => within_file,
+        // Clamped because a zone may send a file that was not in the list it gave.
+        n => ((done * 100 + within_file) / n).min(100),
+    }
+}
+
+/// The line shown while a zone's content is coming down: what is being fetched,
+/// where it sits in the set, and one percentage for the set as a whole.
+fn progress_line(name: &str, received: usize, total: usize, done: usize, started: usize) -> String {
+    let percent = overall_percent(received, total, done, started);
+    match started {
+        0 | 1 => format!("Downloading {name}... {percent}%"),
+        n => format!(
+            "Downloading {name} ({} of {n})... {percent}%",
+            (done + 1).min(n)
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{overall_percent, progress_line};
+
+    #[test]
+    fn progress_names_the_file_and_its_place_in_the_set() {
+        // Second of fourteen, one finished, this one a tenth in.
+        assert_eq!(
+            progress_line("hz_sb.lvz", 10, 100, 1, 14),
+            "Downloading hz_sb.lvz (2 of 14)... 7%"
+        );
+        // The last one, nearly done.
+        assert_eq!(
+            progress_line("tutorial.lvz", 99, 100, 13, 14),
+            "Downloading tutorial.lvz (14 of 14)... 99%"
+        );
+        // A file beyond the list must not read "15 of 14", nor over 100%.
+        assert_eq!(
+            progress_line("extra.lvz", 50, 100, 14, 14),
+            "Downloading extra.lvz (14 of 14)... 100%"
+        );
+        // A lone transfer reports itself, without a meaningless "1 of 1".
+        assert_eq!(
+            progress_line("smallmap.lvl", 40, 100, 0, 1),
+            "Downloading smallmap.lvl... 40%"
+        );
+    }
+
+    /// The whole point of the change: the figure must never fall back. Walks a
+    /// fourteen-file set from nothing to finished, the way a real arena arrives.
+    #[test]
+    fn the_percentage_never_goes_backwards_across_a_set() {
+        let files = 14;
+        let mut last = 0;
+        for done in 0..files {
+            for received in (0..=100).step_by(7) {
+                let now = overall_percent(received, 100, done, files);
+                assert!(
+                    now >= last,
+                    "fell from {last}% to {now}% at file {done}, {received}/100"
+                );
+                assert!(now <= 100, "{now}% over 100 at file {done}");
+                last = now;
+            }
+        }
+        // A set that finishes reads as finished.
+        assert_eq!(overall_percent(100, 100, files - 1, files), 100);
+    }
+
+    /// A zone that reports a zero-length transfer must not divide by zero.
+    #[test]
+    fn a_zero_length_transfer_is_survivable() {
+        assert_eq!(overall_percent(0, 0, 3, 14), 21);
     }
 }

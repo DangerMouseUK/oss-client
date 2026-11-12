@@ -183,7 +183,13 @@ pub enum SessionEvent {
         name: String,
         checksum: u32,
     },
-    MapProgress {
+    /// A sized transfer is partway through. Fires for the map, for every LVZ file
+    /// and for anything else fetched this way -- it was called `MapProgress` and
+    /// carried no name, so a client could only show a bare percentage that
+    /// restarted at every file and looked like it was stuck in a loop.
+    TransferProgress {
+        /// What is being fetched, for a caller that wants to say so.
+        name: String,
         received: usize,
         total: usize,
     },
@@ -357,7 +363,7 @@ pub struct Session {
     /// File requests waiting for the current transfer to finish (0 = the map).
     downloads: VecDeque<u16>,
     /// A map or file transfer is in flight.
-    downloading: bool,
+    downloading: Option<u16>,
     /// CRC-32 of the zone's news file from the login reply (0 = the zone has none).
     news_checksum: u32,
     /// A news request is in flight (the reply is an S2C `0x10` with no name).
@@ -401,7 +407,7 @@ impl Session {
             files: Vec::new(),
             downloads: VecDeque::new(),
             turf_flags: Default::default(),
-            downloading: false,
+            downloading: None,
             news_checksum: 0,
             news_pending: false,
             entering_done: false,
@@ -620,9 +626,14 @@ impl Session {
                     self.send_login();
                 }
                 NetEvent::Packet(p) => self.handle_packet(now_ms, &p),
-                NetEvent::SizedProgress { received, total } => self
-                    .events
-                    .push_back(SessionEvent::MapProgress { received, total }),
+                NetEvent::SizedProgress { received, total } => {
+                    let name = self.transfer_name();
+                    self.events.push_back(SessionEvent::TransferProgress {
+                        name,
+                        received,
+                        total,
+                    });
+                }
                 NetEvent::Disconnected(reason) => {
                     self.state = State::Closed;
                     self.events.push_back(SessionEvent::Closed(reason));
@@ -828,7 +839,7 @@ impl Session {
                 } else {
                     self.on_map_data(&m.data);
                 }
-                self.downloading = false;
+                self.downloading = None;
                 self.next_download();
             }
             S2CPacket::FlagLocation(f) => self.events.push_back(SessionEvent::FlagLocation {
@@ -1094,7 +1105,7 @@ impl Session {
     /// A map or file transfer is running or queued. Servers put a player who
     /// requests a file into spectator mode, so take a ship only after this is false.
     pub fn downloads_pending(&self) -> bool {
-        self.downloading || !self.downloads.is_empty()
+        self.downloading.is_some() || !self.downloads.is_empty()
     }
 
     /// The extra files (LVZ) the arena listed.
@@ -1197,12 +1208,31 @@ impl Session {
         self.next_download();
     }
 
+    /// What the transfer in flight is fetching: index 0 is the arena's map, anything
+    /// else one of the files it listed.
+    fn transfer_name(&self) -> String {
+        match self.downloading {
+            Some(0) => self
+                .map
+                .as_ref()
+                .map(|m| m.name.clone())
+                .unwrap_or_default(),
+            Some(i) => self
+                .files
+                .iter()
+                .find(|f| f.index == i)
+                .map(|f| f.name.clone())
+                .unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
     fn next_download(&mut self) {
-        if self.downloading {
+        if self.downloading.is_some() {
             return;
         }
         if let Some(index) = self.downloads.pop_front() {
-            self.downloading = true;
+            self.downloading = Some(index);
             let index = (index != 0).then_some(index);
             self.send(&MapRequest { index }, true);
         }
