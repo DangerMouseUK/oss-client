@@ -144,9 +144,15 @@ pub fn run(options: Options) -> Result<(), String> {
     let search = AssetSearch {
         assets_dir: options.assets_dir.clone(),
         continuum_dir: options.continuum_dir.clone(),
-        // Development builds also find the repository's bundled folder.
-        dev_dir: cfg!(debug_assertions)
-            .then(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/classic")),
+        // A binary built from the checkout also finds the repository's bundled
+        // folder, in every profile. This used to be gated on `debug_assertions`,
+        // which made `cargo run --release -p oss-client` -- the command the README
+        // gives first -- fail on any machine without a Continuum install, because
+        // nothing copies `assets/classic` next to the executable. It is still
+        // ordered after that folder, so a packaged build that ships its own assets
+        // wins; in one that does not, the baked path simply does not exist and the
+        // search moves on.
+        dev_dir: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/classic")),
         discover_install: true,
     };
     let dir = AssetDirs::locate(&search).map_err(|e| {
