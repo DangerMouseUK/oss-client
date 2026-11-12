@@ -2741,9 +2741,11 @@ impl Sandbox {
     pub fn open_screen(&mut self, screen: Option<crate::app::StartScreen>) {
         match screen {
             Some(crate::app::StartScreen::Menu) => self.menu = true,
-            Some(crate::app::StartScreen::Help) => {
+            Some(crate::app::StartScreen::Help(page)) => {
                 self.help_open = true;
-                self.help_page = 0;
+                // A page past the last would draw nothing at all, which reads as a
+                // broken screen rather than as a bad argument.
+                self.help_page = page.min(help_pages(self.online()).len().saturating_sub(1));
             }
             None => {}
         }
