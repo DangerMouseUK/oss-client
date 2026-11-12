@@ -1042,7 +1042,9 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
     let list_h = 14.0 + rows as f32 * 12.0;
     let left_h = 14.0 + 4.0 * 14.0 + 10.0 + 14.0 + 2.0 * 40.0 + 14.0;
     let body_h = list_h.max(left_h);
-    let h = 20.0 + body_h + 56.0;
+    // The foot carries the zone's blurb, two lines for anything that went wrong,
+    // and the two key lines.
+    let h = 20.0 + body_h + 68.0;
     let x = ((c.view_w - w) / 2.0).floor();
     let top = ((c.view_h - h) / 2.0).floor().max(4.0);
 
@@ -1186,19 +1188,28 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
         Some(err) => (err.as_str(), color::RED),
         None => (b.status.as_str(), color::WHITE),
     };
-    let second: String = second.chars().take(width).collect();
-    c.text(r, x + 4.0, foot + 18.0, colour, &second);
+    // Wrapped, not cut. A refused connection explains itself in a sentence and a
+    // half -- "the zone didn't prove the key on record; remove its line from
+    // known_servers.txt" -- and truncating that at the panel edge throws away the
+    // half that says what to do about it.
+    for (i, line) in crate::game::chat::wrap(second, width, true)
+        .iter()
+        .take(2)
+        .enumerate()
+    {
+        c.text(r, x + 4.0, foot + 18.0 + i as f32 * 12.0, colour, line);
+    }
     c.text_center(
         r,
         x + w / 2.0,
-        foot + 32.0,
+        foot + 44.0,
         color::YELLOW,
         "Enter = Play    Tab/arrows = Move    F2 = Options",
     );
     c.text_center(
         r,
         x + w / 2.0,
-        foot + 44.0,
+        foot + 56.0,
         color::YELLOW,
         "F3 = Zones again    F5 = Sandbox    Esc = Quit",
     );
