@@ -27,7 +27,8 @@ use crate::gfx::{FrameError, Renderer, TextureId, UiFrame};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartScreen {
     Menu,
-    Help,
+    /// A help page, counted from zero.
+    Help(usize),
 }
 
 /// What to play.
