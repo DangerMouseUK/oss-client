@@ -712,8 +712,23 @@ impl Session {
         match packet {
             S2CPacket::LoginResponse(r) => {
                 self.news_checksum = r.news_checksum;
-                if r.code == login_code::OK {
+                // [`login_code::NO_SCORES`] is a *success*: the zone let you in, but its
+                // billing server is down so nothing you score will be kept. Continuum
+                // enters and says so, and a zone whose biller is off is otherwise
+                // unreachable -- a billerless subgame answers every login with it.
+                // Entering silently would hide that from the player, so say it the way
+                // the zone would: a green arena message.
+                if r.code == login_code::OK || r.code == login_code::NO_SCORES {
                     self.events.push_back(SessionEvent::LoggedIn);
+                    if r.code == login_code::NO_SCORES {
+                        self.events.push_back(SessionEvent::Chat {
+                            kind: chat_type::ARENA,
+                            pid: -1,
+                            name: None,
+                            text: "Scores are not available in this zone.".into(),
+                            sound: 0,
+                        });
+                    }
                     self.go_arena();
                 } else {
                     self.events.push_back(SessionEvent::LoginFailed {
@@ -1668,6 +1683,58 @@ mod tests {
         let ms = |ticks: u32| now + u64::from(ticks) * 10;
         assert!(!s.position_due(ms(interval - 1)));
         assert!(s.position_due(ms(interval + 2)));
+    }
+
+    /// A zone whose billing server is down answers every login with
+    /// [`login_code::NO_SCORES`], which is a success code -- Continuum enters and
+    /// reports it. Treating it as a failure made every billerless zone impossible
+    /// to join, a subgame started without `Subbill` among them. Entering silently
+    /// would be the other half of the bug: the player has to be told.
+    #[test]
+    fn no_scores_enters_the_arena_and_says_so() {
+        let response = |code: u8| {
+            let mut p = [0u8; 36];
+            p[0] = s2c::kind::LOGIN_RESPONSE;
+            p[1] = code;
+            p
+        };
+        let run = |code: u8| {
+            let mut s = Session::new(SessionConfig::default(), 0, 1);
+            s.handle_packet(0, &response(code));
+            s.events.into_iter().collect::<Vec<_>>()
+        };
+
+        // Both success codes log in; only NO_SCORES explains itself.
+        let ok = run(login_code::OK);
+        assert!(matches!(ok.first(), Some(SessionEvent::LoggedIn)));
+        assert!(
+            !ok.iter().any(|e| matches!(e, SessionEvent::Chat { .. })),
+            "a plain OK login should not announce anything"
+        );
+
+        let no_scores = run(login_code::NO_SCORES);
+        assert!(
+            matches!(no_scores.first(), Some(SessionEvent::LoggedIn)),
+            "NO_SCORES is a success code, not a login failure"
+        );
+        let notice = no_scores.iter().find_map(|e| match e {
+            SessionEvent::Chat { kind, text, .. } if *kind == chat_type::ARENA => Some(text),
+            _ => None,
+        });
+        assert_eq!(
+            notice.map(String::as_str),
+            Some("Scores are not available in this zone.")
+        );
+
+        // A code that really is a refusal still refuses.
+        let bad = run(login_code::BAD_PASSWORD);
+        assert!(matches!(
+            bad.first(),
+            Some(SessionEvent::LoginFailed {
+                code: login_code::BAD_PASSWORD,
+                ..
+            })
+        ));
     }
 
     #[test]
