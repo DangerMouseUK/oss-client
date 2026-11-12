@@ -240,6 +240,101 @@ impl Bindings {
     pub fn get(&self, action: Action) -> &[Binding] {
         self.map.get(&action).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// What to show a player for `action`, read from this table rather than
+    /// written down beside it.
+    ///
+    /// Continuum's help works this way: its `Commands.hlp` carries `%KB_BULLET`
+    /// where the key goes and the client fills it in, so the page shows the keys
+    /// you actually have. Alternatives that read the same — the two Shifts, the two
+    /// Ctrls — collapse to one, and at most two are shown so a line stays a line.
+    pub fn label(&self, action: Action) -> String {
+        let mut shown: Vec<String> = Vec::new();
+        for b in self.get(action) {
+            let name = binding_name(*b);
+            if !shown.contains(&name) {
+                shown.push(name);
+            }
+        }
+        // A numpad key is a convenience rather than news, so it only speaks for an
+        // action that has nothing else bound to it.
+        if shown.iter().any(|n| !n.contains("Numpad")) {
+            shown.retain(|n| !n.contains("Numpad"));
+        }
+        shown.truncate(2);
+        if shown.is_empty() {
+            "(unbound)".to_string()
+        } else {
+            shown.join(" or ")
+        }
+    }
+}
+
+/// A key's name as a player would write it: `Up`, `Ctrl`, `PgUp`, `` ` ``, `F3`.
+///
+/// `KeyCode`'s own `Debug` is close enough for most of them — `Home`, `Delete`,
+/// `F7` — so the families that read badly are named here and the rest fall through
+/// to it with their prefix taken off.
+pub fn key_name(key: KeyCode) -> String {
+    use KeyCode as K;
+    let named = match key {
+        K::ArrowUp => "Up",
+        K::ArrowDown => "Down",
+        K::ArrowLeft => "Left",
+        K::ArrowRight => "Right",
+        K::ShiftLeft | K::ShiftRight => "Shift",
+        K::ControlLeft | K::ControlRight => "Ctrl",
+        K::AltLeft | K::AltRight => "Alt",
+        K::Escape => "Esc",
+        K::PageUp => "PgUp",
+        K::PageDown => "PgDn",
+        K::PrintScreen => "Print Screen",
+        K::Backquote => "`",
+        K::Minus => "-",
+        K::Equal => "=",
+        K::BracketLeft => "[",
+        K::BracketRight => "]",
+        K::Backslash => "\\",
+        K::Semicolon => ";",
+        K::Quote => "'",
+        K::Comma => ",",
+        K::Period => ".",
+        K::Slash => "/",
+        K::NumpadAdd => "Numpad +",
+        K::NumpadSubtract => "Numpad -",
+        K::NumpadMultiply => "Numpad *",
+        K::NumpadDivide => "Numpad /",
+        K::NumpadEnter => "Numpad Enter",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    let debug = format!("{key:?}");
+    // `KeyA` is `A`, `Digit1` is `1`, `Numpad3` is `Numpad 3`; `F3` and `Home`
+    // already read correctly.
+    if let Some(rest) = debug.strip_prefix("Key") {
+        return rest.to_string();
+    }
+    if let Some(rest) = debug.strip_prefix("Digit") {
+        return rest.to_string();
+    }
+    if let Some(rest) = debug.strip_prefix("Numpad") {
+        return format!("Numpad {rest}");
+    }
+    debug
+}
+
+/// How one binding reads: the key, with the modifier it needs in front of it.
+pub fn binding_name(b: Binding) -> String {
+    let prefix = match b.mods {
+        Mods::Shift => "Shift+",
+        Mods::Ctrl => "Ctrl+",
+        // `None` means "without Shift", which is the bare key as far as a player
+        // is concerned, and `Any` means the modifier does not matter.
+        Mods::None | Mods::Any => "",
+    };
+    format!("{prefix}{}", key_name(b.key))
 }
 
 impl Mods {
@@ -794,6 +889,46 @@ mod tests {
         assert!(!i.key_is_bound(KeyCode::KeyQ, false, false));
         assert!(!i.key_is_bound(KeyCode::Equal, false, false));
         assert!(i.key_is_bound(KeyCode::Equal, false, true));
+    }
+
+    #[test]
+    fn keys_read_the_way_a_player_writes_them() {
+        assert_eq!(key_name(KeyCode::ArrowUp), "Up");
+        assert_eq!(key_name(KeyCode::ControlLeft), "Ctrl");
+        assert_eq!(key_name(KeyCode::PageDown), "PgDn");
+        assert_eq!(key_name(KeyCode::Backquote), "`");
+        assert_eq!(key_name(KeyCode::KeyQ), "Q");
+        assert_eq!(key_name(KeyCode::Digit8), "8");
+        assert_eq!(key_name(KeyCode::Numpad3), "Numpad 3");
+        // These already read correctly as they are.
+        assert_eq!(key_name(KeyCode::F7), "F7");
+        assert_eq!(key_name(KeyCode::Home), "Home");
+    }
+
+    #[test]
+    fn the_label_is_read_from_the_table_and_follows_a_rebind() {
+        let mut b = Bindings::default();
+        assert_eq!(b.label(Action::Bomb), "Tab");
+        assert_eq!(b.label(Action::Mine), "Shift+Tab");
+        // The two Shifts are one key to a player, not two.
+        assert_eq!(b.label(Action::Afterburner), "Shift");
+        // Two genuinely different ways in are both worth knowing.
+        assert_eq!(b.label(Action::Repel), "Shift+Ctrl or `");
+
+        // Rebind, and the label follows -- which is the whole point of reading it
+        // from the table instead of writing it down next to it.
+        b.set(
+            Action::Bomb,
+            vec![Binding {
+                key: KeyCode::KeyZ,
+                mods: Mods::None,
+            }],
+        );
+        assert_eq!(b.label(Action::Bomb), "Z");
+
+        // An action with nothing bound says so rather than showing a blank.
+        b.set(Action::Bomb, Vec::new());
+        assert_eq!(b.label(Action::Bomb), "(unbound)");
     }
 
     #[test]

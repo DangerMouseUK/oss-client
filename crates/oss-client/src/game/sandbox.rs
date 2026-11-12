@@ -108,6 +108,9 @@ pub struct Sandbox {
     /// The F1 help pages are up, and which one.
     help_open: bool,
     help_page: usize,
+    /// The key table, for the help page to read the player's own keys out of.
+    /// Copied from the live one while the help is open, which is when it is read.
+    bindings: super::input::Bindings,
     /// Macro keys: binding and the line they send.
     pub macros: Vec<(super::input::Binding, String)>,
     /// Accessibility: colour palette and extra interface scale.
@@ -370,6 +373,7 @@ impl Sandbox {
             news_scroll: 0,
             help_open: false,
             help_page: 0,
+            bindings: Default::default(),
             macros: Vec::new(),
             palette: Default::default(),
             ui_scale_extra: 0,
@@ -647,6 +651,11 @@ impl Sandbox {
             .collect();
         self.ui_input(&mut edges, &pressed, &typed, mods);
         input.set_typing(!self.chat.input.is_empty());
+        // The help shows the player's own keys, so it reads the live table. Copied
+        // only while it is open, which is the only time anything looks at it.
+        if self.help_open && self.bindings != input.bindings {
+            self.bindings.clone_from(&input.bindings);
+        }
         self.big_radar = !self.menu && input.action_held(Action::BigRadar);
         if self.spectating
             && !self.menu
@@ -910,7 +919,7 @@ impl Sandbox {
                     _ => {}
                 }
             }
-            if self.help_page >= help_pages(self.online()).len() {
+            if self.help_page >= help_pages(&self.bindings, self.online()).len() {
                 self.help_open = false;
                 self.help_page = 0;
             }
@@ -2745,7 +2754,11 @@ impl Sandbox {
                 self.help_open = true;
                 // A page past the last would draw nothing at all, which reads as a
                 // broken screen rather than as a bad argument.
-                self.help_page = page.min(help_pages(self.online()).len().saturating_sub(1));
+                self.help_page = page.min(
+                    help_pages(&self.bindings, self.online())
+                        .len()
+                        .saturating_sub(1),
+                );
             }
             None => {}
         }
@@ -2871,7 +2884,7 @@ impl Sandbox {
     /// The F1 help, which is where the key list lives in SubSpace and Continuum
     /// rather than in the menu. F1 turns the page and the last page closes it.
     fn draw_help(&self, c: &Canvas, r: &mut Renderer) {
-        let pages = help_pages(self.online());
+        let pages = help_pages(&self.bindings, self.online());
         let Some((title, lines)) = pages.get(self.help_page) else {
             return;
         };
@@ -2882,8 +2895,18 @@ impl Sandbox {
         c.panel(r, x, y, w, h);
         c.text_center(r, x + w / 2.0, y + 1.0, color::GREEN, title);
         c.separator(r, x, y + 13.0, w);
+        // Keys in yellow against their description in white, under a heading in
+        // dark red: Continuum's own `%Y`/`%W`/`%p` colours for this page.
         for (i, line) in lines.iter().enumerate() {
-            c.text(r, x + 2.0, y + 18.0 + i as f32 * 12.0, color::WHITE, line);
+            let ly = y + 18.0 + i as f32 * 12.0;
+            match line {
+                Help::Heading(text) => c.text(r, x + 2.0, ly, color::DARK_RED, text),
+                Help::Key(key, text) => {
+                    c.text(r, x + 4.0, ly, color::YELLOW, key);
+                    c.text(r, x + 4.0 + 21.0 * 8.0, ly, color::WHITE, text);
+                }
+                Help::Text(text) => c.text(r, x + 2.0, ly, color::WHITE, text),
+            }
         }
         let footer = if self.help_page + 1 < pages.len() {
             "F1 = More help        Esc = Back to game"
@@ -2911,79 +2934,149 @@ fn may_leave(in_a_fight: bool, energy: i32, max_energy: i32) -> bool {
     !in_a_fight || energy * 2 >= max_energy
 }
 
-/// The help pages, laid out as the original client's are: a key list first, then
-/// the commands. The keys are this client's defaults; a changed key table is shown
-/// on the settings screen, which is the one place that knows it.
-fn help_pages(online: bool) -> Vec<(&'static str, Vec<&'static str>)> {
-    let mut keys = vec![
-        "ARROWS = Movement",
-        "CTRL   = Fire guns",
-        "TAB    = Fire bomb (if available)",
-        "HOME   = Toggle stealth",
-        "END    = Toggle x-radar",
-        "DELETE = Toggle multi-fire",
-        "INSERT = Warp (full energy)",
-        "SHIFT  = Modifier key:",
-        "  -ARROWS = Afterburners",
-        "  -HOME   = Toggle cloak",
-        "  -END    = Toggle antiwarp",
-        "  -TAB    = Lay mine",
-        "  -DELETE = Burst",
-        "  -CTRL   = Repel (or the ` key)",
-        "  -INSERT = Drop portal",
-        "F1     = More help",
-        "F3     = Fire rocket",
-        "F4     = Drop brick",
-        "F5     = Drop decoy",
-        "F6     = Thor's hammer",
-        "F7     = Attach/Detach (CTRL+F7 shakes turrets off)",
-        "ENTER  = Send message",
-        "ESC    = Menu display",
-    ];
-    if !online {
-        keys.retain(|k| !k.starts_with("F7"));
-    }
+/// One line of a help page.
+enum Help {
+    /// A group heading, as Continuum's `%p` marks.
+    Heading(&'static str),
+    /// A key and what it does. The key is read from the table, never written here.
+    Key(String, &'static str),
+    Text(&'static str),
+}
+
+/// The keyboard pages, in Continuum's groups and mostly its wording.
+///
+/// `Commands.hlp` carries these as `%Y %KB_BULLET %WFire guns`, where `%K` plus a
+/// binding name is replaced with the player's own key when the page is drawn. So the
+/// descriptions are written down and **the keys never are**: rebind something and
+/// this follows. SubSpace's own help could not do that — its list is literal text
+/// compiled into the binary — but SubSpace had no rebinding either.
+const KEY_GROUPS: &[(&str, &[(Action, &str)])] = &[
+    (
+        "Movement",
+        &[
+            (Action::Left, "Turn left"),
+            (Action::Right, "Turn right"),
+            (Action::Forward, "Forward thrust"),
+            (Action::Backward, "Reverse thrust"),
+            (Action::Afterburner, "Afterburners"),
+        ],
+    ),
+    (
+        "Weapons",
+        &[
+            (Action::Gun, "Fire guns"),
+            (Action::Bomb, "Fire bomb"),
+            (Action::Mine, "Drop mine"),
+            (Action::Thor, "Thor's hammer"),
+            (Action::Burst, "Burst"),
+        ],
+    ),
+    (
+        "Toggle equipment",
+        &[
+            (Action::Stealth, "Stealth"),
+            (Action::Cloak, "Cloak"),
+            (Action::XRadar, "X-radar"),
+            (Action::Antiwarp, "AntiWarp"),
+            (Action::Multifire, "Multi-fire guns"),
+        ],
+    ),
+    (
+        "Actions",
+        &[
+            (Action::Repel, "Repel"),
+            (Action::Warp, "Warp"),
+            (Action::Portal, "Set portal"),
+            (Action::Decoy, "Drop decoy"),
+            (Action::Rocket, "Fire rocket"),
+            (Action::Brick, "Drop brick"),
+            (Action::Attach, "Attach/detach"),
+            (Action::BigRadar, "Show map (while held)"),
+        ],
+    ),
+    (
+        "Miscellaneous",
+        &[
+            (Action::StatBox, "Stat box"),
+            (Action::StatBoxUp, "Prev ticked player"),
+            (Action::StatBoxDown, "Next ticked player"),
+            (Action::ZoomIn, "Zoom in"),
+            (Action::ZoomOut, "Zoom out"),
+            (Action::ShowFps, "Frame rate"),
+            (Action::Screenshot, "Take screenshot"),
+        ],
+    ),
+];
+
+/// Keys that cannot be rebound, so they are written out — as `Commands.hlp` writes
+/// `%KEsc` and `%KPrintScrn` rather than a binding name.
+const FIXED_KEYS: &[(&str, &str)] = &[
+    ("Esc", "Menu display"),
+    ("Enter", "Send message"),
+    ("F1", "More help"),
+];
+
+/// The help pages. The first two are the keys, read out of `bindings`; the rest is
+/// this client and its commands.
+fn help_pages(bindings: &super::input::Bindings, online: bool) -> Vec<(&'static str, Vec<Help>)> {
+    let group = |name: &'static str| -> Vec<Help> {
+        let (_, items) = KEY_GROUPS.iter().find(|(n, _)| *n == name).expect("group");
+        let mut out = vec![Help::Heading(name)];
+        for (action, text) in *items {
+            // Attaching needs somebody to attach to, so it is not offered offline.
+            if !online && matches!(action, Action::Attach) {
+                continue;
+            }
+            out.push(Help::Key(bindings.label(*action), text));
+        }
+        out
+    };
+
+    let mut first: Vec<Help> = FIXED_KEYS
+        .iter()
+        .map(|(k, t)| Help::Key((*k).to_string(), t))
+        .collect();
+    first.extend(group("Movement"));
+    first.extend(group("Weapons"));
+
+    let mut second = group("Toggle equipment");
+    second.extend(group("Actions"));
+    second.extend(group("Miscellaneous"));
+
     let ours = vec![
-        "F2        = Stat box mode",
-        "PGUP/PGDN = Change ticked player",
-        "ALT       = Whole-map radar while held",
-        "CTRL +/-  = Zoom in and out",
-        "F12       = Frame rate",
-        "F11 or PRINT SCREEN = Save a screenshot",
-        "",
-        "These are the keys as they come. If you have changed any,",
-        "the settings screen is the one place that knows yours.",
-        "",
-        "Messages",
-        "  Type a message and press ENTER to send it. There is",
-        "  no key to open the chat line: the characters go there",
-        "  as you type, as they do in SubSpace and Continuum.",
-        "  'message       = to your team (// also works)",
-        "  /message       = to the ticked player",
-        "  :name:message  = to that player by name (TAB finishes",
-        "                   a name, :: fills in the last one)",
-        "  ;channel;msg   = to a chat channel",
-        "  \"message       = to the enemy team",
+        Help::Heading("Messages"),
+        Help::Text("Type a message and press Enter to send it. There is"),
+        Help::Text("no key to open the chat line: the characters go there"),
+        Help::Text("as you type, as they do in SubSpace and Continuum."),
+        Help::Text("  'message       = to your team (// also works)"),
+        Help::Text("  /message       = to the ticked player"),
+        Help::Text("  :name:message  = to that player by name (Tab finishes"),
+        Help::Text("                   a name, :: fills in the last one)"),
+        Help::Text("  ;channel;msg   = to a chat channel"),
+        Help::Text("  \"message       = to the enemy team"),
     ];
+
     let commands = vec![
-        "This client answers these itself:",
-        "  ?go [arena]  = Switch arena (no name: the next public)",
-        "  ?namelen x   = Letters shown of a name (=x also works)",
-        "  ?status      = Your ship's status",
-        "  ?news        = The zone's news",
-        "  ?quit        = Leave for the login screen, as Q does",
-        "",
-        "Anything else beginning with ? goes to the zone, and the",
-        "zone decides what it does. ?help there lists what yours",
-        "offers, which differs from zone to zone.",
-        "",
-        "Macros are set on the settings screen (O on the menu),",
-        "and %selfname, %tickname, %freq, %bounty, %flags,",
-        "%energy, %killer, %killed, %coord and %squad are",
-        "replaced in anything you send.",
+        Help::Heading("This client answers these itself"),
+        Help::Text("  ?go [arena]  = Switch arena (no name: the next public)"),
+        Help::Text("  ?namelen x   = Letters shown of a name (=x also works)"),
+        Help::Text("  ?status      = Your ship's status"),
+        Help::Text("  ?news        = The zone's news"),
+        Help::Text("  ?quit        = Leave for the login screen, as Q does"),
+        Help::Text(""),
+        Help::Text("Anything else beginning with ? goes to the zone, and the"),
+        Help::Text("zone decides what it does. ?help there lists what yours"),
+        Help::Text("offers, which differs from zone to zone."),
+        Help::Text(""),
+        Help::Text("Macros are set on the settings screen (O on the menu),"),
+        Help::Text("and %selfname, %tickname, %freq, %bounty, %flags,"),
+        Help::Text("%energy, %killer, %killed, %coord and %squad are"),
+        Help::Text("replaced in anything you send."),
     ];
+
     vec![
-        ("-= Help: keys =-", keys),
+        ("-= Help: keyboard =-", first),
+        ("-= Help: keyboard =-", second),
         ("-= Help: this client =-", ours),
         ("-= Help: commands =-", commands),
     ]
