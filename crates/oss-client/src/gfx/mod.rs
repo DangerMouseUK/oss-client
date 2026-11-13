@@ -170,6 +170,94 @@ pub struct StarParams {
     pub scale: f32,
 }
 
+/// How many frames may be with the GPU, unfinished, before the renderer stops
+/// building another one.
+///
+/// The surface is normally the client's only pacing. `get_current_texture` does
+/// not hand back a buffer until the swapchain has one free, and with
+/// `desired_maximum_frame_latency` set to 1 that holds the client at two frames:
+/// one being drawn, one waiting. Measured on the slowest renderer this project
+/// has -- a CPU adapter running the sandbox at 17 frames a second -- the count
+/// never moved off two, so three leaves a frame of slack and a client whose
+/// surface presents never meets this bound at all.
+///
+/// A surface that cannot present never holds the client anywhere, and then
+/// nothing paces it: it submits as fast as it can encode, measured at 1,000 to
+/// 3,700 frames a second against a renderer finishing 18 of them. Every
+/// unfinished frame holds its command buffer, the staging memory for its vertex
+/// and uniform writes, and about eight GPU handles -- some 326 KB a frame -- so
+/// the process reached 3 GB and 14,000 outstanding frames within 13 seconds and
+/// was still climbing. Past this bound another frame cannot help: none of them
+/// can be shown, and the renderer is already behind.
+const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
+/// How long to wait at that bound for the oldest frame to come back before giving
+/// up on the frame in hand.
+///
+/// Longer than a whole frame on the slowest renderer here (about 60 ms), so a
+/// merely slow one is paced rather than dropped; short enough that a surface
+/// which has stopped finishing work altogether still leaves the event loop
+/// pumping input and the network about ten times a second, which is what keeps
+/// Esc and the window's close button answering and the zone connection from
+/// timing out.
+const FRAME_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The frames handed to the GPU that have not come back yet, oldest first.
+///
+/// Kept apart from [`Renderer`], and generic over the submission handle, because
+/// the rule it holds to is the whole of the fix and none of it needs a GPU: the
+/// tests at the foot of this file run on a machine that cannot present a frame at
+/// all, which is the machine the fault was found on.
+struct InFlight<I> {
+    frames: std::collections::VecDeque<I>,
+    limit: usize,
+}
+
+impl<I> InFlight<I> {
+    fn new(limit: usize) -> Self {
+        Self {
+            frames: std::collections::VecDeque::with_capacity(limit),
+            limit,
+        }
+    }
+
+    /// Whether another frame may be built, given `finish`: a way to wait for the
+    /// oldest frame already out, answering whether it is done.
+    ///
+    /// Below the limit this costs nothing and says yes. At the limit it waits for
+    /// the oldest frame and, if that one is done, makes room for exactly one more;
+    /// if it is not, the answer is no and the caller drops the frame it was about
+    /// to build. Either way the count never rises above the limit, which is the
+    /// property the fix rests on: past the limit a frame is only ever added in
+    /// place of one that has come back.
+    ///
+    /// The oldest is the right frame to ask about because submissions finish in
+    /// the order they were made.
+    fn room_for_another(&mut self, finish: impl FnOnce(&I) -> bool) -> bool {
+        if self.frames.len() < self.limit {
+            return true;
+        }
+        let Some(oldest) = self.frames.front() else {
+            // Only reachable with a limit of zero, which nothing here asks for.
+            return true;
+        };
+        if finish(oldest) {
+            self.frames.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn push(&mut self, frame: I) {
+        self.frames.push_back(frame);
+    }
+
+    fn len(&self) -> usize {
+        self.frames.len()
+    }
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -193,6 +281,9 @@ pub struct Renderer {
     ui: Option<egui_wgpu::Renderer>,
     /// egui textures to free once the frame that last used them is done.
     ui_free: Vec<egui::TextureId>,
+    /// Frames given to the GPU that have not come back; see
+    /// [`MAX_FRAMES_IN_FLIGHT`].
+    in_flight: InFlight<wgpu::SubmissionIndex>,
 }
 
 /// One frame of egui output to draw over the game.
@@ -423,6 +514,7 @@ impl Renderer {
             capture: None,
             ui: None,
             ui_free: Vec::new(),
+            in_flight: InFlight::new(MAX_FRAMES_IN_FLIGHT),
         })
     }
 
@@ -620,6 +712,14 @@ impl Renderer {
             self.ui_free.extend(delta.free.drain());
             delta.clear();
         }
+        // Nothing past here is worth doing while the GPU is this far behind: the
+        // frame could not be shown, and building it would only add to what is
+        // already waiting. See [`MAX_FRAMES_IN_FLIGHT`].
+        if !self.wait_for_room() {
+            log::debug!("frame dropped ({} still unfinished)", self.in_flight.len());
+            self.clear_queue();
+            return Err(FrameError::Skip);
+        }
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
@@ -766,14 +866,39 @@ impl Renderer {
             );
             Some((path, buffer, row))
         });
-        self.queue
+        let submission = self
+            .queue
             .submit(ui_buffers.into_iter().chain([encoder.finish()]));
+        self.in_flight.push(submission);
         if let Some((path, buffer, row)) = readback {
             self.save_capture(&path, &buffer, row);
         }
         self.queue.present(frame);
         self.clear_queue();
         Ok(())
+    }
+
+    /// Whether the GPU is far enough ahead to be handed another frame, waiting up
+    /// to [`FRAME_WAIT`] for the oldest one out if it is not.
+    ///
+    /// This is what paces the client when the surface does not. A surface that can
+    /// present paces it already -- `get_current_texture` holds the client there
+    /// until the swapchain has a buffer free -- and then this never waits, because
+    /// the frame it asks about finished long ago: 3 to 7 microseconds a frame,
+    /// measured against a 60 ms frame. A surface that cannot present holds the
+    /// client nowhere, and then this is the only thing that does.
+    fn wait_for_room(&mut self) -> bool {
+        let Self {
+            device, in_flight, ..
+        } = self;
+        in_flight.room_for_another(|oldest| {
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(oldest.clone()),
+                    timeout: Some(FRAME_WAIT),
+                })
+                .is_ok()
+        })
     }
 
     fn save_capture(&self, path: &std::path::Path, buffer: &wgpu::Buffer, row: u32) {
@@ -832,6 +957,106 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frame that would not stop.
+    ///
+    /// The surface had always done the refusing, so nothing in the client did.
+    /// Point it at a surface that can never present -- a CPU adapter with no
+    /// desktop to present to, which is what the machine this was found on
+    /// becomes when its session has no display -- and `get_current_texture`
+    /// stops holding the client back. It then submitted frames at 1,000 to
+    /// 3,700 a second against a renderer finishing 18 of them, and every
+    /// unfinished frame kept its command buffer, its staging memory and about
+    /// eight GPU handles alive: 14,342 frames outstanding and a 3 GB working
+    /// set 13 seconds in, 9.7 GB by 40 s, with nothing anywhere to stop it.
+    ///
+    /// What follows is that rule with the GPU taken out of it: a renderer that
+    /// never finishes anything is offered ten thousand frames and must be given
+    /// three.
+    #[test]
+    fn a_gpu_that_finishes_nothing_is_never_given_more_than_the_bound() {
+        let mut out = InFlight::new(MAX_FRAMES_IN_FLIGHT);
+        let mut built = 0;
+        for frame in 0..10_000u32 {
+            if out.room_for_another(|_| false) {
+                out.push(frame);
+                built += 1;
+            }
+        }
+        assert_eq!(
+            built, MAX_FRAMES_IN_FLIGHT,
+            "every frame after the bound must be dropped, not queued"
+        );
+        assert_eq!(
+            out.len(),
+            MAX_FRAMES_IN_FLIGHT,
+            "and nothing may accumulate: this is the whole fault"
+        );
+    }
+
+    /// The bound must not cost anything when the GPU is keeping up, which is
+    /// every ordinary run. It is only asked about a frame once the queue is
+    /// full, and the answer then is always yes.
+    #[test]
+    fn a_gpu_that_keeps_up_is_never_held_back() {
+        let mut out = InFlight::new(MAX_FRAMES_IN_FLIGHT);
+        let mut asked = 0;
+        for frame in 0..1_000u32 {
+            let room = out.room_for_another(|_| {
+                asked += 1;
+                true
+            });
+            assert!(room, "frame {frame} refused by a GPU that is keeping up");
+            out.push(frame);
+        }
+        assert_eq!(
+            asked,
+            1_000 - MAX_FRAMES_IN_FLIGHT,
+            "the GPU is only asked once there is a full queue to ask about"
+        );
+        assert_eq!(out.len(), MAX_FRAMES_IN_FLIGHT);
+    }
+
+    /// Falling behind is not a one-way door: a renderer that catches up is given
+    /// frames again, one for one, never a backlog in a burst.
+    #[test]
+    fn a_gpu_that_catches_up_is_given_frames_again_one_at_a_time() {
+        let mut out = InFlight::new(MAX_FRAMES_IN_FLIGHT);
+        for frame in 0..MAX_FRAMES_IN_FLIGHT as u32 {
+            assert!(out.room_for_another(|_| false));
+            out.push(frame);
+        }
+        assert!(
+            !out.room_for_another(|_| false),
+            "full, and nothing has come back"
+        );
+
+        assert!(out.room_for_another(|_| true), "the oldest frame came back");
+        out.push(99);
+        assert_eq!(out.len(), MAX_FRAMES_IN_FLIGHT, "one went out, one went in");
+        assert!(
+            !out.room_for_another(|_| false),
+            "and the next frame asks again from scratch"
+        );
+    }
+
+    /// Submissions finish in order, so the oldest frame is the one that can be
+    /// done and the only one worth waiting on. Waiting on a later one would say
+    /// the queue is stuck while the frame in front of it had long since landed.
+    #[test]
+    fn the_frame_waited_on_is_the_oldest_one() {
+        let mut out = InFlight::new(MAX_FRAMES_IN_FLIGHT);
+        for frame in [10u32, 11, 12] {
+            assert!(out.room_for_another(|_| false));
+            out.push(frame);
+        }
+        let mut waited_on = None;
+        assert!(out.room_for_another(|frame| {
+            waited_on = Some(*frame);
+            true
+        }));
+        assert_eq!(waited_on, Some(10), "the oldest frame, not the newest");
+    }
 
     /// The reason [`TextureId`] carries a generation at all. An arena change frees
     /// every texture the old arena uploaded and the next arena's textures are handed
