@@ -3,12 +3,16 @@
 //! Frame rate alone cannot say *where* a frame goes, and on a software adapter the
 //! answer is rarely where it would be on a GPU. This records how long each stage of
 //! [`super::Renderer::render`] took, and how much the frame asked of the renderer
-//! (vertices, draw calls, bound textures), then reports a distribution rather than a
-//! mean: a mean hides the frame that stalled.
+//! (vertices, draw calls, and the pixels its quads cover), then reports a
+//! distribution rather than a mean: a mean hides the frame that stalled.
 //!
 //! Off by default and cheap when off: one boolean test per stage, no clock reads.
-//! Set `OSS_PERF=1` for a summary at exit, or `OSS_PERF=<seconds>` for one every
-//! that many seconds as well.
+//!
+//! Any value but `0` or empty switches it on. A value that parses as a number is
+//! *also* a reporting interval in seconds, so `OSS_PERF=1` reports every second
+//! and `OSS_PERF=5` every five; a value that does not, such as `OSS_PERF=on`,
+//! reports only once, at exit. The summary is cumulative either way, so a
+//! periodic run's last report and an `on` run's only report say the same thing.
 
 use std::time::{Duration, Instant};
 
@@ -149,13 +153,7 @@ pub struct Perf {
 impl Perf {
     /// Reads `OSS_PERF`: absent or `0` disables everything here.
     pub fn from_env() -> Self {
-        let var = std::env::var("OSS_PERF").unwrap_or_default();
-        let enabled = !var.is_empty() && var != "0";
-        let interval = var
-            .parse::<f64>()
-            .ok()
-            .filter(|s| *s > 0.0)
-            .map(Duration::from_secs_f64);
+        let (enabled, interval) = Self::settings(&std::env::var("OSS_PERF").unwrap_or_default());
         let now = Instant::now();
         Self {
             enabled,
@@ -171,6 +169,24 @@ impl Perf {
             total_draws: 0,
             total_quad_px: 0,
         }
+    }
+
+    /// What a value of `OSS_PERF` means: whether to record, and how often to
+    /// report while running.
+    ///
+    /// Kept apart from [`Perf::from_env`] and free of the environment so the
+    /// module's own description of the variable can be checked by a test rather
+    /// than trusted -- the two had already drifted once, the documentation
+    /// promising that `1` reported only at exit when it asks for a report every
+    /// second.
+    fn settings(var: &str) -> (bool, Option<Duration>) {
+        let enabled = !var.is_empty() && var != "0";
+        let interval = var
+            .parse::<f64>()
+            .ok()
+            .filter(|s| *s > 0.0)
+            .map(Duration::from_secs_f64);
+        (enabled, interval)
     }
 
     /// Whether anything here is recording. Callers can skip gathering counters.
@@ -318,6 +334,42 @@ fn us(v: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The module documentation describes this variable to whoever uses the
+    /// harness, and it had already described it wrongly. These are the cases it
+    /// names.
+    #[test]
+    fn oss_perf_means_what_the_module_says_it_means() {
+        let secs = |d: Option<Duration>| d.map(|d| d.as_secs_f64());
+
+        let (on, every) = Perf::settings("");
+        assert!(!on, "unset is off");
+        assert_eq!(secs(every), None);
+
+        let (on, every) = Perf::settings("0");
+        assert!(!on, "zero is off, not a zero-second interval");
+        assert_eq!(secs(every), None);
+
+        let (on, every) = Perf::settings("1");
+        assert!(on);
+        assert_eq!(secs(every), Some(1.0), "a number is an interval in seconds");
+
+        let (on, every) = Perf::settings("5");
+        assert!(on);
+        assert_eq!(secs(every), Some(5.0));
+
+        let (on, every) = Perf::settings("on");
+        assert!(on, "a non-numeric value still switches it on");
+        assert_eq!(
+            secs(every),
+            None,
+            "and asks for no periodic report, so the only one comes at exit"
+        );
+
+        let (on, every) = Perf::settings("-2");
+        assert!(on);
+        assert_eq!(secs(every), None, "a negative interval is no interval");
+    }
 
     #[test]
     fn a_disabled_probe_records_nothing() {
