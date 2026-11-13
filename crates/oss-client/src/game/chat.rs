@@ -379,6 +379,9 @@ pub struct ChatLog {
     privates: Vec<String>,
     /// Width of the sender column (`?namelen`).
     pub namelen: usize,
+    /// `?lines=x`: how many message rows to show, where a player has said. `None`
+    /// takes it from the window height, which is what Continuum does by default.
+    lines: Option<usize>,
     /// Tab completion in progress: the line as typed and how many Tabs so far.
     completing: Option<(String, usize)>,
 }
@@ -391,6 +394,7 @@ impl Default for ChatLog {
             scroll: 0,
             privates: Vec::new(),
             namelen: DEFAULT_NAMELEN,
+            lines: None,
             completing: None,
         }
     }
@@ -431,14 +435,32 @@ impl ChatLog {
         format!("Message Name Length: {}", self.namelen)
     }
 
-    /// Rows the log shows: Continuum's `view_h / 100 + 1`, or the whole buffer
-    /// while the menu is open.
-    pub fn visible_rows(view_h: f32, menu_open: bool) -> usize {
-        if menu_open {
-            FULL_LINES
-        } else {
-            (view_h.max(0.0) as usize / 100) + 1
+    /// `?lines=x`: Continuum's own command, "Changes number of displayed
+    /// message lines".
+    ///
+    /// Written like [`ChatLog::set_namelen`] because it is the same shape of
+    /// command, and reported back the same way so a player who types it with no
+    /// number is told what it is rather than nothing.
+    pub fn set_lines(&mut self, arg: &str) -> String {
+        if let Ok(n) = arg.trim().parse::<usize>()
+            && n > 0
+        {
+            self.lines = Some(n.min(FULL_LINES));
         }
+        match self.lines {
+            Some(n) => format!("Message Lines: {n}"),
+            None => "Message Lines: from the window height".to_string(),
+        }
+    }
+
+    /// Rows the log shows: what `?lines` asked for, else Continuum's
+    /// `view_h / 100 + 1`; or the whole buffer while the menu is open.
+    pub fn visible_rows(&self, view_h: f32, menu_open: bool) -> usize {
+        if menu_open {
+            return FULL_LINES;
+        }
+        self.lines
+            .unwrap_or_else(|| (view_h.max(0.0) as usize / 100) + 1)
     }
 
     /// The rows to draw, oldest first, for a log `width` characters wide.
@@ -712,9 +734,34 @@ mod tests {
             log.push(Message::local(format!("line {i}"), 0));
         }
         // Continuum's count: one row per 100 pixels of height, plus one.
-        assert_eq!(ChatLog::visible_rows(480.0, false), 5);
-        assert_eq!(ChatLog::visible_rows(1080.0, false), 11);
-        assert_eq!(ChatLog::visible_rows(480.0, true), 64);
+        assert_eq!(log.visible_rows(480.0, false), 5);
+        assert_eq!(log.visible_rows(1080.0, false), 11);
+        assert_eq!(log.visible_rows(480.0, true), 64);
+        // `?lines=x` is Continuum's own ("Changes number of displayed message
+        // lines"), and once set it is the count, whatever the window is.
+        assert_eq!(log.set_lines("7"), "Message Lines: 7");
+        assert_eq!(log.visible_rows(480.0, false), 7);
+        assert_eq!(
+            log.visible_rows(1080.0, false),
+            7,
+            "the window stops deciding"
+        );
+        assert_eq!(
+            log.visible_rows(480.0, true),
+            64,
+            "the menu still shows all"
+        );
+        assert_eq!(
+            log.set_lines("999"),
+            "Message Lines: 64",
+            "capped at the buffer"
+        );
+        assert_eq!(
+            log.set_lines("0"),
+            "Message Lines: 64",
+            "nonsense leaves it alone and reports what it is"
+        );
+        assert_eq!(log.set_lines("nine"), "Message Lines: 64");
         let shown = log.lines(40, 3);
         assert_eq!(shown.len(), 3);
         assert_eq!(shown[2].text, "line 19");
