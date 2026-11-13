@@ -78,6 +78,37 @@ pub const REPEAT_DELAY: f32 = 0.5;
 /// Repeats a second once they start. See [`REPEAT_DELAY`].
 pub const REPEAT_RATE: u32 = 30;
 
+/// One scripted pointer event, in UI pixels.
+///
+/// `--click` is a press and a release at the same instant, which is all a
+/// click-sensed thing looks at. `--drag` puts a move between them and spreads
+/// the three over separate frames, because a slider is drag-sensed: a press and
+/// release in one frame is a click, and a click is not an answer it has.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScriptedPoint {
+    /// Seconds after the window opened.
+    pub at: f32,
+    pub x: f32,
+    pub y: f32,
+    pub what: PointerEdge,
+}
+
+/// What a [`ScriptedPoint`] does to the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerEdge {
+    Press,
+    /// The pointer moving with the button down, which is what makes a drag one.
+    Move,
+    Release,
+}
+
+/// How far apart a scripted drag's press, move and release are put.
+///
+/// Anything over one frame will do; this is a handful of them, so a drag still
+/// reads as one gesture where a run is being watched. Expanded at parse time so
+/// the frame loop stays a walk down one sorted list.
+pub const DRAG_STEP: f32 = 0.05;
+
 /// The events `--hold <at>:<key>:<secs>` arrives as: down, then repeats, then up.
 ///
 /// The repeats are counted rather than stepped up to, so how many there are does
@@ -126,9 +157,14 @@ pub struct Options {
     /// because `--server` goes straight round it and `--send` only types in game.
     /// This presses its keys, so the path from the form to an arena can be driven
     /// and photographed rather than described.
+    ///
+    /// **Not the settings screen.** These go into the client's own input, which
+    /// that screen does not read; only the pointer takes the other road into
+    /// egui (see [`App::egui_pointer`]). A scripted run drives it by clicking
+    /// and dragging, and cannot type into it at all.
     pub press: Vec<ScriptedKey>,
-    /// `--click`: pointer clicks at the given times and places, soonest first
-    /// (testing).
+    /// `--click` and `--drag`, expanded into pointer edges at the given times
+    /// and places, soonest first (testing).
     ///
     /// The start-up screen is mouse-driven, so without this nothing could check
     /// that it is -- the same hole `--press` was, one screen along. Positions
@@ -136,9 +172,9 @@ pub struct Options {
     /// position in the drawing code is in, so a click can be aimed at what a
     /// screenshot shows.
     ///
-    /// While the settings screen is up the click goes to it instead, in the same
-    /// units; see [`App::egui_click`] for why that one takes a different road.
-    pub click: Vec<(f32, f32, f32)>,
+    /// While the settings screen is up these go to it instead, in the same
+    /// units; see [`App::egui_pointer`] for why that one takes a different road.
+    pub pointer: Vec<ScriptedPoint>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
     /// end as its clock passes them.
@@ -239,8 +275,8 @@ struct App {
     error: Option<String>,
     /// How far through [`Options::press`] the clock has got.
     pressed: usize,
-    /// How far through [`Options::click`] the clock has got.
-    clicks: usize,
+    /// How far through [`Options::pointer`] the clock has got.
+    pointed: usize,
     /// Where the pointer is, in UI pixels, while it is over the window.
     cursor: Option<(f32, f32)>,
     /// A left click arrived and the screen has not answered it yet. Held here
@@ -308,7 +344,7 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         settings: None,
         error: None,
         pressed: 0,
-        clicks: 0,
+        pointed: 0,
         clicked: false,
         cursor: None,
     };
@@ -750,23 +786,25 @@ impl App {
             .as_ref()
             .map_or(1.0, |r| r.window.scale_factor() as f32)
             * self.egui_ctx.zoom_factor();
-        // Scripted clicks: put the pointer there, then click, which is the order
-        // a real pointer does it in and the order the hover highlight needs. Run
-        // before the window is borrowed so the pointer stays where it was put,
-        // the way a real one does.
-        while let Some((at, mx, my)) = self.options.click.get(self.clicks).copied() {
-            if at > elapsed {
+        // Scripted pointer events: put the pointer there, then press, which is
+        // the order a real pointer does it in and the order the hover highlight
+        // needs. Run before the window is borrowed so the pointer stays where it
+        // was put, the way a real one does.
+        while let Some(p) = self.options.pointer.get(self.pointed).copied() {
+            if p.at > elapsed {
                 break;
             }
-            log::info!("--click: {mx},{my}");
+            log::info!("pointer: {:?} at {},{}", p.what, p.x, p.y);
             if self.settings.is_some() {
-                self.egui_click(mx, my, ui_scale, egui_ppp);
-                self.clicks += 1;
+                self.egui_pointer(p, ui_scale, egui_ppp);
+                self.pointed += 1;
                 continue;
             }
-            self.cursor = Some((mx, my));
-            self.clicked = true;
-            self.clicks += 1;
+            // The screens below keep a pointer of their own, which has a place
+            // and a click and nothing else yet: a release is theirs to ignore.
+            self.cursor = Some((p.x, p.y));
+            self.clicked |= p.what == PointerEdge::Press;
+            self.pointed += 1;
         }
         // Taken before the run is borrowed, because the screens underneath want
         // it and it lives on the app rather than on any one of them.
@@ -1126,45 +1164,45 @@ impl App {
         }
     }
 
-    /// A scripted click aimed at the settings screen. That screen is egui's, and
-    /// egui reads its own queue rather than the pointer the screens below keep,
-    /// so a click meant for it has to be put where egui will look for it.
+    /// One scripted pointer edge aimed at the settings screen. That screen is
+    /// egui's, and egui reads its own queue rather than the pointer the screens
+    /// below keep, so anything meant for it has to be put where it will look.
     ///
     /// Deliberately not a synthesised `WindowEvent`: that would mean fabricating
     /// a winit `DeviceId`, which is an unsafe call on a type winit owns, and
-    /// `egui-winit` would unpack the event into exactly these three a line later.
+    /// `egui-winit` would unpack the event into these same ones a line later.
     /// Going straight to egui's queue fakes nothing and borrows nothing.
     ///
-    /// `--click` stays in UI pixels here, as everywhere else, rather than growing
-    /// a second rule for one screen -- so at a game scale of 2 a point read off a
-    /// screenshot of this screen is halved, even though egui drew that screen the
-    /// same size either way. The resolved point is logged for exactly that
-    /// reason: a click that lands in the wrong place should say so.
-    fn egui_click(&mut self, x: f32, y: f32, ui_scale: f32, pixels_per_point: f32) {
+    /// `--click` and `--drag` stay in UI pixels here, as everywhere else, rather
+    /// than growing a second rule for one screen -- so at a game scale of 2 a
+    /// point read off a screenshot of this screen is halved, even though egui
+    /// drew that screen the same size either way. The resolved point is logged
+    /// for exactly that reason: a click landing elsewhere should say so.
+    fn egui_pointer(&mut self, p: ScriptedPoint, ui_scale: f32, pixels_per_point: f32) {
         let Some(state) = self.egui_state.as_mut() else {
             // Only before the settings screen's first frame, since that is what
             // builds the state. Said out loud rather than dropped, because a
             // click that quietly does nothing is what this flag used to do here.
-            log::warn!("--click: the settings screen has not drawn yet; ignored");
+            log::warn!("pointer: the settings screen has not drawn yet; ignored");
             return;
         };
         let pos = egui::pos2(
-            egui_point(x, ui_scale, pixels_per_point),
-            egui_point(y, ui_scale, pixels_per_point),
+            egui_point(p.x, ui_scale, pixels_per_point),
+            egui_point(p.y, ui_scale, pixels_per_point),
         );
-        log::info!("--click: the settings screen, at {:.0},{:.0}", pos.x, pos.y);
+        log::info!("pointer: the settings screen, at {:.0},{:.0}", pos.x, pos.y);
         let input = state.egui_input_mut();
         // No modifiers: scripted keys go to the client's own input, which the
         // settings screen does not share, so nothing here can be holding one.
         let modifiers = egui::Modifiers::default();
+        // The move first, always: egui reads a drag from where the pointer is
+        // while the button is down, so a button event on its own moves nothing.
         input.events.push(egui::Event::PointerMoved(pos));
-        // Down and up together, the way `--press` taps a key. egui settles a
-        // click on the release, so both have to arrive for a button to fire.
-        for pressed in [true, false] {
+        if let PointerEdge::Press | PointerEdge::Release = p.what {
             input.events.push(egui::Event::PointerButton {
                 pos,
                 button: egui::PointerButton::Primary,
-                pressed,
+                pressed: p.what == PointerEdge::Press,
                 modifiers,
             });
         }
