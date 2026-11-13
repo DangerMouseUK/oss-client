@@ -50,7 +50,11 @@ Options:
   --settings                Open the settings screen at start (sandbox)
   --screen <menu|helpN>     Open the menu, or help page N, at start (testing)
   --press <secs>:<key>      Press this key <secs> in, by its settings-file name
-                            (Enter, Tab, ArrowDown...; repeatable; testing)
+                            (Enter, Tab, KeyQ, ArrowDown...; a key that types a
+                            character types it, so this drives the menu, the chat
+                            line and the form; repeatable; testing)
+  --hold <secs>:<key>:<for> Hold that key for <for> seconds, repeating it the way
+                            a keyboard does (thrust, guns; repeatable; testing)
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
@@ -112,7 +116,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut replay = None;
     let mut open_settings = false;
     let mut open_screen = None;
-    let mut press: Vec<(f32, winit::keyboard::KeyCode)> = Vec::new();
+    let mut press: Vec<app::ScriptedKey> = Vec::new();
     let mut directories = Vec::new();
     let mut open_zones = false;
     let mut security = None;
@@ -196,16 +200,37 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--settings" => open_settings = true,
             "--press" => {
                 let arg = value("--press")?;
-                let (at, name) = arg
-                    .split_once(':')
-                    .ok_or("--press needs <seconds>:<key>, e.g. 3:Enter")?;
-                let at: f32 = at
+                let (at, key) = scripted_key("--press", &arg)?;
+                // A tap: down and up in the same frame, which is what an
+                // edge-triggered screen looks at.
+                press.push(app::ScriptedKey {
+                    at,
+                    key,
+                    what: app::ScriptedEdge::Down,
+                });
+                press.push(app::ScriptedKey {
+                    at,
+                    key,
+                    what: app::ScriptedEdge::Up,
+                });
+            }
+            "--hold" => {
+                let arg = value("--hold")?;
+                let (rest, secs) = arg
+                    .rsplit_once(':')
+                    .ok_or("--hold needs <seconds>:<key>:<seconds>, e.g. 3:ArrowUp:2")?;
+                let secs: f32 = secs
                     .trim()
                     .parse()
-                    .map_err(|_| "--press needs <seconds>:<key>, e.g. 3:Enter")?;
-                let key = config::key_from_name(name.trim())
-                    .ok_or_else(|| format!("--press: no key called {}", name.trim()))?;
-                press.push((at, key));
+                    .map_err(|_| "--hold needs <seconds>:<key>:<seconds>, e.g. 3:ArrowUp:2")?;
+                // NaN named rather than reached by negating the comparison: a
+                // hold of "nan" seconds would otherwise schedule a key that
+                // never comes up.
+                if secs.is_nan() || secs <= 0.0 {
+                    return Err("--hold needs a duration above zero".into());
+                }
+                let (at, key) = scripted_key("--hold", rest)?;
+                press.extend(app::hold_events(at, key, secs));
             }
             "--screen" => {
                 let name = value("--screen")?;
@@ -233,8 +258,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     }
     // Soonest last, so the game screen pops them off the end as the clock passes.
     send.sort_by(|a, b| b.0.total_cmp(&a.0));
-    // Soonest first: the app walks this one forwards.
-    press.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Soonest first: the app walks this one forwards. A stable sort keeps a
+    // tap's down ahead of its up when both land on the same instant.
+    press.sort_by(|a, b| a.at.total_cmp(&b.at));
     if let Some(path) = replay {
         if sandbox || server.is_some() {
             return Err("--replay can't be combined with --sandbox or --server".into());
@@ -344,6 +370,20 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
 }
 
 /// Reads the settings file and fills in what the command line didn't set.
+/// The `<seconds>:<key>` both `--press` and `--hold` start with.
+fn scripted_key(flag: &str, arg: &str) -> Result<(f32, winit::keyboard::KeyCode), String> {
+    let (at, name) = arg
+        .split_once(':')
+        .ok_or_else(|| format!("{flag} needs <seconds>:<key>, e.g. 3:Enter"))?;
+    let at: f32 = at
+        .trim()
+        .parse()
+        .map_err(|_| format!("{flag} needs <seconds>:<key>, e.g. 3:Enter"))?;
+    let key = config::key_from_name(name.trim())
+        .ok_or_else(|| format!("{flag}: no key called {}", name.trim()))?;
+    Ok((at, key))
+}
+
 fn apply_config(opts: &mut app::Options) -> Result<(), String> {
     let path = match &opts.config {
         Some(p) => p.clone(),
@@ -445,21 +485,53 @@ mod tests {
     /// goes straight round it and `--send` only types once you are in a game.
     #[test]
     fn scripted_key_presses_parse_and_sort() {
+        use app::ScriptedEdge::{Down, Up};
+        use winit::keyboard::KeyCode as K;
         let o = parse("--press 4:Enter --press 2:ArrowDown --press 3:Tab")
             .unwrap()
             .unwrap();
+        let got: Vec<_> = o.press.iter().map(|k| (k.at, k.key, k.what)).collect();
         assert_eq!(
-            o.press,
+            got,
             vec![
-                (2.0, winit::keyboard::KeyCode::ArrowDown),
-                (3.0, winit::keyboard::KeyCode::Tab),
-                (4.0, winit::keyboard::KeyCode::Enter),
+                (2.0, K::ArrowDown, Down),
+                (2.0, K::ArrowDown, Up),
+                (3.0, K::Tab, Down),
+                (3.0, K::Tab, Up),
+                (4.0, K::Enter, Down),
+                (4.0, K::Enter, Up),
             ],
-            "soonest first, because the app walks the list forwards"
+            "soonest first, because the app walks the list forwards, and a tap's \
+             down stays ahead of its up"
         );
         assert!(parse("--press Enter").is_err(), "no time");
         assert!(parse("--press soon:Enter").is_err(), "time is not a number");
         assert!(parse("--press 3:Nonesuch").is_err(), "no such key");
+    }
+
+    /// `--hold` is the other half: `--press` taps, so nothing that has to be held
+    /// -- thrust, the afterburner, the guns -- could be scripted at all.
+    #[test]
+    fn a_held_key_goes_down_repeats_and_comes_up() {
+        use app::ScriptedEdge::{Down, Repeat, Up};
+        use winit::keyboard::KeyCode as K;
+        let o = parse("--hold 3:ArrowUp:1").unwrap().unwrap();
+        assert_eq!(o.press.first().map(|k| (k.at, k.key, k.what)), {
+            Some((3.0, K::ArrowUp, Down))
+        });
+        assert_eq!(o.press.last().map(|k| (k.at, k.key, k.what)), {
+            Some((4.0, K::ArrowUp, Up))
+        });
+        let repeats = o.press.iter().filter(|k| k.what == Repeat).count();
+        // Half a second of delay, then thirty a second for the other half.
+        assert_eq!(repeats, 15, "a held key repeats the way a keyboard does");
+        assert!(
+            o.press.iter().all(|k| (3.0..=4.0).contains(&k.at)),
+            "every event falls inside the hold"
+        );
+        assert!(parse("--hold 3:ArrowUp").is_err(), "no duration");
+        assert!(parse("--hold 3:ArrowUp:0").is_err(), "a hold of nothing");
+        assert!(parse("--hold 3:Nonesuch:1").is_err(), "no such key");
     }
 
     #[test]

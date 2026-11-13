@@ -23,7 +23,7 @@ use super::balls::{BallAction, BallPlayer, BallRules, Balls};
 use super::chat::{self, ChatContext, ChatLog, ChatPlayer, Line, Message};
 use super::flags::{Flags, Toucher};
 use super::hud::{self, RadarCache};
-use super::input::{Action, InputState};
+use super::input::{Action, InputState, Stroke};
 use super::lvz::{Lvz, ScreenRefs};
 use super::online::Online;
 use super::statbox::{self, StatBox};
@@ -632,24 +632,28 @@ impl Sandbox {
         }
 
         let mut edges = input.take_edges();
-        let pressed = input.take_pressed();
         let mods = (input.shift(), input.ctrl());
         // With nothing on the chat line a key the game uses is the game's, so its
         // character is dropped; once the line has something on it the same key types
-        // (nullspace `OnCharacter`). The key that typed each character is kept all
-        // the way from the window event, so this holds on any keyboard layout.
+        // (nullspace `OnCharacter`). The key that typed each character rides on the
+        // same keystroke all the way from the window event, so this holds on any
+        // keyboard layout — and only the character goes, never the key, so a key
+        // that is both still does its other job.
         let typing = !self.chat.input.is_empty();
-        let typed: Vec<char> = std::mem::take(&mut input.typed)
+        let strokes: Vec<Stroke> = input
+            .take_strokes()
             .into_iter()
-            .filter(|&(key, _)| {
-                typing
-                    || !key.is_some_and(|k| {
-                        input.key_is_bound(k, mods.0, mods.1) || self.is_macro_key(k, mods)
-                    })
+            .map(|mut s| {
+                let game_key = s.key.is_some_and(|k| {
+                    input.key_is_bound(k, mods.0, mods.1) || self.is_macro_key(k, mods)
+                });
+                if !typing && game_key {
+                    s.text = None;
+                }
+                s
             })
-            .map(|(_, c)| c)
             .collect();
-        self.ui_input(&mut edges, &pressed, &typed, mods);
+        self.ui_input(&mut edges, &strokes, mods);
         input.set_typing(!self.chat.input.is_empty());
         // The help shows the player's own keys, so it reads the live table. Copied
         // only while it is open, which is the only time anything looks at it.
@@ -904,16 +908,15 @@ impl Sandbox {
     fn ui_input(
         &mut self,
         edges: &mut Vec<Action>,
-        pressed: &[KeyCode],
-        typed: &[char],
+        strokes: &[Stroke],
         (shift, ctrl): (bool, bool),
     ) {
         if self.help_open {
-            for key in pressed {
-                match key {
+            for stroke in strokes {
+                match stroke.first_press() {
                     // "F1 = More help": the pages turn, then the help goes away.
-                    KeyCode::F1 => self.help_page += 1,
-                    KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter => {
+                    Some(KeyCode::F1) => self.help_page += 1,
+                    Some(KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter) => {
                         self.help_open = false
                     }
                     _ => {}
@@ -927,16 +930,20 @@ impl Sandbox {
             return;
         }
         if self.news_open {
-            for key in pressed {
-                match key {
-                    KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter => {
-                        self.news_open = false
-                    }
-                    KeyCode::ArrowUp => self.news_scroll = self.news_scroll.saturating_sub(1),
-                    KeyCode::ArrowDown => self.news_scroll += 1,
-                    KeyCode::PageUp => self.news_scroll = self.news_scroll.saturating_sub(10),
-                    KeyCode::PageDown => self.news_scroll += 10,
+            for stroke in strokes {
+                // Scrolling takes the repeats, so the news can be held through;
+                // closing it does not, so letting go does not close it twice.
+                match stroke.key {
+                    Some(KeyCode::ArrowUp) => self.news_scroll = self.news_scroll.saturating_sub(1),
+                    Some(KeyCode::ArrowDown) => self.news_scroll += 1,
+                    Some(KeyCode::PageUp) => self.news_scroll = self.news_scroll.saturating_sub(10),
+                    Some(KeyCode::PageDown) => self.news_scroll += 10,
                     _ => {}
+                }
+                if let Some(KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter) =
+                    stroke.first_press()
+                {
+                    self.news_open = false;
                 }
             }
             self.news_scroll = self.news_scroll.min(self.news.len().saturating_sub(1));
@@ -954,28 +961,29 @@ impl Sandbox {
             return;
         }
         if self.menu {
-            for key in pressed {
-                match key {
+            for stroke in strokes {
+                match stroke.key {
                     // Keys that type nothing never reach Continuum's menu, so they
                     // leave it up: F1 opens the help, and PgUp/PgDn scroll the log
                     // the menu has put on screen (ours; Continuum cannot scroll).
-                    KeyCode::F1 => {
-                        self.help_open = true;
-                        self.help_page = 0;
-                        self.menu = false;
-                    }
-                    KeyCode::PageUp => self.chat.scroll_by(1),
-                    KeyCode::PageDown => self.chat.scroll_by(-1),
+                    Some(KeyCode::PageUp) => self.chat.scroll_by(1),
+                    Some(KeyCode::PageDown) => self.chat.scroll_by(-1),
                     _ => {}
                 }
-            }
-            // The menu answers to typed characters, and whichever one comes is the
-            // last: "Any other key to resume game", which then types as usual.
-            for &c in typed {
-                let handled = self.menu_key(c);
-                self.menu = false;
-                if !handled {
-                    self.chat.type_char(c);
+                if stroke.first_press() == Some(KeyCode::F1) {
+                    self.help_open = true;
+                    self.help_page = 0;
+                    self.menu = false;
+                }
+                // The menu answers to typed characters, and whichever one comes is
+                // the last: "Any other key to resume game", which then types as
+                // usual.
+                if let Some(c) = stroke.text {
+                    let handled = self.menu_key(c);
+                    self.menu = false;
+                    if !handled {
+                        self.chat.type_char(c);
+                    }
                 }
             }
             if !self.menu {
@@ -984,20 +992,25 @@ impl Sandbox {
             edges.clear();
             return;
         }
-        // The chat line is always live. Tab finishes a name on it rather than
-        // dropping a bomb, but only once there is something to finish.
-        if !self.chat.input.is_empty() && pressed.contains(&KeyCode::Tab) {
-            self.complete_name();
-        }
-        for &c in typed {
-            self.chat.type_char(c);
-        }
         let mut send = false;
-        for key in pressed {
-            match key {
-                KeyCode::Backspace => self.chat.backspace(ctrl),
-                KeyCode::Enter | KeyCode::NumpadEnter => send = true,
-                KeyCode::F1 => {
+        for stroke in strokes {
+            // The chat line is always live. Tab finishes a name on it rather than
+            // dropping a bomb, but only once there is something to finish.
+            if !self.chat.input.is_empty() && stroke.first_press() == Some(KeyCode::Tab) {
+                self.complete_name();
+                continue;
+            }
+            if let Some(c) = stroke.text {
+                self.chat.type_char(c);
+            }
+            // Backspace takes the repeats, so a held Backspace clears the line;
+            // Enter and F1 act once, so a held Enter sends one message.
+            if stroke.key == Some(KeyCode::Backspace) {
+                self.chat.backspace(ctrl);
+            }
+            match stroke.first_press() {
+                Some(KeyCode::Enter | KeyCode::NumpadEnter) => send = true,
+                Some(KeyCode::F1) => {
                     self.help_open = true;
                     self.help_page = 0;
                 }
@@ -1008,7 +1021,7 @@ impl Sandbox {
             let line = self.chat.submit();
             self.send_chat_line(&line);
         }
-        self.run_macros(pressed, shift, ctrl);
+        self.run_macros(strokes, shift, ctrl);
         for e in edges.iter() {
             match e {
                 Action::ShowFps => self.show_fps = !self.show_fps,
@@ -1132,13 +1145,15 @@ impl Sandbox {
     /// Macro keys (from the settings file): send their line when pressed. A macro on
     /// a key that types gives way to the chat line once that line has something on
     /// it, exactly as a binding does.
-    fn run_macros(&mut self, pressed: &[KeyCode], shift: bool, ctrl: bool) {
+    fn run_macros(&mut self, strokes: &[Stroke], shift: bool, ctrl: bool) {
         let typing = !self.chat.input.is_empty();
+        // A macro key fires on the key going down, not on the OS repeating it:
+        // leaning on one must not send the line thirty times a second.
         let lines: Vec<String> = self
             .macros
             .iter()
             .filter(|(b, _)| {
-                pressed.contains(&b.key)
+                strokes.iter().any(|s| s.first_press() == Some(b.key))
                     && b.mods.matches(shift, ctrl, b.key)
                     && !(typing && super::input::yields_to_chat(*b))
             })
