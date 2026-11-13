@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::input::Stroke;
 use oss_session::directory::{DirectoryClient, ZoneInfo, ZonePinger};
 use winit::keyboard::KeyCode;
 
@@ -156,30 +157,40 @@ impl ZoneBrowser {
     }
 
     /// Keys: Up/Down choose, Enter picks, Esc goes back.
-    pub fn input(&mut self, pressed: &[KeyCode]) -> Option<BrowserChoice> {
-        for k in pressed {
-            match k {
-                KeyCode::Escape => return Some(BrowserChoice::Back),
-                KeyCode::ArrowDown => {
+    ///
+    /// The keys that walk the list take the OS repeats, so holding Down runs
+    /// down a long zone list; Enter and Escape act once however long they are
+    /// held, so arriving on a row with Enter still down does not pick it twice.
+    pub fn input(&mut self, strokes: &[Stroke]) -> Option<BrowserChoice> {
+        for stroke in strokes {
+            if let Some(KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter) = stroke.key {
+                match stroke.first_press() {
+                    Some(KeyCode::Escape) => return Some(BrowserChoice::Back),
+                    Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
+                        if let Some(z) = self.zones.get(self.selected) {
+                            return Some(BrowserChoice::Pick(z.address.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            match stroke.key {
+                Some(KeyCode::ArrowDown) => {
                     self.touched = true;
                     self.selected = (self.selected + 1).min(self.zones.len().saturating_sub(1))
                 }
-                KeyCode::ArrowUp => {
+                Some(KeyCode::ArrowUp) => {
                     self.touched = true;
                     self.selected = self.selected.saturating_sub(1)
                 }
-                KeyCode::PageDown => {
+                Some(KeyCode::PageDown) => {
                     self.touched = true;
                     self.selected = (self.selected + 10).min(self.zones.len().saturating_sub(1))
                 }
-                KeyCode::PageUp => {
+                Some(KeyCode::PageUp) => {
                     self.touched = true;
                     self.selected = self.selected.saturating_sub(10)
-                }
-                KeyCode::Enter | KeyCode::NumpadEnter => {
-                    if let Some(z) = self.zones.get(self.selected) {
-                        return Some(BrowserChoice::Pick(z.address.clone()));
-                    }
                 }
                 _ => {}
             }
@@ -191,6 +202,11 @@ impl ZoneBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The keystrokes a frame of these keys arrives as.
+    fn keys(keys: &[KeyCode]) -> Vec<Stroke> {
+        keys.iter().copied().map(Stroke::press).collect()
+    }
 
     fn zone(name: &str, address: &str, players: u32) -> ZoneInfo {
         ZoneInfo {
@@ -216,7 +232,7 @@ mod tests {
         assert_eq!(names(&b), ["Busy", "Middling", "Quiet"]);
 
         // The player is pointing at the one about to move.
-        b.input(&[KeyCode::ArrowDown, KeyCode::ArrowDown]);
+        b.input(&keys(&[KeyCode::ArrowDown, KeyCode::ArrowDown]));
         assert_eq!(b.zones[b.selected].name, "Quiet");
         // A ping says Quiet is really the second busiest.
         b.zones[2].players = 9;
@@ -259,14 +275,21 @@ mod tests {
         let names: Vec<&str> = b.zones.iter().map(|z| z.name.as_str()).collect();
         assert_eq!(names, ["Busy", "Mid", "Quiet"]);
         assert_eq!(
-            b.input(&[KeyCode::ArrowDown, KeyCode::ArrowDown, KeyCode::ArrowDown]),
+            b.input(&keys(&[
+                KeyCode::ArrowDown,
+                KeyCode::ArrowDown,
+                KeyCode::ArrowDown
+            ])),
             None
         );
         assert_eq!(b.selected, 2);
         assert_eq!(
-            b.input(&[KeyCode::ArrowUp, KeyCode::Enter]),
+            b.input(&keys(&[KeyCode::ArrowUp, KeyCode::Enter])),
             Some(BrowserChoice::Pick("127.0.0.1:7000".into()))
         );
-        assert_eq!(b.input(&[KeyCode::Escape]), Some(BrowserChoice::Back));
+        assert_eq!(
+            b.input(&keys(&[KeyCode::Escape])),
+            Some(BrowserChoice::Back)
+        );
     }
 }

@@ -17,6 +17,7 @@ use std::path::Path;
 
 use winit::keyboard::KeyCode;
 
+use super::input::Stroke;
 use super::online::ServerOptions;
 use oss_session::SPECTATOR;
 
@@ -260,46 +261,65 @@ impl Login {
         }
     }
 
-    /// Applies one frame of keys and typed text.
-    pub fn input(&mut self, pressed: &[KeyCode], typed: &str, shift: bool) -> Option<Choice> {
-        if let Some(t) = self.text_mut() {
-            for c in typed.chars() {
-                if !c.is_control() && t.chars().count() < MAX_FIELD {
-                    t.push(c);
-                }
+    /// Applies one frame of keystrokes.
+    ///
+    /// One pass in arrival order, because a keystroke is one thing: typing `ab`,
+    /// backspacing and typing `c` leaves `ac`, which it cannot if the characters
+    /// are all applied before the keys.
+    ///
+    /// A key held down repeats, and the form takes the repeats for the keys a
+    /// person holds on purpose — Backspace to clear a field, Tab and the arrows
+    /// to move through it. Enter, Escape and the function keys act once however
+    /// long they are held.
+    pub fn input(&mut self, strokes: &[Stroke], shift: bool) -> Option<Choice> {
+        for stroke in strokes {
+            // While the list has the focus it owns Up and Down, so they walk
+            // zones instead of moving on to the next field. Read per stroke:
+            // the stroke before this one may have moved the focus.
+            let on_list = self.focused() == Field::Zones;
+            if let Some(c) = stroke.text
+                && let Some(t) = self.text_mut()
+                && !c.is_control()
+                && t.chars().count() < MAX_FIELD
+            {
+                t.push(c);
             }
-        }
-        // While the list has the focus it owns Up and Down, so they walk zones
-        // instead of moving on to the next field.
-        let on_list = self.focused() == Field::Zones;
-        for key in pressed {
-            match key {
-                KeyCode::Escape => return Some(Choice::Quit),
-                KeyCode::F2 => return Some(Choice::Options),
-                KeyCode::F3 => return Some(Choice::RefreshZones),
-                KeyCode::F5 => return Some(Choice::Sandbox),
-                KeyCode::Enter | KeyCode::NumpadEnter => return self.submit(),
-                KeyCode::Tab if !shift => self.focus = (self.focus + 1) % FIELDS.len(),
-                KeyCode::Tab => self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len(),
-                KeyCode::ArrowDown if !on_list => self.focus = (self.focus + 1) % FIELDS.len(),
-                KeyCode::ArrowUp if !on_list => {
+            // Keys a person holds on purpose, repeats and all.
+            match stroke.key {
+                Some(KeyCode::Tab) if !shift => self.focus = (self.focus + 1) % FIELDS.len(),
+                Some(KeyCode::Tab) => self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len(),
+                Some(KeyCode::ArrowDown) if !on_list => {
+                    self.focus = (self.focus + 1) % FIELDS.len()
+                }
+                Some(KeyCode::ArrowUp) if !on_list => {
                     self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len()
                 }
-                KeyCode::ArrowLeft | KeyCode::ArrowRight if self.focused() == Field::Ship => {
+                Some(key @ (KeyCode::ArrowLeft | KeyCode::ArrowRight))
+                    if self.focused() == Field::Ship =>
+                {
                     // Order: 1..8 then spectator.
                     let i = if self.ship == SPECTATOR { 8 } else { self.ship };
-                    let i = if *key == KeyCode::ArrowRight {
+                    let i = if key == KeyCode::ArrowRight {
                         (i + 1) % 9
                     } else {
                         (i + 8) % 9
                     };
                     self.ship = if i == 8 { SPECTATOR } else { i };
                 }
-                KeyCode::Backspace => {
+                Some(KeyCode::Backspace) => {
                     if let Some(t) = self.text_mut() {
                         t.pop();
                     }
                 }
+                _ => {}
+            }
+            // Keys that act once, however long they are held.
+            match stroke.first_press() {
+                Some(KeyCode::Escape) => return Some(Choice::Quit),
+                Some(KeyCode::F2) => return Some(Choice::Options),
+                Some(KeyCode::F3) => return Some(Choice::RefreshZones),
+                Some(KeyCode::F5) => return Some(Choice::Sandbox),
+                Some(KeyCode::Enter | KeyCode::NumpadEnter) => return self.submit(),
                 _ => {}
             }
         }
@@ -354,6 +374,77 @@ fn parse_ship(v: &str) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// The keystrokes a frame of these keys and this text arrives as.
+    ///
+    /// Text first, then the keys, which is the order the form used to apply them
+    /// in when they were two lists — so a test that still passes is one whose
+    /// meaning the single list did not change.
+    fn strokes(keys: &[KeyCode], typed: &str) -> Vec<Stroke> {
+        let mut v: Vec<Stroke> = typed.chars().map(Stroke::text).collect();
+        v.extend(keys.iter().copied().map(Stroke::press));
+        v
+    }
+
+    /// What the lead called "very unfriendly": one character per press, because
+    /// the OS repeats were thrown away before anything could read them.
+    #[test]
+    fn a_held_backspace_clears_the_field() {
+        let mut l = Login::load(None, Some("Ace"), Box::new(Login::default().into_base()));
+        l.focus = 0;
+        assert_eq!(l.name, "Ace");
+        // One frame of a key held down: the press, then the OS repeating it.
+        let held = [
+            Stroke::press(KeyCode::Backspace),
+            Stroke::press(KeyCode::Backspace).repeated(true),
+            Stroke::press(KeyCode::Backspace).repeated(true),
+        ];
+        l.input(&held, false);
+        assert_eq!(l.name, "", "a held Backspace clears the field");
+    }
+
+    /// The other half of one keystroke being one thing: a Backspace lands where
+    /// it was typed rather than after everything else in the frame.
+    #[test]
+    fn a_backspace_lands_between_the_characters_either_side_of_it() {
+        let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
+        assert_eq!(l.focused(), Field::Name);
+        l.input(
+            &[
+                Stroke::press(KeyCode::KeyA).typing('a'),
+                Stroke::press(KeyCode::KeyB).typing('b'),
+                Stroke::press(KeyCode::Backspace),
+                Stroke::press(KeyCode::KeyC).typing('c'),
+            ],
+            false,
+        );
+        assert_eq!(l.name, "ac", "not abc with the end bitten off");
+    }
+
+    /// A key that types a character now arrives carrying it, which is what a
+    /// scripted `--press` could not do: the form read characters, so every field
+    /// ignored it.
+    #[test]
+    fn a_scripted_key_fills_a_field() {
+        let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
+        let typed: Vec<Stroke> = "ace"
+            .chars()
+            .zip([KeyCode::KeyA, KeyCode::KeyC, KeyCode::KeyE])
+            .map(|(c, k)| Stroke::press(k).typing(c))
+            .collect();
+        l.input(&typed, false);
+        assert_eq!(l.name, "ace");
+        // And Enter still acts once however long it is held.
+        l.server = "zone.example:5000".into();
+        let held_enter = [
+            Stroke::press(KeyCode::Enter),
+            Stroke::press(KeyCode::Enter).repeated(true),
+        ];
+        assert!(matches!(
+            l.input(&held_enter, false),
+            Some(Choice::Connect(_))
+        ));
+    }
+
     /// Every option the command line accepts has to survive the trip through this
     /// screen. It is written as a whole-struct comparison on purpose: the `..base`
     /// means a field added to [`ServerOptions`] is expected to be carried without
@@ -389,7 +480,7 @@ mod tests {
         l.password = "pw".into();
         l.arena = "duel".into();
         l.ship = 2;
-        let Some(Choice::Connect(got)) = l.input(&[KeyCode::Enter], "", false) else {
+        let Some(Choice::Connect(got)) = l.input(&strokes(&[KeyCode::Enter], ""), false) else {
             panic!("expected connect");
         };
 
@@ -469,34 +560,34 @@ mod tests {
         let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
         assert_eq!(l.focused(), Field::Name, "no saved name: start at the name");
 
-        l.input(&[], "Ace", false);
-        l.input(&[KeyCode::Tab], "", false);
+        l.input(&strokes(&[], "Ace"), false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
         assert_eq!(l.focused(), Field::Password);
-        l.input(&[], "pw", false);
-        l.input(&[KeyCode::Tab], "", false);
+        l.input(&strokes(&[], "pw"), false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
         assert_eq!(l.focused(), Field::Arena);
-        l.input(&[], "duel", false);
-        l.input(&[KeyCode::Tab], "", false);
+        l.input(&strokes(&[], "duel"), false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
         assert_eq!(l.focused(), Field::Server);
 
         // Clear what was remembered and type an address, one key at a time.
         for _ in 0..l.server.chars().count() {
-            l.input(&[KeyCode::Backspace], "", false);
+            l.input(&strokes(&[KeyCode::Backspace], ""), false);
         }
         assert_eq!(l.server, "");
-        l.input(&[], "zone.example:5000", false);
+        l.input(&strokes(&[], "zone.example:5000"), false);
 
-        l.input(&[KeyCode::Tab], "", false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
         assert_eq!(l.focused(), Field::Ship);
         // From a known ship, so this tests the movement and not the default.
         l.ship = 0;
-        l.input(&[KeyCode::ArrowRight], "", false);
+        l.input(&strokes(&[KeyCode::ArrowRight], ""), false);
         assert_eq!(l.value(Field::Ship), "2", "right moves on a ship");
 
         // And on to the zone list, where Enter still plays rather than being eaten.
-        l.input(&[KeyCode::Tab], "", false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
         assert_eq!(l.focused(), Field::Zones);
-        let Some(Choice::Connect(opts)) = l.input(&[KeyCode::Enter], "", false) else {
+        let Some(Choice::Connect(opts)) = l.input(&strokes(&[KeyCode::Enter], ""), false) else {
             panic!("Enter on the form should play");
         };
         assert_eq!(
@@ -517,40 +608,57 @@ mod tests {
         let mut l = Login::load(None, Some("Ace"), Box::new(Login::default().into_base()));
         // A name was remembered, so the cursor starts on the password.
         assert_eq!(l.focused(), Field::Password);
-        assert_eq!(l.input(&[], "pw", false), None);
+        assert_eq!(l.input(&strokes(&[], "pw"), false), None);
         assert_eq!(l.value(Field::Password), "**");
         l.input(
-            &[KeyCode::ArrowDown, KeyCode::ArrowDown, KeyCode::ArrowDown],
-            "",
+            &strokes(
+                &[KeyCode::ArrowDown, KeyCode::ArrowDown, KeyCode::ArrowDown],
+                "",
+            ),
             false,
         );
         assert_eq!(l.focused(), Field::Ship);
         l.ship = 0;
-        l.input(&[KeyCode::ArrowLeft], "x", false);
+        l.input(&strokes(&[KeyCode::ArrowLeft], "x"), false);
         assert_eq!(l.value(Field::Ship), "spec");
-        l.input(&[KeyCode::ArrowRight, KeyCode::ArrowRight], "", false);
+        l.input(
+            &strokes(&[KeyCode::ArrowRight, KeyCode::ArrowRight], ""),
+            false,
+        );
         assert_eq!(l.value(Field::Ship), "2");
         // One more step reaches the zone list, which takes no text and gives Up and
         // Down to the list instead of to the form.
-        l.input(&[KeyCode::Tab], "", false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
         assert_eq!(l.focused(), Field::Zones);
-        l.input(&[KeyCode::ArrowDown, KeyCode::ArrowUp], "zzz", false);
+        l.input(
+            &strokes(&[KeyCode::ArrowDown, KeyCode::ArrowUp], "zzz"),
+            false,
+        );
         assert_eq!(l.focused(), Field::Zones);
         assert_eq!(l.value(Field::Zones), "");
-        let Some(Choice::Connect(o)) = l.input(&[KeyCode::Enter], "", false) else {
+        let Some(Choice::Connect(o)) = l.input(&strokes(&[KeyCode::Enter], ""), false) else {
             panic!("expected connect");
         };
         assert_eq!(
             (o.name.as_str(), o.password.as_str(), o.ship, o.arena),
             ("Ace", "pw", 1, None)
         );
-        assert_eq!(l.input(&[KeyCode::F5], "", false), Some(Choice::Sandbox));
-        assert_eq!(l.input(&[KeyCode::F2], "", false), Some(Choice::Options));
         assert_eq!(
-            l.input(&[KeyCode::F3], "", false),
+            l.input(&strokes(&[KeyCode::F5], ""), false),
+            Some(Choice::Sandbox)
+        );
+        assert_eq!(
+            l.input(&strokes(&[KeyCode::F2], ""), false),
+            Some(Choice::Options)
+        );
+        assert_eq!(
+            l.input(&strokes(&[KeyCode::F3], ""), false),
             Some(Choice::RefreshZones)
         );
-        assert_eq!(l.input(&[KeyCode::Escape], "", false), Some(Choice::Quit));
+        assert_eq!(
+            l.input(&strokes(&[KeyCode::Escape], ""), false),
+            Some(Choice::Quit)
+        );
     }
 
     /// Both ship fallbacks are spectator.
@@ -615,21 +723,21 @@ mod tests {
     fn checks_fields_and_remembers_all_but_the_password() {
         let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
         assert_eq!(l.focused(), Field::Name);
-        assert_eq!(l.input(&[KeyCode::Enter], "", false), None);
+        assert_eq!(l.input(&strokes(&[KeyCode::Enter], ""), false), None);
         assert_eq!(l.error.as_deref(), Some("Enter a name"));
-        l.input(&[], "Bob", false);
-        l.input(&[KeyCode::Tab], "", false);
-        l.input(&[], "secret", false);
-        l.input(&[KeyCode::Tab], "", false);
-        l.input(&[], "duel", false);
-        l.input(&[KeyCode::Tab, KeyCode::Backspace], "", false);
+        l.input(&strokes(&[], "Bob"), false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
+        l.input(&strokes(&[], "secret"), false);
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
+        l.input(&strokes(&[], "duel"), false);
+        l.input(&strokes(&[KeyCode::Tab, KeyCode::Backspace], ""), false);
         assert_eq!(l.focused(), Field::Server);
         assert_eq!(l.server, "127.0.0.1:500");
         // A zone address with no port is refused, and the cursor goes to the field
         // that is wrong rather than to the top of the form.
-        l.input(&[], "0", false);
+        l.input(&strokes(&[], "0"), false);
         l.server = "nowhere".into();
-        assert_eq!(l.input(&[KeyCode::Enter], "", false), None);
+        assert_eq!(l.input(&strokes(&[KeyCode::Enter], ""), false), None);
         assert_eq!(l.error.as_deref(), Some("Zone must be host:port"));
         assert_eq!(l.focused(), Field::Server);
         l.server = "127.0.0.1:5000".into();

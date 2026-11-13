@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 
 use crate::audio::Audio;
 use crate::game::art::{self, Art};
-use crate::game::input::InputState;
+use crate::game::input::{InputState, Stroke, char_for, shifted_char};
 use crate::game::login::{Choice, Login};
 use crate::game::online::{Online, ServerOptions};
 use crate::game::sandbox::Sandbox;
@@ -45,6 +45,64 @@ pub enum Mode {
     Replay(PathBuf),
 }
 
+/// One scheduled keyboard event in a scripted run.
+///
+/// `--press` is a tap: the key goes down and comes up in the same frame, which
+/// is all an edge-triggered screen looks at. `--hold` keeps it down, and repeats
+/// it the way a real keyboard does, because a harness that holds a key without
+/// repeating it is not holding a key.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScriptedKey {
+    /// Seconds after the window opened.
+    pub at: f32,
+    pub key: winit::keyboard::KeyCode,
+    pub what: ScriptedEdge,
+}
+
+/// What a [`ScriptedKey`] does to the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptedEdge {
+    Down,
+    /// The OS repeating a key that is being held.
+    Repeat,
+    Up,
+}
+
+/// A held key does nothing for half a second, then about thirty a second.
+///
+/// Windows' own defaults, and the rate itself matters to nothing: what reads
+/// repeats only asks whether one arrived. Expanded at parse time so the frame
+/// loop stays a walk down one sorted list.
+pub const REPEAT_DELAY: f32 = 0.5;
+/// Repeats a second once they start. See [`REPEAT_DELAY`].
+pub const REPEAT_RATE: u32 = 30;
+
+/// The events `--hold <at>:<key>:<secs>` arrives as: down, then repeats, then up.
+///
+/// The repeats are counted rather than stepped up to, so how many there are does
+/// not turn on where a float lands.
+pub fn hold_events(at: f32, key: winit::keyboard::KeyCode, secs: f32) -> Vec<ScriptedKey> {
+    let mut v = vec![ScriptedKey {
+        at,
+        key,
+        what: ScriptedEdge::Down,
+    }];
+    let repeats = ((secs - REPEAT_DELAY).max(0.0) * REPEAT_RATE as f32) as u32;
+    for n in 0..repeats {
+        v.push(ScriptedKey {
+            at: at + REPEAT_DELAY + n as f32 / REPEAT_RATE as f32,
+            key,
+            what: ScriptedEdge::Repeat,
+        });
+    }
+    v.push(ScriptedKey {
+        at: at + secs,
+        key,
+        what: ScriptedEdge::Up,
+    });
+    v
+}
+
 pub struct Options {
     pub mode: Mode,
     /// Asset folder overriding the bundled assets (`--assets-dir`).
@@ -61,13 +119,13 @@ pub struct Options {
     pub screenshot_at: f32,
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
-    /// `--press`: keys to press at the given times, soonest first (testing).
+    /// `--press` and `--hold`: scripted keyboard events, soonest first (testing).
     ///
     /// The start-up screen is the one screen no scripted run could reach past,
     /// because `--server` goes straight round it and `--send` only types in game.
     /// This presses its keys, so the path from the form to an arena can be driven
     /// and photographed rather than described.
-    pub press: Vec<(f32, winit::keyboard::KeyCode)>,
+    pub press: Vec<ScriptedKey>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
     /// end as its clock passes them.
@@ -485,7 +543,9 @@ impl ApplicationHandler for App {
                     } else if down && code == KeyCode::Escape {
                         self.settings = None;
                     }
-                    // Track modifiers for captures.
+                    // Track modifiers for captures. Only the modifier: the screen
+                    // underneath is not reading the keyboard, so nothing would
+                    // drain a keystroke queued here.
                     if matches!(
                         code,
                         KeyCode::ShiftLeft
@@ -493,7 +553,7 @@ impl ApplicationHandler for App {
                             | KeyCode::ControlLeft
                             | KeyCode::ControlRight
                     ) {
-                        self.input.key(code, down);
+                        self.input.modifier(code, down);
                     }
                 }
                 self.egui_event(&WindowEvent::KeyboardInput {
@@ -503,16 +563,33 @@ impl ApplicationHandler for App {
                 });
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let down = event.state == ElementState::Pressed;
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
                 };
-                if let Some(code) = code {
-                    self.input.key(code, down);
+                if event.state != ElementState::Pressed {
+                    if let Some(code) = code {
+                        self.input.release(code);
+                    }
+                    return;
                 }
-                if down && let Some(text) = &event.text {
-                    self.input.typed.extend(text.chars().map(|c| (code, c)));
+                // The key and the character it typed are one keystroke, with the
+                // OS repeat flag on it. `event.repeat` is the flag that used to
+                // be dropped on the floor, which is why a held Backspace cleared
+                // one character and stopped.
+                let mut chars = event.text.iter().flat_map(|t| t.chars());
+                let first = chars.next();
+                if code.is_some() || first.is_some() {
+                    self.input.press(Stroke {
+                        key: code,
+                        text: first,
+                        repeat: event.repeat,
+                    });
+                }
+                // A key event can carry more than one character when a dead key
+                // finishes a composition. The key belongs to the first of them.
+                for c in chars {
+                    self.input.press(Stroke::text(c).repeated(event.repeat));
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop, true),
@@ -555,16 +632,38 @@ impl App {
         let Some(run) = self.running.as_mut() else {
             return;
         };
-        // Scripted keys, before anything reads the input: pressed and released in
-        // one frame, which is all an edge-triggered screen looks at.
+        // Scripted keys, before anything reads the input. A key carries the
+        // character it types, the way a window keyboard event does, or it drives
+        // nothing that reads text -- which is the menu, the chat line and every
+        // form field.
         let elapsed = run.started.elapsed().as_secs_f32();
-        while let Some((at, key)) = self.options.press.get(self.pressed).copied() {
-            if at > elapsed {
+        while let Some(k) = self.options.press.get(self.pressed).copied() {
+            if k.at > elapsed {
                 break;
             }
-            log::info!("--press: {key:?}");
-            self.input.key(key, true);
-            self.input.key(key, false);
+            match k.what {
+                ScriptedEdge::Down | ScriptedEdge::Repeat => {
+                    // Shift is read from what is held, so `--hold` on a Shift
+                    // key makes the keys under it type their capitals -- which
+                    // is the only way a scripted run can type the colon in a
+                    // zone address.
+                    let typed = if self.input.shift() {
+                        shifted_char(k.key)
+                    } else {
+                        char_for(k.key)
+                    };
+                    let repeat = k.what == ScriptedEdge::Repeat;
+                    if !repeat {
+                        log::info!("--press: {:?}", k.key);
+                    }
+                    let mut s = Stroke::press(k.key).repeated(repeat);
+                    if let Some(c) = typed {
+                        s = s.typing(c);
+                    }
+                    self.input.press(s);
+                }
+                ScriptedEdge::Up => self.input.release(k.key),
+            }
             self.pressed += 1;
         }
         if self.options.autopilot {
@@ -576,36 +675,30 @@ impl App {
             ls.browser.pump();
             // While the options are up they have the keyboard; the screen underneath
             // would otherwise take every character into whichever field has focus.
-            let pressed = if self.settings.is_some() {
-                self.input.take_pressed();
-                self.input.take_edges();
-                self.input.typed.clear();
+            let strokes = if self.settings.is_some() {
+                self.input.drop_strokes();
                 Vec::new()
             } else {
-                self.input.take_pressed()
+                self.input.take_strokes()
             };
-            let typed: String = std::mem::take(&mut self.input.typed)
-                .into_iter()
-                .map(|(_, c)| c)
-                .collect();
             self.input.take_edges();
             // The list owns Up/Down and the rest of its keys while it has the focus.
             // Whichever row it settles on fills in the Zone field, so the highlighted
             // row and the address can never disagree; Enter and Esc belong to the
             // screen, and the form below answers them.
             if ls.login.focused() == crate::game::login::Field::Zones {
-                let picked = ls.browser.input(&pressed);
+                let picked = ls.browser.input(&strokes);
                 if let Some(crate::game::zones::BrowserChoice::Pick(address)) = picked {
                     ls.login.server = address;
                     ls.login.error = None;
-                } else if !pressed.is_empty()
+                } else if strokes.iter().any(|s| s.key.is_some())
                     && let Some(z) = ls.browser.zones.get(ls.browser.selected)
                 {
                     ls.login.server.clone_from(&z.address);
                     ls.login.error = None;
                 }
             }
-            let choice = ls.login.input(&pressed, &typed, self.input.shift());
+            let choice = ls.login.input(&strokes, self.input.shift());
             match choice {
                 Some(Choice::Options) => {
                     self.settings = Some(SettingsUi::new(current_config(&self.options)));
@@ -671,9 +764,12 @@ impl App {
         // Connecting: pump until the arena is ready, then switch to the game.
         if let Screen::Connecting(conn) = &mut run.screen {
             conn.net.pump();
-            let give_up = self.input.take_pressed().contains(&KeyCode::Escape);
+            let give_up = self
+                .input
+                .take_strokes()
+                .iter()
+                .any(|s| s.first_press() == Some(KeyCode::Escape));
             self.input.take_edges();
-            self.input.typed.clear();
             let failed = conn.net.error.clone();
             if give_up || failed.is_some() {
                 // Back to the form if there was one; otherwise this was the whole run.

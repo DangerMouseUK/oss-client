@@ -423,6 +423,88 @@ pub fn types_text(key: KeyCode) -> bool {
     )
 }
 
+/// The character a key types on its own, where it types one.
+///
+/// A window keyboard event carries the character with it, so nothing in the
+/// running client needs this. A scripted run has only a key name, and a key
+/// without its character drives nothing that reads text — which is every menu,
+/// every form field and the chat line. US QWERTY unshifted, which is the layout
+/// the key names themselves assume (`Digit1` is `1`, `Semicolon` is `;`).
+pub fn char_for(key: KeyCode) -> Option<char> {
+    use KeyCode as K;
+    if !types_text(key) {
+        return None;
+    }
+    let ch = match key {
+        K::Space => ' ',
+        K::Numpad0 => '0',
+        K::Numpad1 => '1',
+        K::Numpad2 => '2',
+        K::Numpad3 => '3',
+        K::Numpad4 => '4',
+        K::Numpad5 => '5',
+        K::Numpad6 => '6',
+        K::Numpad7 => '7',
+        K::Numpad8 => '8',
+        K::Numpad9 => '9',
+        K::NumpadAdd => '+',
+        K::NumpadSubtract => '-',
+        K::NumpadMultiply => '*',
+        K::NumpadDivide => '/',
+        // The rest are named by what they type: `KeyA` reads `A`, `Digit1`
+        // reads `1`, and the punctuation keys are named by their character
+        // already. Taking it from there keeps one table rather than two that
+        // can drift. The international keys name themselves instead, and have
+        // no character that holds across layouts, so they fall out here.
+        other => {
+            let name = key_name(other);
+            let mut chars = name.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            ch
+        }
+    };
+    Some(ch.to_ascii_lowercase())
+}
+
+/// The character a key types with Shift held, where it types one.
+///
+/// The other half of [`char_for`], US QWERTY for the same reason, and needed for
+/// the same one: a scripted run cannot type a zone address without it, because
+/// the colon in `host:port` is Shift and the semicolon key.
+pub fn shifted_char(key: KeyCode) -> Option<char> {
+    use KeyCode as K;
+    let ch = match key {
+        K::Backquote => '~',
+        K::Minus => '_',
+        K::Equal => '+',
+        K::BracketLeft => '{',
+        K::BracketRight => '}',
+        K::Backslash => '|',
+        K::Semicolon => ':',
+        K::Quote => '"',
+        K::Comma => '<',
+        K::Period => '>',
+        K::Slash => '?',
+        K::Digit1 => '!',
+        K::Digit2 => '@',
+        K::Digit3 => '#',
+        K::Digit4 => '$',
+        K::Digit5 => '%',
+        K::Digit6 => '^',
+        K::Digit7 => '&',
+        K::Digit8 => '*',
+        K::Digit9 => '(',
+        K::Digit0 => ')',
+        // A letter is its capital, and the numpad and the space bar type the
+        // same character either way.
+        other => return char_for(other).map(|c| c.to_ascii_uppercase()),
+    };
+    Some(ch)
+}
+
 /// Whether a binding loses to the chat line while something is being typed.
 /// A Ctrl binding does not: Ctrl and a key put no character on the line.
 pub fn yields_to_chat(b: Binding) -> bool {
@@ -594,6 +676,74 @@ struct PadState {
     stick_y: f32,
 }
 
+/// One keystroke, whole: the key that went down and the character it typed.
+///
+/// A keyboard press is **one** event carrying both — press `Q` and the window
+/// delivers the key `KeyQ` and the character `q` together. Carrying them as two
+/// separate lists is what let a scripted `--press` drive half of this client and
+/// not the other half (it could only fill the key list, so the menu, the chat
+/// line and every form field ignored it), and it is why a key being held had to
+/// be deduped for the whole UI to keep one press from dropping a bomb every
+/// frame. Both of those are gone once a keystroke is one thing with the OS
+/// repeat flag on it, and each reader says for itself whether a repeat counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stroke {
+    /// The key that went down, where the window named one. A character arriving
+    /// on its own — an IME finishing a composition — has none.
+    pub key: Option<KeyCode>,
+    /// The character it typed, where it typed one. Keys like Tab and Escape type
+    /// a control character or nothing; readers that insert text drop those.
+    pub text: Option<char>,
+    /// The OS sent this because the key is being held, rather than because it
+    /// went down. Text editing wants these — holding Backspace must clear a
+    /// field — and a one-shot action does not.
+    pub repeat: bool,
+}
+
+impl Stroke {
+    /// A key going down with no character on it (Tab, Enter, an arrow).
+    pub fn press(key: KeyCode) -> Self {
+        Self {
+            key: Some(key),
+            text: None,
+            repeat: false,
+        }
+    }
+
+    /// A character arriving with no key of its own.
+    pub fn text(ch: char) -> Self {
+        Self {
+            key: None,
+            text: Some(ch),
+            repeat: false,
+        }
+    }
+
+    /// The character this stroke types.
+    pub fn typing(self, ch: char) -> Self {
+        Self {
+            text: Some(ch),
+            ..self
+        }
+    }
+
+    /// The same stroke, marked as the OS repeating a held key.
+    pub fn repeated(self, repeat: bool) -> Self {
+        Self { repeat, ..self }
+    }
+
+    /// The key, but only where this is the key going down rather than the OS
+    /// repeating it.
+    ///
+    /// One-shot keys read this, so holding Enter sends one line and holding F1
+    /// turns one help page. Text editing and anything that scrolls reads
+    /// [`Stroke::key`] instead, so holding Backspace clears a field at the rate
+    /// the player's own keyboard repeats.
+    pub fn first_press(self) -> Option<KeyCode> {
+        if self.repeat { None } else { self.key }
+    }
+}
+
 pub struct InputState {
     pub bindings: Bindings,
     pub pad_bindings: PadBindings,
@@ -602,13 +752,16 @@ pub struct InputState {
     held: HashSet<KeyCode>,
     /// Actions whose key went down since the last tick (edge-triggered actions).
     edges: Vec<Action>,
-    /// Raw key presses since the UI last looked (menus, chat).
-    pressed: Vec<KeyCode>,
-    /// Characters typed since the UI last looked, each with the key that typed it.
-    /// The key is kept because a key can be both a character and a game key, and
-    /// only the chat line can say which it is this time; see
+    /// Keystrokes since the UI last looked, in the order they arrived — menus,
+    /// the chat line and every form field read these.
+    ///
+    /// One list rather than two, because the key and the character it typed are
+    /// one event: a reader that takes them apart can no longer put a Backspace
+    /// back between the characters either side of it. The key is kept on the
+    /// character because a key can be both a character and a game key, and only
+    /// the chat line can say which it is this time; see
     /// [`Sandbox::ui_input`](crate::game::sandbox::Sandbox).
-    pub typed: Vec<(Option<KeyCode>, char)>,
+    strokes: Vec<Stroke>,
     /// The chat line has something on it, so keys that type characters belong to
     /// it rather than to the game.
     typing: bool,
@@ -635,17 +788,21 @@ impl InputState {
             pad_held: HashSet::new(),
             held: HashSet::new(),
             edges: Vec::new(),
-            pressed: Vec::new(),
-            typed: Vec::new(),
+            strokes: Vec::new(),
             typing: false,
             pad: PadState::default(),
         }
     }
 
-    pub fn key(&mut self, code: KeyCode, down: bool) {
-        if down {
-            if self.held.insert(code) {
-                self.pressed.push(code);
+    /// A keystroke, from the window or from a scripted run.
+    ///
+    /// Edge-triggered game actions fire on the key going down and not on the OS
+    /// repeating it: holding Tab drops one bomb, however long it is held. The
+    /// stroke itself is queued either way, so the UI sees the repeats.
+    pub fn press(&mut self, stroke: Stroke) {
+        if let Some(code) = stroke.key {
+            let fresh = self.held.insert(code);
+            if fresh && !stroke.repeat {
                 let (shift, ctrl) = (self.shift(), self.ctrl());
                 let typing = self.typing;
                 for a in Action::ALL {
@@ -658,6 +815,33 @@ impl InputState {
                     }
                 }
             }
+        }
+        self.strokes.push(stroke);
+    }
+
+    /// A key coming back up.
+    pub fn release(&mut self, code: KeyCode) {
+        self.held.remove(&code);
+    }
+
+    /// A key going down or coming up with no character on it: the plain form of
+    /// [`InputState::press`] and [`InputState::release`].
+    pub fn key(&mut self, code: KeyCode, down: bool) {
+        if down {
+            self.press(Stroke::press(code));
+        } else {
+            self.release(code);
+        }
+    }
+
+    /// Tracks a modifier without queueing a keystroke.
+    ///
+    /// The settings screen has the keyboard to itself, so nothing drains the
+    /// queue while it is up; it still needs Shift and Ctrl held so that a
+    /// captured binding reads correctly.
+    pub fn modifier(&mut self, code: KeyCode, down: bool) {
+        if down {
+            self.held.insert(code);
         } else {
             self.held.remove(&code);
         }
@@ -666,9 +850,8 @@ impl InputState {
     /// Releases everything (window lost focus).
     pub fn clear(&mut self) {
         self.held.clear();
-        self.pressed.clear();
+        self.strokes.clear();
         self.edges.clear();
-        self.typed.clear();
         self.pad = PadState::default();
     }
 
@@ -715,9 +898,17 @@ impl InputState {
             .any(|b| self.pad_held.contains(b))
     }
 
-    /// Takes the raw key presses since the last call.
-    pub fn take_pressed(&mut self) -> Vec<KeyCode> {
-        std::mem::take(&mut self.pressed)
+    /// Takes the keystrokes since the last call, in the order they arrived.
+    pub fn take_strokes(&mut self) -> Vec<Stroke> {
+        std::mem::take(&mut self.strokes)
+    }
+
+    /// Drops the keystrokes since the last call.
+    ///
+    /// Used where another screen has the keyboard: whatever was typed under it
+    /// is not the screen underneath's to read.
+    pub fn drop_strokes(&mut self) {
+        self.strokes.clear();
     }
 
     /// Takes the edge-triggered actions since the last call.
@@ -992,5 +1183,163 @@ mod tests {
         assert_eq!(i.take_edges(), vec![Action::Afterburner, Action::Portal]);
         let input = i.ship_input(&[Action::Portal]);
         assert!(input.portal && !input.warp);
+    }
+
+    #[test]
+    fn a_held_key_repeats_for_the_ui_and_not_for_the_game() {
+        // The two halves of the same keystroke, which is why they are one list.
+        // Tab is the bomb: however long it is held it drops one. The UI sees
+        // every repeat and decides for itself, which is how holding Backspace
+        // can clear a field while holding Tab drops nothing more.
+        let mut i = InputState::default();
+        i.press(Stroke::press(KeyCode::Tab));
+        i.press(Stroke::press(KeyCode::Tab).repeated(true));
+        i.press(Stroke::press(KeyCode::Tab).repeated(true));
+        assert_eq!(i.take_edges(), vec![Action::Bomb], "one bomb, not three");
+
+        let strokes = i.take_strokes();
+        assert_eq!(strokes.len(), 3, "the UI sees all three");
+        assert_eq!(strokes[0].first_press(), Some(KeyCode::Tab));
+        assert_eq!(strokes[1].first_press(), None, "a repeat is not a press");
+        assert_eq!(
+            strokes[2].key,
+            Some(KeyCode::Tab),
+            "but it is still the key"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_carries_its_character() {
+        // What `--press` could not do: the menu and every form field read the
+        // character, so a key arriving without one drove nothing.
+        let mut i = InputState::default();
+        i.press(Stroke::press(KeyCode::KeyQ).typing('q'));
+        let strokes = i.take_strokes();
+        assert_eq!(strokes.len(), 1, "one event, not two");
+        assert_eq!(strokes[0].key, Some(KeyCode::KeyQ));
+        assert_eq!(strokes[0].text, Some('q'));
+    }
+
+    #[test]
+    fn every_key_that_types_has_a_character_for_a_scripted_run() {
+        use KeyCode as K;
+        // The international keys are named rather than drawn, and what they type
+        // depends on the layout, so they are the deliberate exceptions.
+        let unnamed = [K::IntlBackslash, K::IntlRo, K::IntlYen];
+        for key in KEYS_THAT_TYPE {
+            if unnamed.contains(&key) {
+                continue;
+            }
+            assert!(
+                char_for(key).is_some(),
+                "{key:?} types text but has no character"
+            );
+        }
+        assert_eq!(char_for(K::KeyQ), Some('q'));
+        assert_eq!(char_for(K::Digit1), Some('1'));
+        assert_eq!(char_for(K::Space), Some(' '));
+        assert_eq!(char_for(K::Semicolon), Some(';'));
+        assert_eq!(char_for(K::Numpad7), Some('7'));
+        assert_eq!(char_for(K::NumpadAdd), Some('+'));
+        // A key that types nothing has nothing to synthesise.
+        assert_eq!(char_for(K::Enter), None);
+        assert_eq!(char_for(K::Tab), None);
+        assert_eq!(char_for(K::F1), None);
+    }
+
+    #[test]
+    fn shift_reaches_the_characters_an_address_needs() {
+        use KeyCode as K;
+        // The one that matters: a scripted run cannot type `host:port` without
+        // it, and the form will not submit an address with no colon in it.
+        assert_eq!(shifted_char(K::Semicolon), Some(':'));
+        assert_eq!(shifted_char(K::KeyQ), Some('Q'));
+        assert_eq!(shifted_char(K::Digit1), Some('!'));
+        assert_eq!(shifted_char(K::Minus), Some('_'));
+        assert_eq!(shifted_char(K::Space), Some(' '));
+        assert_eq!(shifted_char(K::Numpad7), Some('7'));
+        assert_eq!(shifted_char(K::Enter), None);
+    }
+
+    /// Every key [`types_text`] accepts, so the character table can be checked
+    /// against it rather than against itself.
+    const KEYS_THAT_TYPE: [KeyCode; 65] = {
+        use KeyCode as K;
+        [
+            K::Backquote,
+            K::Minus,
+            K::Equal,
+            K::BracketLeft,
+            K::BracketRight,
+            K::Backslash,
+            K::Semicolon,
+            K::Quote,
+            K::Comma,
+            K::Period,
+            K::Slash,
+            K::Space,
+            K::IntlBackslash,
+            K::IntlRo,
+            K::IntlYen,
+            K::KeyA,
+            K::KeyB,
+            K::KeyC,
+            K::KeyD,
+            K::KeyE,
+            K::KeyF,
+            K::KeyG,
+            K::KeyH,
+            K::KeyI,
+            K::KeyJ,
+            K::KeyK,
+            K::KeyL,
+            K::KeyM,
+            K::KeyN,
+            K::KeyO,
+            K::KeyP,
+            K::KeyQ,
+            K::KeyR,
+            K::KeyS,
+            K::KeyT,
+            K::KeyU,
+            K::KeyV,
+            K::KeyW,
+            K::KeyX,
+            K::KeyY,
+            K::KeyZ,
+            K::Digit0,
+            K::Digit1,
+            K::Digit2,
+            K::Digit3,
+            K::Digit4,
+            K::Digit5,
+            K::Digit6,
+            K::Digit7,
+            K::Digit8,
+            K::Digit9,
+            K::Numpad0,
+            K::Numpad1,
+            K::Numpad2,
+            K::Numpad3,
+            K::Numpad4,
+            K::Numpad5,
+            K::Numpad6,
+            K::Numpad7,
+            K::Numpad8,
+            K::Numpad9,
+            K::NumpadAdd,
+            K::NumpadSubtract,
+            K::NumpadMultiply,
+            K::NumpadDivide,
+        ]
+    };
+
+    #[test]
+    fn the_key_list_matches_what_types_text_accepts() {
+        // The list above is hand-written, so it is checked against the function
+        // it stands in for rather than trusted.
+        for key in KEYS_THAT_TYPE {
+            assert!(types_text(key), "{key:?} is in the list but types nothing");
+        }
     }
 }
