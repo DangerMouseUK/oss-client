@@ -72,6 +72,8 @@ Options:
                             user's settings folder)
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
   --screenshot-at <secs>    When to take that screenshot
+  --quit-at <secs>          Leave after this many seconds (testing; with
+                            OSS_PERF set, prints the frame-time distribution)
   --autopilot               Fly and shoot automatically (testing)
   --send <secs>:<line>      Type this line in game <secs> after the arena loads,
                             as if you had typed it (repeatable; testing)
@@ -114,6 +116,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut fullscreen = false;
     let mut screenshot = None;
     let mut screenshot_at = 2.0f32;
+    let mut quit_at: Option<f32> = None;
     let mut autopilot = false;
     let mut send: Vec<(f32, String)> = Vec::new();
     let mut mute = false;
@@ -187,6 +190,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
                     .ok()
                     .filter(|s| (0.0..=600.0).contains(s))
                     .ok_or("--screenshot-at must be 0-600 seconds")?
+            }
+            "--quit-at" => {
+                quit_at = Some(
+                    value("--quit-at")?
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|s| (0.0..=3600.0).contains(s))
+                        .ok_or("--quit-at must be 0-3600 seconds")?,
+                )
             }
             "--autopilot" => autopilot = true,
             "--send" => {
@@ -345,6 +357,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             fullscreen,
             screenshot,
             screenshot_at,
+            quit_at,
             autopilot,
             press: press.clone(),
             pointer: pointer.clone(),
@@ -416,6 +429,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         fullscreen,
         screenshot,
         screenshot_at,
+        quit_at,
         autopilot,
         press,
         pointer,

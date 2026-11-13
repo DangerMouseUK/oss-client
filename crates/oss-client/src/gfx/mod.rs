@@ -6,6 +6,7 @@
 //! game pixels stay smooth at high scales.
 
 pub mod atlas;
+pub mod perf;
 
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use bytemuck::{Pod, Zeroable};
 use winit::window::Window;
 
 pub use atlas::{AtlasBuilder, Region};
+pub use perf::{FrameWork, Perf, Stage};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -258,6 +260,32 @@ impl<I> InFlight<I> {
     }
 }
 
+/// Which fragment entry point the sprite pipeline uses: a direct texel fetch,
+/// or `OSS_GFX_SAMPLE=sample` for the filtered read it replaced.
+///
+/// Reading a texel is the dearest thing a sprite pass does on a software
+/// adapter, and the two ways of doing it are not close there: see the comment
+/// on `fs_main` in `sprite.wgsl`. The switch exists so the difference can be
+/// re-measured on any machine rather than taken on trust.
+fn sprite_fs() -> &'static str {
+    if std::env::var("OSS_GFX_SAMPLE").as_deref() == Ok("sample") {
+        "fs_sampled"
+    } else {
+        "fs_main"
+    }
+}
+
+/// `OSS_GFX_SIZE=<w>x<h>`: render at this size whatever the window is, so the
+/// pixel count can be swept where the window size is not ours to choose. DXGI
+/// stretches a swapchain smaller than its window when it presents, which is what
+/// a 1998 client in a window did too.
+fn forced_size() -> Option<(u32, u32)> {
+    let v = std::env::var("OSS_GFX_SIZE").ok()?;
+    let (w, h) = v.split_once(['x', 'X'])?;
+    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (64..=8192).contains(&w).then_some((w, h))
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -284,6 +312,15 @@ pub struct Renderer {
     /// Frames given to the GPU that have not come back; see
     /// [`MAX_FRAMES_IN_FLIGHT`].
     in_flight: InFlight<wgpu::SubmissionIndex>,
+    /// Per-frame stage timings, off unless `OSS_PERF` is set.
+    perf: Perf,
+    /// Set by `OSS_GFX_NO_STARS`: leaves the starfield out, which is how its
+    /// share of a frame is priced -- a fullscreen procedural pass is the
+    /// largest single thing a frame does on a software adapter.
+    skip_stars: bool,
+    /// Pixels the frame's quads cover, counting overdraw: what the sprite pass
+    /// actually asks the rasteriser to fill, which frame rate alone never says.
+    quad_px: u64,
 }
 
 /// One frame of egui output to draw over the game.
@@ -291,6 +328,13 @@ pub struct UiFrame {
     pub primitives: Vec<egui::ClippedPrimitive>,
     pub textures: egui::TexturesDelta,
     pub pixels_per_point: f32,
+}
+
+/// Whether an environment variable is set to something other than `0`. Used by
+/// the measurement switches, which are all off unless asked for.
+fn flag(name: &str) -> bool {
+    let v = std::env::var(name).unwrap_or_default();
+    !v.is_empty() && v != "0"
 }
 
 #[derive(Debug)]
@@ -315,6 +359,20 @@ impl Renderer {
             apply_limit_buckets: false,
         }))
         .map_err(|e| format!("no suitable GPU adapter: {e}"))?;
+        if flag("OSS_GFX_ADAPTERS") {
+            for a in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+                let info = a.get_info();
+                log::info!(
+                    "adapter: {:?} backend, {:?}, {:?}, driver {:?} {:?}, presents here: {}",
+                    info.backend,
+                    info.device_type,
+                    info.name,
+                    info.driver,
+                    info.driver_info,
+                    a.is_surface_supported(&surface),
+                );
+            }
+        }
         log::info!("GPU: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("oss-client"),
@@ -325,6 +383,13 @@ impl Renderer {
         .map_err(|e| e.to_string())?;
 
         let size = window.inner_size();
+        let forced_px = forced_size();
+        log::info!(
+            "window inner size {}x{} physical, scale factor {}",
+            size.width,
+            size.height,
+            window.scale_factor()
+        );
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -333,7 +398,31 @@ impl Renderer {
             .find(|f| !f.is_srgb())
             .or_else(|| caps.formats.first().copied())
             .ok_or("surface has no formats")?;
-        let present_mode = if vsync {
+        let forced = std::env::var("OSS_GFX_PRESENT").ok().and_then(|v| {
+            let m = match v.to_ascii_lowercase().as_str() {
+                "fifo" => wgpu::PresentMode::Fifo,
+                "fiforelaxed" | "fifo-relaxed" => wgpu::PresentMode::FifoRelaxed,
+                "mailbox" => wgpu::PresentMode::Mailbox,
+                "immediate" => wgpu::PresentMode::Immediate,
+                other => {
+                    log::warn!("OSS_GFX_PRESENT: no present mode called {other:?}");
+                    return None;
+                }
+            };
+            if caps.present_modes.contains(&m) {
+                Some(m)
+            } else {
+                log::warn!("OSS_GFX_PRESENT: this surface has no {m:?}");
+                None
+            }
+        });
+        let latency = std::env::var("OSS_GFX_LATENCY")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
+        let present_mode = if let Some(m) = forced {
+            m
+        } else if vsync {
             wgpu::PresentMode::Fifo
         } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
@@ -342,7 +431,10 @@ impl Renderer {
         } else {
             wgpu::PresentMode::Fifo
         };
-        log::info!("surface format {format:?}, present mode {present_mode:?}");
+        log::info!(
+            "surface format {format:?}, present mode {present_mode:?} of {:?}, frame latency {latency}",
+            caps.present_modes
+        );
         let config = wgpu::SurfaceConfiguration {
             usage: if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
@@ -350,10 +442,10 @@ impl Renderer {
                 wgpu::TextureUsages::RENDER_ATTACHMENT
             },
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: forced_px.map_or(size.width, |(w, _)| w).max(1),
+            height: forced_px.map_or(size.height, |(_, h)| h).max(1),
             present_mode,
-            desired_maximum_frame_latency: 1,
+            desired_maximum_frame_latency: latency,
             alpha_mode: caps
                 .alpha_modes
                 .first()
@@ -455,7 +547,7 @@ impl Renderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(sprite_fs()),
                 compilation_options: Default::default(),
                 targets: &target,
             }),
@@ -515,6 +607,9 @@ impl Renderer {
             ui: None,
             ui_free: Vec::new(),
             in_flight: InFlight::new(MAX_FRAMES_IN_FLIGHT),
+            perf: Perf::from_env(),
+            skip_stars: flag("OSS_GFX_NO_STARS"),
+            quad_px: 0,
         })
     }
 
@@ -538,7 +633,7 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
+        if width == 0 || height == 0 || forced_size().is_some() {
             return;
         }
         self.config.width = width;
@@ -574,6 +669,10 @@ impl Renderer {
     }
 
     fn make_texture(&self, width: u32, height: u32) -> GpuTexture {
+        log::debug!(
+            "texture {width}x{height} ({} KB)",
+            width * height * 4 / 1024
+        );
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -677,6 +776,7 @@ impl Renderer {
         ];
         let start = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&quad);
+        self.quad_px += (w.max(0.0) * h.max(0.0)) as u64;
         match self.batches.last_mut() {
             Some(b) if b.texture == texture && b.start + b.count == start => b.count += 6,
             _ => self.batches.push(Batch {
@@ -694,6 +794,7 @@ impl Renderer {
         time: f32,
         mut ui: Option<UiFrame>,
     ) -> Result<(), FrameError> {
+        self.perf.begin();
         // egui textures first, so a skipped frame doesn't lose them.
         if let Some(frame_ui) = ui.as_mut() {
             let (device, queue, format) = (&self.device, &self.queue, self.config.format);
@@ -712,14 +813,18 @@ impl Renderer {
             self.ui_free.extend(delta.free.drain());
             delta.clear();
         }
+        self.perf.end(Stage::UiTex);
         // Nothing past here is worth doing while the GPU is this far behind: the
         // frame could not be shown, and building it would only add to what is
         // already waiting. See [`MAX_FRAMES_IN_FLIGHT`].
         if !self.wait_for_room() {
             log::debug!("frame dropped ({} still unfinished)", self.in_flight.len());
+            self.perf.end(Stage::Wait);
+            self.perf.skipped();
             self.clear_queue();
             return Err(FrameError::Skip);
         }
+        self.perf.end(Stage::Wait);
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
@@ -728,12 +833,16 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 log::debug!("frame skipped (timeout/occluded)");
+                self.perf.end(Stage::Acquire);
+                self.perf.skipped();
                 self.clear_queue();
                 return Err(FrameError::Skip);
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 log::debug!("frame skipped (surface outdated/lost)");
                 self.surface.configure(&self.device, &self.config);
+                self.perf.end(Stage::Acquire);
+                self.perf.skipped();
                 self.clear_queue();
                 return Err(FrameError::Skip);
             }
@@ -742,6 +851,7 @@ impl Renderer {
                 return Err(FrameError::Fatal(format!("surface error: {other:?}")));
             }
         };
+        self.perf.end(Stage::Acquire);
 
         let globals = Globals {
             screen: [self.config.width as f32, self.config.height as f32],
@@ -762,12 +872,15 @@ impl Renderer {
                 .write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&self.vertices));
         }
 
+        self.perf.end(Stage::Write);
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut drawn = 0u32;
+        let stars_drawn;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
@@ -786,7 +899,8 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            if stars.is_some() {
+            let starred = stars.is_some() && !self.skip_stars;
+            if starred {
                 pass.set_pipeline(&self.star_pipeline);
                 pass.draw(0..3, 0..1);
             }
@@ -797,9 +911,11 @@ impl Renderer {
                     if let Some(t) = self.gpu(b.texture) {
                         pass.set_bind_group(1, &t.bind_group, &[]);
                         pass.draw(b.start..b.start + b.count, 0..1);
+                        drawn += 1;
                     }
                 }
             }
+            stars_drawn = starred;
         }
         let mut ui_buffers = Vec::new();
         if let Some(frame_ui) = ui {
@@ -866,14 +982,27 @@ impl Renderer {
             );
             Some((path, buffer, row))
         });
+        self.perf.end(Stage::Encode);
         let submission = self
             .queue
             .submit(ui_buffers.into_iter().chain([encoder.finish()]));
         self.in_flight.push(submission);
+        self.perf.end(Stage::Submit);
         if let Some((path, buffer, row)) = readback {
             self.save_capture(&path, &buffer, row);
+            self.perf.begin();
         }
         self.queue.present(frame);
+        self.perf.end(Stage::Present);
+        if self.perf.on() {
+            self.perf.work(FrameWork {
+                vertices: self.vertices.len() as u32,
+                draws: drawn,
+                pixels: FrameWork::size(self.config.width, self.config.height),
+                quad_px: self.quad_px,
+                stars: stars_drawn,
+            });
+        }
         self.clear_queue();
         Ok(())
     }
@@ -948,9 +1077,15 @@ impl Renderer {
         }
     }
 
+    /// The frame-timing probe, for the stages measured outside this module.
+    pub fn perf(&mut self) -> &mut Perf {
+        &mut self.perf
+    }
+
     fn clear_queue(&mut self) {
         self.vertices.clear();
         self.batches.clear();
+        self.quad_px = 0;
     }
 }
 
