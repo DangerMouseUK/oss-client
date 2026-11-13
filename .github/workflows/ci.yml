@@ -36,7 +36,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: oss-client
-      - run: cargo fmt --all --check
+      # Plain `cargo fmt`, never `--all`: `--all` takes its package list from
+      # `cargo metadata`, which here reaches the ../oss-core checkout above --
+      # 34 of the 43 source roots it covers are in that repo -- so this repo's
+      # CI would go red for a formatting fault in a different one.
+      - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
