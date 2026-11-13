@@ -431,7 +431,12 @@ impl Session {
     /// The login's tail reports both, and some servers read them: a zero
     /// server address together with a zero port is taken to mean a SOCKS5
     /// proxy, and the port is compared with the datagram's source port to
-    /// detect NAT. Neither is knowable here — `oss_net` owns no socket — so
+    /// detect NAT. **That is the Subspace Server .NET model, and it is the only
+    /// one documented here, not the only one there is**: measured over six
+    /// logins on 2026-11-12, a live zone enforced the address and the port
+    /// *each independently* and rejected a zero address sent with a real port,
+    /// which the conjunctive rule would have let through. Fill in both.
+    /// Neither is knowable here — `oss_net` owns no socket — so
     /// whatever drives the socket supplies them. [`crate::udp::UdpDriver`] does it
     /// for you; a caller driving its own socket should call this before the
     /// session connects, and one that does not simply reports zeros, as it did
