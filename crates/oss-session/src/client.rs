@@ -39,7 +39,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use oss_proto::c2s::{self, Login};
-use oss_proto::checksum;
 
 /// The login packet a client sends: which form, and the fields that differ with it.
 ///
@@ -140,9 +139,22 @@ impl ClientProfile for VieClient {
         LoginForm::vie()
     }
 
-    fn security(&self, challenge: SecurityChallenge) -> SecurityAnswer {
+    fn security(&self, _challenge: SecurityChallenge) -> SecurityAnswer {
+        // A real SubSpace 1.34 client leaves this field at zero — it does not
+        // compute an executable checksum at all. Measured 2026-11-13 against the
+        // 1998 binary (630,784 B, sha256 526604AD…) driven into an oss-server
+        // arena: four responses under four different challenge keys, every one
+        // reporting `exe_checksum = 0x00000000`, while the settings and map
+        // checksums in those same packets were correct and key-dependent. So the
+        // zero is the client answering properly, not failing to answer.
+        //
+        // `oss_proto::checksum::vie_exe_checksum` is not wrong and is not going
+        // away: it is what a *bot* presenting itself as a VIE client sends
+        // (MervBot computes it by walking `SUBSPACE.EXE`), and what a server
+        // verifies such a bot against. It is simply not what the client sends,
+        // and this profile exists to be the client.
         SecurityAnswer {
-            exe_checksum: checksum::vie_exe_checksum(challenge.key),
+            exe_checksum: 0,
             continuum: None,
         }
     }
@@ -209,9 +221,17 @@ mod tests {
             map_crc32: Some(0xDEAD_BEEF),
         });
         assert_eq!(
-            answer.exe_checksum,
-            checksum::vie_exe_checksum(0x1234_5678),
-            "the public VIE arithmetic, keyed by the challenge"
+            answer.exe_checksum, 0,
+            "a real 1.34 client reports no exe checksum, whatever the key"
+        );
+        // and it is the key-independence that matters, not the one value
+        assert_eq!(
+            p.security(SecurityChallenge {
+                key: 0xDEAD_BEEF,
+                map_crc32: None,
+            })
+            .exe_checksum,
+            0
         );
         assert_eq!(
             answer.continuum, None,
