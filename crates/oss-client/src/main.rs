@@ -55,8 +55,10 @@ Options:
                             line and the form; repeatable; testing)
   --hold <secs>:<key>:<for> Hold that key for <for> seconds, repeating it the way
                             a keyboard does (thrust, guns; repeatable; testing)
-  --click <secs>:<x>,<y>    Click the start-up screen at that point <secs> in,
-                            in UI pixels from the top-left (repeatable; testing)
+  --click <secs>:<x>,<y>    Click at that point <secs> in, in UI pixels (screen
+                            pixels over the pixel scale) from the top-left: the
+                            start-up screen, or the settings screen while it is
+                            up (repeatable; testing)
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected

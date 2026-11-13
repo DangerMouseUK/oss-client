@@ -135,6 +135,9 @@ pub struct Options {
     /// are in UI pixels (game pixels from the top-left), which is what every
     /// position in the drawing code is in, so a click can be aimed at what a
     /// screenshot shows.
+    ///
+    /// While the settings screen is up the click goes to it instead, in the same
+    /// units; see [`App::egui_click`] for why that one takes a different road.
     pub click: Vec<(f32, f32, f32)>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
@@ -738,6 +741,15 @@ impl App {
             return;
         };
         let elapsed = since_start.as_secs_f32();
+        // A scripted click arrives in UI pixels. The settings screen is egui's and
+        // wants points; both of those are physical pixels over a factor, and the
+        // window that holds the factors is borrowed further down.
+        let ui_scale = self.running.as_ref().map_or(1.0, |r| r.scale.max(1) as f32);
+        let egui_ppp = self
+            .running
+            .as_ref()
+            .map_or(1.0, |r| r.window.scale_factor() as f32)
+            * self.egui_ctx.zoom_factor();
         // Scripted clicks: put the pointer there, then click, which is the order
         // a real pointer does it in and the order the hover highlight needs. Run
         // before the window is borrowed so the pointer stays where it was put,
@@ -747,6 +759,11 @@ impl App {
                 break;
             }
             log::info!("--click: {mx},{my}");
+            if self.settings.is_some() {
+                self.egui_click(mx, my, ui_scale, egui_ppp);
+                self.clicks += 1;
+                continue;
+            }
             self.cursor = Some((mx, my));
             self.clicked = true;
             self.clicks += 1;
@@ -1108,6 +1125,50 @@ impl App {
             let _ = state.on_window_event(&run.window, event);
         }
     }
+
+    /// A scripted click aimed at the settings screen. That screen is egui's, and
+    /// egui reads its own queue rather than the pointer the screens below keep,
+    /// so a click meant for it has to be put where egui will look for it.
+    ///
+    /// Deliberately not a synthesised `WindowEvent`: that would mean fabricating
+    /// a winit `DeviceId`, which is an unsafe call on a type winit owns, and
+    /// `egui-winit` would unpack the event into exactly these three a line later.
+    /// Going straight to egui's queue fakes nothing and borrows nothing.
+    ///
+    /// `--click` stays in UI pixels here, as everywhere else, rather than growing
+    /// a second rule for one screen -- so at a game scale of 2 a point read off a
+    /// screenshot of this screen is halved, even though egui drew that screen the
+    /// same size either way. The resolved point is logged for exactly that
+    /// reason: a click that lands in the wrong place should say so.
+    fn egui_click(&mut self, x: f32, y: f32, ui_scale: f32, pixels_per_point: f32) {
+        let Some(state) = self.egui_state.as_mut() else {
+            // Only before the settings screen's first frame, since that is what
+            // builds the state. Said out loud rather than dropped, because a
+            // click that quietly does nothing is what this flag used to do here.
+            log::warn!("--click: the settings screen has not drawn yet; ignored");
+            return;
+        };
+        let pos = egui::pos2(
+            egui_point(x, ui_scale, pixels_per_point),
+            egui_point(y, ui_scale, pixels_per_point),
+        );
+        log::info!("--click: the settings screen, at {:.0},{:.0}", pos.x, pos.y);
+        let input = state.egui_input_mut();
+        // No modifiers: scripted keys go to the client's own input, which the
+        // settings screen does not share, so nothing here can be holding one.
+        let modifiers = egui::Modifiers::default();
+        input.events.push(egui::Event::PointerMoved(pos));
+        // Down and up together, the way `--press` taps a key. egui settles a
+        // click on the release, so both have to arrive for a button to fire.
+        for pressed in [true, false] {
+            input.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            });
+        }
+    }
 }
 
 /// The settings as they stand now, for the settings screen.
@@ -1234,6 +1295,15 @@ fn wanted_scale(chosen: Option<u32>, display_factor: f64) -> u32 {
     chosen
         .unwrap_or_else(|| display_factor.round().max(1.0) as u32)
         .clamp(1, 8)
+}
+
+/// One axis of a scripted click, crossing from the flag's units into egui's.
+///
+/// `--click` is in UI pixels -- screen pixels over the pixel scale -- and egui
+/// works in points, which are screen pixels over its own factor. Both sides meet
+/// at screen pixels, so neither screen has to know the other's units.
+fn egui_point(ui: f32, ui_scale: f32, pixels_per_point: f32) -> f32 {
+    ui * ui_scale / pixels_per_point
 }
 
 /// A new screenshot file: `screenshots/oss-YYYY-MM-DD-HHMMSS.png` beside the
@@ -1618,6 +1688,22 @@ mod tests {
         assert_eq!(wanted_scale(Some(3), 1.0), 3);
         assert_eq!(wanted_scale(Some(99), 1.0), 8);
         assert_eq!(wanted_scale(Some(0), 2.0), 1, "0 as a value, not as None");
+    }
+
+    /// The settings screen is egui's and is drawn the same size whatever the
+    /// pixel scale is, so the flag's one unit has to be converted rather than
+    /// assumed. Getting this wrong is a click that lands somewhere else and
+    /// says nothing, which is why it is pinned here and logged at run time.
+    #[test]
+    fn a_scripted_click_reaches_egui_through_screen_pixels() {
+        // Scale 1 on an unscaled display: the flag's numbers are egui's numbers.
+        assert_eq!(egui_point(441.0, 1.0, 1.0), 441.0);
+        // At a pixel scale of 2, a point read off a screenshot of the settings
+        // screen is halved for the flag, and lands back where it was read.
+        assert_eq!(egui_point(220.5, 2.0, 1.0), 441.0);
+        // A display at 150%: egui draws larger, so the same screen pixel is
+        // fewer points in.
+        assert_eq!(egui_point(441.0, 1.0, 1.5), 294.0);
     }
 
     #[test]
