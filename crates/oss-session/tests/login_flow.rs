@@ -499,7 +499,10 @@ fn logs_in_enters_arena_downloads_map_and_plays() {
         sec.settings_checksum,
         checksum::settings_checksum(KEY, &zone.settings)
     );
-    assert_eq!(sec.exe_checksum, checksum::vie_exe_checksum(KEY));
+    // A real SubSpace 1.34 client leaves this at zero (measured 2026-11-13 against
+    // the 1998 binary); the settings and map checksums either side of it are the
+    // keyed ones it really does send.
+    assert_eq!(sec.exe_checksum, 0);
     let level = oss_formats::Level::parse(&map_bytes()).unwrap();
     let grid = level.tile_grid();
     assert_eq!(
