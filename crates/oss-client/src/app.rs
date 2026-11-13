@@ -419,10 +419,7 @@ impl ApplicationHandler for App {
             Ok(r) => r,
             Err(e) => return self.fail(event_loop, format!("graphics: {e}")),
         };
-        let scale = self
-            .options
-            .scale
-            .unwrap_or_else(|| window.scale_factor().round().max(1.0) as u32);
+        let scale = wanted_scale(self.options.scale, window.scale_factor());
         let screen = match &self.options.mode {
             Mode::Sandbox { ship, .. } => {
                 match Sandbox::new(
@@ -1203,12 +1200,16 @@ impl App {
                         .then_some(winit::window::Fullscreen::Borderless(None)),
                 );
             }
-            if let Some(s) = cfg.scale {
-                run.scale = s;
-            }
+            // 0 on the slider means "take it from the display", which is a value
+            // to work out now, not a setting to skip. Skipping it is what made
+            // choosing 0 look as though it did nothing: the old scale stayed
+            // until the next start. The same function the first frame used, so
+            // the two cannot answer differently.
+            let wanted = wanted_scale(cfg.scale, run.window.scale_factor());
+            run.scale = wanted;
             if let Screen::Game(game) = &mut run.screen {
                 game.apply_settings(
-                    cfg.scale,
+                    Some(wanted),
                     cfg.volume,
                     cfg.macros.clone(),
                     cfg.palette,
@@ -1218,6 +1219,20 @@ impl App {
         }
         self.options.fullscreen = cfg.fullscreen;
     }
+}
+
+/// The pixel scale to run at: the one that was chosen, or the display's own
+/// where nothing was.
+///
+/// `None` is the settings slider's 0, "from the display". It is a value to
+/// resolve, not a setting to leave alone -- treating it as the latter is what
+/// made choosing 0 appear to do nothing, because the old scale simply stayed.
+/// Used both for the first frame and when the settings are saved, so the two
+/// cannot disagree.
+fn wanted_scale(chosen: Option<u32>, display_factor: f64) -> u32 {
+    chosen
+        .unwrap_or_else(|| display_factor.round().max(1.0) as u32)
+        .clamp(1, 8)
 }
 
 /// A new screenshot file: `screenshots/oss-YYYY-MM-DD-HHMMSS.png` beside the
@@ -1587,6 +1602,22 @@ fn known_servers_path(o: &Options) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "The scale number doesn't seem to stick or even take effect" -- the
+    /// second half of that was choosing 0, which resolved to nothing at all.
+    #[test]
+    fn zero_means_the_display_rather_than_no_change() {
+        // 0 on the slider reaches here as `None`, and must come back as a real
+        // scale. Returning the old one is what made the setting look dead.
+        assert_eq!(wanted_scale(None, 1.0), 1, "an ordinary display");
+        assert_eq!(wanted_scale(None, 2.0), 2, "a high-DPI one");
+        assert_eq!(wanted_scale(None, 1.5), 2, "rounded, not truncated");
+        assert_eq!(wanted_scale(None, 0.0), 1, "never zero, whatever is asked");
+        // A chosen scale is kept, and kept inside what the renderer accepts.
+        assert_eq!(wanted_scale(Some(3), 1.0), 3);
+        assert_eq!(wanted_scale(Some(99), 1.0), 8);
+        assert_eq!(wanted_scale(Some(0), 2.0), 1, "0 as a value, not as None");
+    }
 
     #[test]
     fn utc_stamps() {
