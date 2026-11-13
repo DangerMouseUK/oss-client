@@ -34,8 +34,27 @@ fn vs_main(v: VsIn) -> VsOut {
     return out;
 }
 
+// Every sprite here is nearest-neighbour pixel art, so what the fragment wants
+// is one texel, not a filtered sample. `textureSample` asks the rasteriser for
+// a filtered read whatever the sampler's filter modes say, and on a software
+// adapter that read costs about forty times a direct fetch: measured on WARP at
+// 43 ns a textured pixel against 2.6 ns, which was three quarters of the frame.
+// `fs_sampled` below is the same shader through the sampler, kept so the two can
+// be compared on any machine (`OSS_GFX_SAMPLE=sample`); on a real GPU they cost
+// the same and produce the same pixels.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex, 0));
+    let texel = vec2<i32>(clamp(in.uv * size, vec2<f32>(0.0), size - 1.0));
+    let c = textureLoad(tex, texel, 0) * in.color;
+    if (c.a <= 0.0) {
+        discard;
+    }
+    return c;
+}
+
+@fragment
+fn fs_sampled(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv) * in.color;
     if (c.a <= 0.0) {
         discard;

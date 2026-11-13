@@ -149,6 +149,9 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     /// Seconds after start to take the screenshot.
     pub screenshot_at: f32,
+    /// `--quit-at`: leave after this many seconds, so a timed measurement run
+    /// ends by itself and the frame-time summary is printed.
+    pub quit_at: Option<f32>,
     /// Drive the ship automatically (for screenshots and smoke tests).
     pub autopilot: bool,
     /// `--press` and `--hold`: scripted keyboard events, soonest first (testing).
@@ -573,6 +576,7 @@ impl ApplicationHandler for App {
                 event_loop.exit()
             }
             WindowEvent::Resized(size) => {
+                log::debug!("resized to {}x{}", size.width, size.height);
                 if let Some(run) = self.running.as_mut() {
                     run.renderer.resize(size.width, size.height);
                 }
@@ -764,6 +768,7 @@ impl ApplicationHandler for App {
 impl App {
     /// One frame: input, network, simulation and (when `draw`) rendering.
     fn frame(&mut self, event_loop: &ActiveEventLoop, draw: bool) {
+        let frame_at = std::time::Instant::now();
         if let Some(g) = self.gilrs.as_mut() {
             while let Some(ev) = g.next_event() {
                 let pressed = self.input.gamepad(ev.event);
@@ -1092,7 +1097,13 @@ impl App {
                         Err(e) => game.message(format!("Can't save a screenshot: {e}"), color::RED),
                     }
                 }
-                draw.then(|| game.draw(&mut run.renderer))
+                draw.then(|| {
+                    let at = std::time::Instant::now();
+                    let stars = game.draw(&mut run.renderer);
+                    let took = at.elapsed();
+                    run.renderer.perf().record(crate::gfx::Stage::Draw, took);
+                    stars
+                })
             }
             Screen::Connecting(_) | Screen::Login(_) if !draw => None,
             Screen::Login(ls) => {
@@ -1140,6 +1151,15 @@ impl App {
         match run.renderer.render(stars, 0.0, ui_frame) {
             Ok(()) | Err(FrameError::Skip) => {}
             Err(FrameError::Fatal(e)) => return self.fail(event_loop, e),
+        }
+        run.renderer.perf().frame_done(frame_at.elapsed());
+        if let Some(at) = self.options.quit_at
+            && run.started.elapsed().as_secs_f32() >= at
+        {
+            log::info!("--quit-at {at}: leaving");
+            leave_zone(&mut run.screen);
+            event_loop.exit();
+            return;
         }
         // A skipped frame (e.g. occluded window) keeps the capture pending.
         if run.captured && run.renderer.capture.is_none() {
