@@ -21,14 +21,21 @@ Rust game client for SubSpace/Continuum. Licence **GPL-2.0-or-later**; `oss-asse
   `docs` job, and it is the only one that catches a rustdoc fault — a public item linking to a
   private one, a broken intra-doc link, a bad code fence. oss-core's `main` went red on exactly
   that on 2026-11-11, after fmt, clippy and tests all passed locally.
-  (CI's own `fmt` step uses `--all --check`, which only reads: it never writes to `../oss-core`.)
+  (CI's own `fmt` step runs plain `cargo fmt --check` — narrowed from `--all --check` in
+  `12b291b` on 2026-11-13, because the `--all` form reached `../oss-core` and would redden
+  this repo's CI for a formatting fault in that one. Read `.github/workflows/ci.yml` for what
+  CI does today: this line said the opposite for a day, and nobody checked.)
   `cargo fmt --all` takes its package list from `cargo metadata`, which includes path
-  dependencies outside this workspace. In this repo it therefore hands rustfmt 30 source
-  roots in the sibling `../oss-core` checkout — every crate there, including
+  dependencies outside this workspace. In this repo it therefore hands rustfmt every source
+  root in the sibling `../oss-core` checkout — every crate there, including
   `oss-conformance` and `oss-bot-sdk`, which this repo does not depend on — and
   **rewrites oss-core in place**, across a repo boundary and without saying so. Plain
   `cargo fmt` at the workspace root covers exactly this repo's four crates, which is what
-  is wanted. Verified 2026-11-11 with `cargo fmt --all --verbose --check`.
+  is wanted. Counted on 2026-11-13 with `cargo fmt --all --verbose --check` (that form only
+  reads): 44 source roots under `--all`, 34 of them in `../oss-core`; 10 under plain
+  `cargo fmt`, none of them. Those totals climb as either repo gains crates, tests, examples
+  or benches, so re-count rather than trust them — the verbose output names each root on a
+  line beginning `[lib (2024)]`, and no line of it begins `Formatting`.
   **And the writing form reformats every file in the workspace, including ones another
   session has uncommitted.** Harmless while one session worked at a time; not harmless now.
   On 2026-11-12 two sessions reformatted each other's in-progress files within one hour, in
