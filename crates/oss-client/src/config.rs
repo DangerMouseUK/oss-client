@@ -163,6 +163,18 @@ impl Config {
                 }
                 ("player", "name") => {
                     c.name = (!value.is_empty()).then(|| value.to_string());
+                    // The name is the start-up screen's, remembered in
+                    // `login.ini`. This key is only the seed for a run that has
+                    // never been through that screen, so a reader who sets it
+                    // and sees nothing change is told why rather than left to
+                    // work it out. It used to have a box in the options as well,
+                    // which made two places setting one thing and only one of
+                    // them winning.
+                    warn(
+                        "player name is set on the start-up screen and remembered \
+                         there; this key only seeds the first run"
+                            .to_string(),
+                    );
                     Ok(())
                 }
                 ("macros", _) => {
@@ -242,10 +254,11 @@ impl Config {
              servers = {}\n\n",
             self.directories.join(", ")
         );
-        s += &format!(
-            "[player]\nname = {}\n\n",
-            self.name.as_deref().unwrap_or("")
-        );
+        // No `[player] name`. The name is the start-up screen's and is
+        // remembered in `login.ini`; a file that still carries the key is read
+        // (and warned about) but it is never written again, because writing a
+        // key while telling the reader not to set it is the two-sources fault
+        // in another coat.
         s += "[keys]\n\
                 ; action = key, key... Keys use their US-layout names (ArrowUp, ControlLeft,\n\
                 ; KeyA, Digit1, F3, Tab, Backquote...). Prefixes: Shift+ and Ctrl+ need that\n\
@@ -464,7 +477,6 @@ mod tests {
             vsync: true,
             mute: true,
             volume: 25,
-            name: Some("Pilot One".into()),
             palette: crate::game::palette::PaletteKind::Tritanopia,
             ui_scale: 2,
             pad: {
@@ -478,6 +490,28 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);
+    }
+
+    /// The player name is read for an old file and never written back: its home
+    /// is the start-up screen, which remembers it in `login.ini`. Two places
+    /// setting one thing is the fault this removed, and a file that is still
+    /// written with the key would be that fault in another coat.
+    #[test]
+    fn the_player_name_is_read_once_and_never_written() {
+        let (c, warnings) = Config::parse("[player]\nname = Pilot One\n");
+        assert_eq!(
+            c.name.as_deref(),
+            Some("Pilot One"),
+            "an old file still loads"
+        );
+        assert_eq!(warnings.len(), 1, "and is told where the name really lives");
+        assert!(
+            !c.to_text().contains("[player]"),
+            "but the key is not written again"
+        );
+        let (back, warnings) = Config::parse(&c.to_text());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(back.name, None, "so the seed is spent, not kept in sync");
     }
 
     #[test]

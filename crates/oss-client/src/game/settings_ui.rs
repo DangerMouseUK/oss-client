@@ -1,4 +1,9 @@
-//! The settings screen (egui): video, audio, player name, key bindings and macros.
+//! The settings screen (egui): video, audio, key bindings and macros.
+//!
+//! **No player name.** It is set on the start-up screen and remembered in
+//! `login.ini`, so a box here would be a second place setting one thing -- and
+//! the one that almost never wins, since the remembered name beats it. A player
+//! who changed it here and saw no effect had been lied to.
 //!
 //! Opened from the Esc menu (O). Edits a copy of the settings; Save writes
 //! `oss-client.ini` and applies what can change while playing (bindings, macros,
@@ -31,7 +36,6 @@ pub struct SettingsUi {
     capture: Option<Capture>,
     /// Shown at the bottom (saved, failed...).
     pub status: Option<String>,
-    name: String,
 }
 
 /// Continuum's own UI colours, out of its `colors.bm2`: the near-black green it
@@ -84,12 +88,10 @@ pub fn binding_label(b: &Binding) -> String {
 
 impl SettingsUi {
     pub fn new(cfg: Config) -> Self {
-        let name = cfg.name.clone().unwrap_or_default();
         Self {
             cfg,
             capture: None,
             status: None,
-            name,
         }
     }
 
@@ -179,8 +181,6 @@ impl SettingsUi {
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
-                        self.cfg.name =
-                            Some(self.name.trim().to_string()).filter(|n| !n.is_empty());
                         action = UiAction::Save;
                     }
                     if ui.button("Close").clicked() {
@@ -226,14 +226,6 @@ impl SettingsUi {
                     egui::Slider::new(&mut self.cfg.ui_scale, 0..=4)
                         .text("larger interface (text, HUD)"),
                 );
-            });
-        egui::CollapsingHeader::new("Player")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut self.name);
-                });
             });
         egui::CollapsingHeader::new("Keys").show(ui, |ui| {
             egui::Grid::new("keys").striped(true).show(ui, |ui| {
