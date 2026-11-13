@@ -200,6 +200,18 @@ pub enum SessionEvent {
     },
     LoggedIn,
     /// Your player id in the arena.
+    ///
+    /// **A deliberate divergence in pace.** Measured against Trench Wars on
+    /// 2026-11-12, a real Continuum client took about eight seconds between the
+    /// login reply and entering the arena, where this one takes about 27
+    /// milliseconds. The eight seconds were the news file and the settings
+    /// arriving over a connection nobody has any more; nothing in the protocol
+    /// asks for the wait, no zone met so far has objected to arriving quickly,
+    /// and the news is still fetched -- [`Session::request_news_if_new`], on
+    /// login, skipping it when the cached copy matches the zone's checksum,
+    /// which is what Continuum does. So the gap is recorded rather than
+    /// reproduced: if a zone is ever found that needs the pause, it belongs
+    /// here, with that zone named.
     EnteredArena {
         pid: i16,
     },
