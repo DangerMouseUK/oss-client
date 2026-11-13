@@ -35,20 +35,19 @@ offer off entirely.
 
 ## Continuum's encryption
 
-Zones that require Continuum's own encryption **cannot be joined from this client**, and that
-is not a gap waiting to be filled. Continuum's key expansion is not public; this project does
-not reverse-engineer it and does not carry it, which is a deliberate licensing and community
-decision rather than an oversight.
+Continuum's key expansion is not public and this repository does not carry it. That is
+deliberate rather than an oversight, and it is not a gap waiting to be filled.
 
 What that means in practice:
 
+- A client built from this repository cannot join a zone that requires Continuum encryption.
 - Zones that accept VIE — which is most zones that run ASSS, and the original server — are
-  reachable.
-- Zones configured to require Continuum are not reachable at all.
-- The session layer's security path is a trait, so an operator or a private build can
-  register its own cipher through `oss_net::Acceptor` / `oss_net::Cipher` without changing
+  reachable, as are OpenSec zones.
+- The session layer's security path is a trait, so a build that supplies its own cipher can
+  register it through `oss_net::Acceptor` / `oss_net::Cipher` without changing
   anything here. That is how a real Continuum 0.40 client came to play on `oss-server`.
 
 The *shape* of the Continuum handshake (`00 10`–`00 14`) is documented in
 [oss-core's docs/protocol/encryption.md](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/encryption.md),
-read off the client by running it. The algorithm is not there and will not be.
+read off the client by running it. **The algorithm is not in these repositories and will not
+be.**

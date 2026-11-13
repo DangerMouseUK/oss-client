@@ -133,12 +133,12 @@ attaching as a turret, the zone browser, recording and replaying a visit, a sett
 screenshots, colour-blind and high-contrast palettes, interface scaling, gamepads with
 remapping, and an offline sandbox on any `.lvl` map.
 
-**Zones that require Continuum's encryption cannot be joined, and that will not change
-here.** Continuum's key expansion is not public; this project does not reverse-engineer it
-and does not carry it. That is a deliberate licensing and community decision, not a gap
-waiting to be filled. Zones that accept VIE — which includes zones running ASSS and the
-original server — are reachable. The security path is a trait, so a private build can
-register its own cipher without changing anything here.
+**A client built from this repository cannot join zones that require Continuum's
+encryption.** Continuum's key expansion is not public and this repository does not carry it,
+which is deliberate rather than a gap waiting to be filled. Zones that accept VIE — which
+includes zones running ASSS and the original server — are reachable, as are OpenSec zones.
+The security path is a trait, so a build that supplies its own cipher can reach more without
+anything here changing.
 [docs/encryption.md](docs/encryption.md) says exactly what this means for you.
 
 **A public zone may still turn you away for its own reasons.** The zones this client has
