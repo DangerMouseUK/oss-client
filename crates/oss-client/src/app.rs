@@ -143,7 +143,8 @@ pub struct Options {
     pub mute: bool,
     /// Master volume 0-100.
     pub volume: u32,
-    /// `--config`: the settings file, if not the default one.
+    /// `--config`: the settings file, if not the default one. It has to exist
+    /// already; only the default one is written when it is missing.
     pub config: Option<PathBuf>,
     pub bindings: crate::game::input::Bindings,
     /// Where the settings file lives (for the settings screen's Save).

@@ -61,8 +61,9 @@ Options:
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
   --security <mode>         auto (OpenSec, falling back to VIE), opensec or vie
-  --config <file>           Settings file (default: oss-client.ini in the user's
-                            settings folder, created on first run)
+  --config <file>           Settings file, which must already exist; only the
+                            default is written for you (oss-client.ini in the
+                            user's settings folder)
   --screenshot <file.png>   Save a frame after 2 seconds, then exit (testing)
   --screenshot-at <secs>    When to take that screenshot
   --autopilot               Fly and shoot automatically (testing)
