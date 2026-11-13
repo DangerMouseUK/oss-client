@@ -59,6 +59,10 @@ Options:
                             pixels over the pixel scale) from the top-left: the
                             start-up screen, or the settings screen while it is
                             up (repeatable; testing)
+  --drag <secs>:<x>,<y>:<x>,<y>
+                            Drag from the first point to the second, <secs> in,
+                            in the same units -- what a slider answers to, where
+                            a click is not enough (repeatable; testing)
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
@@ -122,7 +126,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut open_settings = false;
     let mut open_screen = None;
     let mut press: Vec<app::ScriptedKey> = Vec::new();
-    let mut click: Vec<(f32, f32, f32)> = Vec::new();
+    let mut pointer: Vec<app::ScriptedPoint> = Vec::new();
     let mut directories = Vec::new();
     let mut open_zones = false;
     let mut security = None;
@@ -246,7 +250,57 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
                 let at: f32 = at.trim().parse().map_err(|_| bad())?;
                 let cx: f32 = cx.trim().parse().map_err(|_| bad())?;
                 let cy: f32 = cy.trim().parse().map_err(|_| bad())?;
-                click.push((at, cx, cy));
+                // A press and a release at the same instant: a tap, which is
+                // what a click-sensed thing reads.
+                for what in [app::PointerEdge::Press, app::PointerEdge::Release] {
+                    pointer.push(app::ScriptedPoint {
+                        at,
+                        x: cx,
+                        y: cy,
+                        what,
+                    });
+                }
+            }
+            "--drag" => {
+                let arg = value("--drag")?;
+                let bad =
+                    || "--drag needs <seconds>:<x>,<y>:<x>,<y>, e.g. 3:408,286:460,286".to_string();
+                let point = |s: &str| -> Result<(f32, f32), String> {
+                    let (x, y) = s.split_once(',').ok_or_else(bad)?;
+                    let x: f32 = x.trim().parse().map_err(|_| bad())?;
+                    let y: f32 = y.trim().parse().map_err(|_| bad())?;
+                    Ok((x, y))
+                };
+                let mut parts = arg.split(':');
+                let (at, from, to) = match (parts.next(), parts.next(), parts.next(), parts.next())
+                {
+                    (Some(at), Some(from), Some(to), None) => (at, from, to),
+                    _ => return Err(bad()),
+                };
+                let at: f32 = at.trim().parse().map_err(|_| bad())?;
+                let (x1, y1) = point(from)?;
+                let (x2, y2) = point(to)?;
+                // Three frames apart, which is what makes this a drag rather
+                // than a click: a slider is drag-sensed, and reads the pointer
+                // where it is while the button is down.
+                pointer.push(app::ScriptedPoint {
+                    at,
+                    x: x1,
+                    y: y1,
+                    what: app::PointerEdge::Press,
+                });
+                pointer.push(app::ScriptedPoint {
+                    at: at + app::DRAG_STEP,
+                    x: x2,
+                    y: y2,
+                    what: app::PointerEdge::Move,
+                });
+                pointer.push(app::ScriptedPoint {
+                    at: at + 2.0 * app::DRAG_STEP,
+                    x: x2,
+                    y: y2,
+                    what: app::PointerEdge::Release,
+                });
             }
             "--screen" => {
                 let name = value("--screen")?;
@@ -277,7 +331,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     // Soonest first: the app walks this one forwards. A stable sort keeps a
     // tap's down ahead of its up when both land on the same instant.
     press.sort_by(|a, b| a.at.total_cmp(&b.at));
-    click.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pointer.sort_by(|a, b| a.at.total_cmp(&b.at));
     if let Some(path) = replay {
         if sandbox || server.is_some() {
             return Err("--replay can't be combined with --sandbox or --server".into());
@@ -293,7 +347,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             screenshot_at,
             autopilot,
             press: press.clone(),
-            click: click.clone(),
+            pointer: pointer.clone(),
             send: send.clone(),
             mute,
             volume: 60,
@@ -364,7 +418,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         screenshot_at,
         autopilot,
         press,
-        click,
+        pointer,
         send,
         mute,
         volume: 60,
@@ -526,6 +580,45 @@ mod tests {
         assert!(parse("--press Enter").is_err(), "no time");
         assert!(parse("--press soon:Enter").is_err(), "time is not a number");
         assert!(parse("--press 3:Nonesuch").is_err(), "no such key");
+    }
+
+    /// `--drag` is to `--click` what `--hold` is to `--press`. A slider is
+    /// drag-sensed: it reads the pointer where it is while the button is down,
+    /// so a press and a release at one instant -- a click -- moves it nowhere.
+    /// That is what stopped the pixel scale being set from a scripted run.
+    #[test]
+    fn a_scripted_drag_presses_moves_and_lets_go() {
+        use app::PointerEdge::{Move, Press, Release};
+        let o = parse("--click 1:10,20 --drag 2:408,286:460,286")
+            .unwrap()
+            .unwrap();
+        let got: Vec<_> = o.pointer.iter().map(|p| (p.at, p.x, p.y, p.what)).collect();
+        assert_eq!(
+            got,
+            vec![
+                // A click is a tap: both edges at once, in the one place.
+                (1.0, 10.0, 20.0, Press),
+                (1.0, 10.0, 20.0, Release),
+                // A drag takes hold where it started and lets go where it ended.
+                (2.0, 408.0, 286.0, Press),
+                (2.0 + app::DRAG_STEP, 460.0, 286.0, Move),
+                (2.0 + 2.0 * app::DRAG_STEP, 460.0, 286.0, Release),
+            ],
+            "soonest first, and a press stays ahead of the release it belongs to"
+        );
+        assert!(parse("--drag 2:408,286").is_err(), "only one point");
+        assert!(
+            parse("--drag 2:408:460,286").is_err(),
+            "a point without a y"
+        );
+        assert!(
+            parse("--drag 2:408,286:460,286:9,9").is_err(),
+            "three points"
+        );
+        assert!(
+            parse("--drag soon:1,2:3,4").is_err(),
+            "time is not a number"
+        );
     }
 
     /// `--hold` is the other half: `--press` taps, so nothing that has to be held
