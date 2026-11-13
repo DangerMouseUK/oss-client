@@ -44,8 +44,9 @@ const ICONS_TOP_MEASURED_SHIFT: f32 = 20.0;
 ///
 /// **One measured point, and a slope nobody has been able to check.** Continuum does
 /// not re-lay-out when its window is resized — it keeps the size it started at and
-/// clips — so only a single view height could be observed
-/// (`oss-workspace/notes/continuum-observations.md`, 2026-11-11). This is therefore
+/// clips — so only a single view height could be observed (measured against
+/// Continuum on 2026-11-11, with screenshots, recorded in the project's private
+/// notes). This is therefore
 /// exact at h = 1016 and a guess at every other height: the 0.57 slope is still ours,
 /// kept because it is the only one we have any basis for, shifted so it passes
 /// through the one point we know. **A second view height would recover the real
@@ -107,8 +108,8 @@ fn clock_text(hour: i8, minute: i8) -> String {
 /// Sources: the LVZ format notes give each code's meaning, and nullspace (MIT)
 /// implements four of them. **Eleven of the twelve were then measured against the
 /// real Continuum** at a client area of 1888x1016, against the local subgame zone
-/// (`oss-workspace/notes/continuum-observations.md`, 2026-11-11, with screenshots in
-/// `captures/continuum-obs/`). That run also confirmed the convention this code
+/// (measured against Continuum on 2026-11-11, with screenshots, recorded in the
+/// project's private notes). That run also confirmed the convention this code
 /// already used — **drawn top-left = reference point + offset** — by moving every
 /// marker exactly -16 in both axes when the LVZ offset went 0 to -16.
 ///
@@ -703,8 +704,8 @@ mod tests {
 
     /// Every number here comes from watching the real Continuum at a client area of
     /// 1888x1016 against the local subgame zone, flying a Warbird with `Show Clock`
-    /// on: `oss-workspace/notes/continuum-observations.md` (2026-11-11), screenshots
-    /// in `captures/continuum-obs/`. If one of these ever has to change, it should be
+    /// on: measured on 2026-11-11, with screenshots, recorded in the project's
+    /// private notes. If one of these ever has to change, it should be
     /// because a new observation says so, not because the formula behind it moved.
     #[test]
     fn the_lvz_anchors_match_continuum_at_1888x1016() {
