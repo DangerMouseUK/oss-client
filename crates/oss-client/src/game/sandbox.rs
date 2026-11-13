@@ -317,6 +317,12 @@ impl Sandbox {
                 format!("Entered arena {arena}. Type to chat, Esc for the menu."),
                 color::GREEN,
             );
+            // Said here as well as in `?status`, because a session that quietly
+            // fell back to VIE is exactly the thing a player should not have to
+            // think to ask about.
+            if let Some(line) = s.connection_line() {
+                s.message(line, color::GREEN);
+            }
         }
         Ok(s)
     }
@@ -1326,9 +1332,25 @@ impl Sandbox {
         }
     }
 
+    /// How this session is encrypted, for a player who wants to know.
+    ///
+    /// A session that offered OpenSec and got no answer in time falls back to
+    /// VIE, which is no encryption worth the name and pins no server key. That
+    /// is said once in the connecting status and once in a log line, and both
+    /// are gone the moment login finishes -- so a player it happened to could
+    /// not find out, and nor could anyone diagnosing it afterwards.
+    fn connection_line(&self) -> Option<String> {
+        let (server, cipher) = self.net.as_ref()?.connection();
+        Some(format!("Connection: {server} ({cipher})"))
+    }
+
     /// `?status`: how far each upgradeable stat is toward its maximum, counted in
-    /// whole upgrades as Continuum counts them (nullspace `GetShipStatusPercent`).
+    /// whole upgrades as Continuum counts them (nullspace `GetShipStatusPercent`),
+    /// and how the session is encrypted.
     fn show_status(&mut self) {
+        if let Some(line) = self.connection_line() {
+            self.chat_message(chat_type::ARENA, None, line);
+        }
         let me = self.me();
         if me.kind as usize >= self.world.settings.ships.len() {
             return;

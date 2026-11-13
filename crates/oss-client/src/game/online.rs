@@ -121,6 +121,17 @@ pub struct Online {
 }
 
 impl Online {
+    /// The zone's address and how the session to it is encrypted.
+    ///
+    /// The cipher is settled at connect and said once, in a connecting status
+    /// that login then replaces. A session that offered OpenSec and got no
+    /// answer inside its window falls back to VIE -- no encryption worth the
+    /// name, and no server key pinned -- so the one thing a player needs to be
+    /// able to ask after the fact is this.
+    pub fn connection(&self) -> (&str, &'static str) {
+        (&self.server, self.session.cipher_name().unwrap_or("none"))
+    }
+
     pub fn connect(opts: &ServerOptions, resolution: (u16, u16)) -> Result<Self, String> {
         let driver =
             UdpDriver::connect(&opts.server).map_err(|e| format!("{}: {e}", opts.server))?;
