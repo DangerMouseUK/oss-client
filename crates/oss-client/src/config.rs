@@ -89,8 +89,9 @@ pub fn default_dir() -> Option<PathBuf> {
 
 impl Config {
     /// Loads `path`. A missing file at the default location is created with the
-    /// defaults; a missing file given explicitly is an error. Returns the settings and
-    /// a warning per line that couldn't be used.
+    /// defaults; a missing file given explicitly is an error, because a mistyped
+    /// `--config` should not quietly mint a second profile somewhere else. Returns
+    /// the settings and a warning per line that couldn't be used.
     pub fn load(path: &Path, explicit: bool) -> Result<(Config, Vec<String>), String> {
         match std::fs::read(path) {
             Ok(bytes) => Ok(Config::parse(&String::from_utf8_lossy(&bytes))),
@@ -106,6 +107,16 @@ impl Config {
                 }
                 Ok((config, Vec::new()))
             }
+            // Only an explicit path reaches this, since the arm above takes the
+            // default one. Saying the rule here is the point: whoever meets it has
+            // just typed a path and been handed `os error 2` -- or `os error 3`,
+            // which is the folder missing rather than the file.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+                "{}: {e}. --config names a settings file to read; only the \
+                 default one is written when it is missing. Create it first -- \
+                 an empty file is enough.",
+                path.display()
+            )),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
     }
@@ -591,6 +602,21 @@ loud = yes
         assert_eq!(c, Config::default());
         std::fs::write(&path, "[audio]\nmute = yes\n").unwrap();
         assert!(Config::load(&path, false).unwrap().0.mute);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rule itself is pinned by the test above. This pins the *explanation*:
+    /// the OS reports a missing explicit file as `os error 2` (or `os error 3`
+    /// when the folder is what is missing), which states no rule at all, and
+    /// having to rediscover the rule from that is why this came back as an item.
+    #[test]
+    fn a_missing_explicit_file_says_what_to_do_about_it() {
+        let dir = std::env::temp_dir().join(format!("oss-config-say-{}", std::process::id()));
+        let path = dir.join(FILE_NAME);
+        let _ = std::fs::remove_dir_all(&dir);
+        let e = Config::load(&path, true).unwrap_err();
+        assert!(e.contains("--config"), "{e}");
+        assert!(e.contains("empty file"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
