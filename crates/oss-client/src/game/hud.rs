@@ -177,6 +177,38 @@ pub fn screen_refs(
     ]
 }
 
+/// Half the energy bar, at the client area it was measured on.
+///
+/// 480 across, centred, measured against Continuum at 1888x1016 -- where it
+/// leaves 704 pixels either side and nothing can reach it.
+const BAR_HALF: f32 = 240.0;
+
+/// The least the bar is ever squeezed to, so it stays a gauge on any window.
+const BAR_HALF_MIN: f32 = 80.0;
+
+/// The left edge the bar leaves to the stat box.
+///
+/// The stat box's default layout at its widest: three of border, the 124 its
+/// names-and-points columns take, room for a four-digit score, and three more
+/// of border. Continuum never had to think about this, because the only view it
+/// was measured at is wide enough that a centred 480 cannot reach the corner.
+const STATBOX_CLEARANCE: f32 = 3.0 + 124.0 + 4.0 * 8.0 + 3.0;
+
+/// How wide half the energy bar may be on a view this wide.
+///
+/// The measured 480 wherever it fits, and it fits on every view at least 804
+/// game pixels across -- which is every ordinary one, including the lead's own
+/// fullscreen 1080p, where the layout was confirmed to look right. Below that
+/// the bar gives way rather than running through the stat box: a twelve-
+/// character name at scale 2 on a 1280-wide window had the energy bar straight
+/// through it, because scale 2 halves the view in game pixels and the stat box
+/// grows with the name in it. The bar shrinks symmetrically, so it stays
+/// centred, which is the one thing about it that is not negotiable.
+fn bar_half(view_w: f32) -> f32 {
+    let room = (view_w / 2.0).floor() - STATBOX_CLEARANCE;
+    BAR_HALF.min(room.max(BAR_HALF_MIN))
+}
+
 fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
     let me = s.me();
     let a = &s.art;
@@ -192,13 +224,14 @@ fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
 
     if g.w > 0 {
         // Background track, current-max track, then the pulsing energy bar.
-        let top_w = ship_max / max_possible * 240.0;
+        let half = bar_half(c.view_w);
+        let top_w = ship_max / max_possible * half;
         c.ui(
             r,
             g.frame(1, 1, 5),
-            center_x - 240.0,
+            center_x - half,
             center_y - 4.0,
-            Some((480.0, 2.0)),
+            Some((half * 2.0, 2.0)),
             white,
         );
         c.ui(
@@ -672,6 +705,32 @@ pub fn radar_image(map: &TileMap, dim: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "A tiny bit of overlap with the energy bar and the player name/score/
+    /// squad area." Reproduced with a fourteen-character name at scale 2 on a
+    /// 1280-wide window, clean at scale 1 -- so it is the view's width in game
+    /// pixels that decides it, and the bar is what gives way.
+    #[test]
+    fn the_energy_bar_keeps_off_the_stat_box_on_a_narrow_view() {
+        // The width it was measured at, and every ordinary one: unchanged.
+        assert_eq!(bar_half(1888.0), BAR_HALF, "the measured client area");
+        assert_eq!(bar_half(1920.0), BAR_HALF, "fullscreen 1080p, scale 1");
+        assert_eq!(bar_half(1280.0), BAR_HALF, "a 1280 window at scale 1");
+        assert_eq!(bar_half(960.0), BAR_HALF, "1920 at scale 2");
+        assert_eq!(bar_half(804.0), BAR_HALF, "the narrowest that still fits");
+
+        // The case the lead hit: 1280 at scale 2 is a 640-pixel view.
+        let half = bar_half(640.0);
+        assert!(half < BAR_HALF, "the bar has to give way somewhere");
+        assert!(
+            320.0 - half >= STATBOX_CLEARANCE,
+            "and it must clear the stat box: left edge {} vs {STATBOX_CLEARANCE}",
+            320.0 - half
+        );
+        // Never squeezed out of existence, however small the window.
+        assert_eq!(bar_half(200.0), BAR_HALF_MIN);
+        assert_eq!(bar_half(0.0), BAR_HALF_MIN);
+    }
 
     #[test]
     fn radar_keeps_thin_walls_when_downsampling() {
