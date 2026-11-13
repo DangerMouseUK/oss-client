@@ -13,6 +13,7 @@ pub mod online;
 pub mod palette;
 pub mod sandbox;
 pub mod settings_ui;
+pub mod start_spots;
 pub mod statbox;
 pub mod view;
 pub mod zones;

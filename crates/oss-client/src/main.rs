@@ -55,6 +55,8 @@ Options:
                             line and the form; repeatable; testing)
   --hold <secs>:<key>:<for> Hold that key for <for> seconds, repeating it the way
                             a keyboard does (thrust, guns; repeatable; testing)
+  --click <secs>:<x>,<y>    Click the start-up screen at that point <secs> in,
+                            in UI pixels from the top-left (repeatable; testing)
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
@@ -117,6 +119,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     let mut open_settings = false;
     let mut open_screen = None;
     let mut press: Vec<app::ScriptedKey> = Vec::new();
+    let mut click: Vec<(f32, f32, f32)> = Vec::new();
     let mut directories = Vec::new();
     let mut open_zones = false;
     let mut security = None;
@@ -232,6 +235,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
                 let (at, key) = scripted_key("--hold", rest)?;
                 press.extend(app::hold_events(at, key, secs));
             }
+            "--click" => {
+                let arg = value("--click")?;
+                let bad = || "--click needs <seconds>:<x>,<y>, e.g. 3:640,520".to_string();
+                let (at, at_xy) = arg.split_once(':').ok_or_else(bad)?;
+                let (cx, cy) = at_xy.split_once(',').ok_or_else(bad)?;
+                let at: f32 = at.trim().parse().map_err(|_| bad())?;
+                let cx: f32 = cx.trim().parse().map_err(|_| bad())?;
+                let cy: f32 = cy.trim().parse().map_err(|_| bad())?;
+                click.push((at, cx, cy));
+            }
             "--screen" => {
                 let name = value("--screen")?;
                 open_screen = Some(match name.as_str() {
@@ -261,6 +274,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
     // Soonest first: the app walks this one forwards. A stable sort keeps a
     // tap's down ahead of its up when both land on the same instant.
     press.sort_by(|a, b| a.at.total_cmp(&b.at));
+    click.sort_by(|a, b| a.0.total_cmp(&b.0));
     if let Some(path) = replay {
         if sandbox || server.is_some() {
             return Err("--replay can't be combined with --sandbox or --server".into());
@@ -276,6 +290,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             screenshot_at,
             autopilot,
             press: press.clone(),
+            click: click.clone(),
             send: send.clone(),
             mute,
             volume: 60,
@@ -346,6 +361,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         screenshot_at,
         autopilot,
         press,
+        click,
         send,
         mute,
         volume: 60,

@@ -230,6 +230,27 @@ impl Login {
         self.focus = FIELDS.len() - 1;
     }
 
+    /// Puts the cursor on a field outright, as a click on it does.
+    ///
+    /// The pointer and the keyboard reach the same focus model, so clicking a
+    /// field leaves the screen in a state tabbing could also have reached --
+    /// which is what keeps "the tabbing does work well enough" true after the
+    /// pointer arrives.
+    pub fn focus_on(&mut self, field: Field) {
+        if let Some(i) = FIELDS.iter().position(|f| *f == field) {
+            self.focus = i;
+        }
+    }
+
+    /// Plays, as Enter does: the `play` hot spot's way in.
+    ///
+    /// Shares [`Login::submit`] rather than repeating it, so the pointer cannot
+    /// connect with options the keyboard would have refused, and the field
+    /// checks (an address with no port, an empty name) happen either way.
+    pub fn play(&mut self) -> Option<Choice> {
+        self.submit()
+    }
+
     pub fn focused(&self) -> Field {
         FIELDS[self.focus % FIELDS.len()]
     }
