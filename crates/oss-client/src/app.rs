@@ -7,7 +7,7 @@ use std::sync::Arc;
 use oss_assets::{AssetDirs, AssetSearch};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -19,6 +19,7 @@ use crate::game::login::{Choice, Login};
 use crate::game::online::{Online, ServerOptions};
 use crate::game::sandbox::Sandbox;
 use crate::game::settings_ui::{SettingsUi, UiAction};
+use crate::game::start_spots::{Rect, Spot, Spots};
 use crate::game::view::{Canvas, color, ui_color};
 use crate::gfx::{FrameError, Renderer, TextureId, UiFrame};
 
@@ -126,6 +127,15 @@ pub struct Options {
     /// This presses its keys, so the path from the form to an arena can be driven
     /// and photographed rather than described.
     pub press: Vec<ScriptedKey>,
+    /// `--click`: pointer clicks at the given times and places, soonest first
+    /// (testing).
+    ///
+    /// The start-up screen is mouse-driven, so without this nothing could check
+    /// that it is -- the same hole `--press` was, one screen along. Positions
+    /// are in UI pixels (game pixels from the top-left), which is what every
+    /// position in the drawing code is in, so a click can be aimed at what a
+    /// screenshot shows.
+    pub click: Vec<(f32, f32, f32)>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
     /// end as its clock passes them.
@@ -182,6 +192,10 @@ struct LoginScreen {
     atlas: TextureId,
     /// The zone list, which is part of this screen rather than a screen of its own.
     browser: crate::game::zones::ZoneBrowser,
+    /// Where everything was drawn last frame, so the pointer can find it.
+    /// Filled by [`draw_start_screen`] as it draws; see
+    /// [`crate::game::start_spots`].
+    spots: Spots,
 }
 
 enum Screen {
@@ -221,6 +235,14 @@ struct App {
     error: Option<String>,
     /// How far through [`Options::press`] the clock has got.
     pressed: usize,
+    /// How far through [`Options::click`] the clock has got.
+    clicks: usize,
+    /// Where the pointer is, in UI pixels, while it is over the window.
+    cursor: Option<(f32, f32)>,
+    /// A left click arrived and the screen has not answered it yet. Held here
+    /// rather than acted on in the event, so a click is read against the same
+    /// regions, in the same place in the frame, as a key is.
+    clicked: bool,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -282,6 +304,9 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         settings: None,
         error: None,
         pressed: 0,
+        clicks: 0,
+        clicked: false,
+        cursor: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
@@ -351,6 +376,7 @@ impl App {
             art,
             atlas,
             browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
+            spots: Spots::default(),
         }));
         run.window.set_title("Open SubSpace");
         self.settings = None;
@@ -481,6 +507,7 @@ impl ApplicationHandler for App {
                     art,
                     atlas,
                     browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
+                    spots: Spots::default(),
                 }))
             }
         };
@@ -592,6 +619,86 @@ impl ApplicationHandler for App {
                     self.input.press(Stroke::text(c).repeated(event.repeat));
                 }
             }
+            // The pointer, which the start-up screen is built around: Continuum's
+            // own is a set of named hot spots, so a keyboard-only version of it
+            // is a gap rather than a shortfall. Kept to that screen for now --
+            // the game underneath has no pointer of its own yet.
+            WindowEvent::CursorMoved { position, .. } => {
+                // While the settings are up they own the pointer as well as the
+                // keyboard; these arms sit in front of the one that feeds egui,
+                // so they have to hand it on themselves.
+                if self.settings.is_some() {
+                    self.egui_event(&event);
+                    return;
+                }
+                let Some(run) = self.running.as_mut() else {
+                    return;
+                };
+                let scale = run.scale.max(1) as f64;
+                let at = ((position.x / scale) as f32, (position.y / scale) as f32);
+                self.cursor = Some(at);
+                if matches!(run.screen, Screen::Login(_)) {
+                    run.window.request_redraw();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.settings.is_some() {
+                    self.egui_event(&event);
+                    return;
+                }
+                self.cursor = None;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if self.settings.is_some() {
+                    // The settings screen has the pointer, as it has the
+                    // keyboard.
+                    self.egui_event(&event);
+                    return;
+                }
+                self.clicked = true;
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.settings.is_some() {
+                    self.egui_event(&event);
+                    return;
+                }
+                // `zoneup`/`zonedown` in the skin format are buttons beside the
+                // list. The wheel over the list is where a pointer looks for
+                // them now.
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as f32,
+                };
+                // Not `signum`, which calls zero positive and would scroll on a
+                // wheel that has not turned.
+                let rows = if lines > 0.0 {
+                    -1
+                } else if lines < 0.0 {
+                    1
+                } else {
+                    0
+                };
+                let Some(run) = self.running.as_mut() else {
+                    return;
+                };
+                let cursor = self.cursor;
+                if let Screen::Login(ls) = &mut run.screen
+                    && let Some((mx, my)) = cursor
+                    && ls.spots.over_list(mx, my)
+                {
+                    ls.browser.scroll_by(rows);
+                    ls.login.focus_zones();
+                    if let Some(z) = ls.browser.zones.get(ls.browser.selected) {
+                        ls.login.server.clone_from(&z.address);
+                        ls.login.error = None;
+                    }
+                    run.window.request_redraw();
+                }
+            }
             WindowEvent::RedrawRequested => self.frame(event_loop, true),
             other => {
                 if self.settings.is_some() {
@@ -629,6 +736,26 @@ impl App {
             }
         }
         let audio_wanted = !self.options.mute;
+        let Some(since_start) = self.running.as_ref().map(|r| r.started.elapsed()) else {
+            return;
+        };
+        let elapsed = since_start.as_secs_f32();
+        // Scripted clicks: put the pointer there, then click, which is the order
+        // a real pointer does it in and the order the hover highlight needs. Run
+        // before the window is borrowed so the pointer stays where it was put,
+        // the way a real one does.
+        while let Some((at, mx, my)) = self.options.click.get(self.clicks).copied() {
+            if at > elapsed {
+                break;
+            }
+            log::info!("--click: {mx},{my}");
+            self.cursor = Some((mx, my));
+            self.clicked = true;
+            self.clicks += 1;
+        }
+        // Taken before the run is borrowed, because the screens underneath want
+        // it and it lives on the app rather than on any one of them.
+        let cursor = self.cursor;
         let Some(run) = self.running.as_mut() else {
             return;
         };
@@ -636,7 +763,6 @@ impl App {
         // character it types, the way a window keyboard event does, or it drives
         // nothing that reads text -- which is the menu, the chat line and every
         // form field.
-        let elapsed = run.started.elapsed().as_secs_f32();
         while let Some(k) = self.options.press.get(self.pressed).copied() {
             if k.at > elapsed {
                 break;
@@ -698,7 +824,44 @@ impl App {
                     ls.login.error = None;
                 }
             }
-            let choice = ls.login.input(&strokes, self.input.shift());
+            // A click, against the regions the last frame drew. The keyboard is
+            // untouched by this: clicking a field focuses it exactly as tabbing
+            // to it does, so everything that worked before still does.
+            let clicked = std::mem::take(&mut self.clicked);
+            let mut pointed = None;
+            if clicked && self.settings.is_none() {
+                pointed = cursor.and_then(|(mx, my)| ls.spots.at(mx, my));
+                match pointed {
+                    Some(Spot::Field(field)) => ls.login.focus_on(field),
+                    Some(Spot::Ship(kind)) => ls.login.ship = kind,
+                    Some(Spot::Spectate) => ls.login.ship = oss_session::SPECTATOR,
+                    Some(Spot::Zone(row)) => {
+                        ls.browser.select(row);
+                        ls.login.focus_zones();
+                        if let Some(z) = ls.browser.zones.get(row) {
+                            ls.login.server.clone_from(&z.address);
+                            ls.login.error = None;
+                        }
+                    }
+                    Some(Spot::RefreshZones)
+                    | Some(Spot::Play)
+                    | Some(Spot::Quit)
+                    | Some(Spot::Options)
+                    | Some(Spot::Sandbox)
+                    | None => {}
+                }
+            }
+            let choice = match pointed {
+                // The four that are choices rather than changes go through the
+                // same door the keys do, so neither can do something the other
+                // cannot.
+                Some(Spot::Play) => ls.login.play(),
+                Some(Spot::Quit) => Some(Choice::Quit),
+                Some(Spot::Options) => Some(Choice::Options),
+                Some(Spot::Sandbox) => Some(Choice::Sandbox),
+                Some(Spot::RefreshZones) => Some(Choice::RefreshZones),
+                _ => ls.login.input(&strokes, self.input.shift()),
+            };
             match choice {
                 Some(Choice::Options) => {
                     self.settings = Some(SettingsUi::new(current_config(&self.options)));
@@ -790,6 +953,7 @@ impl App {
                             browser: crate::game::zones::ZoneBrowser::open(
                                 &self.options.directories,
                             ),
+                            spots: Spots::default(),
                         }));
                     }
                     (None, Some(err)) => return self.fail(event_loop, err),
@@ -840,6 +1004,16 @@ impl App {
         let stars = match &mut run.screen {
             Screen::Game(game) => {
                 if self.settings.is_none() {
+                    // A click on the Esc menu becomes the keystroke that row
+                    // answers to, put on the queue in front of everything the
+                    // keyboard sent, so the menu reads it as a key and never
+                    // learns a pointer was involved.
+                    if std::mem::take(&mut self.clicked)
+                        && let Some((mx, my)) = cursor
+                        && let Some(stroke) = game.click(mx, my)
+                    {
+                        self.input.press(stroke);
+                    }
                     game.update(&mut self.input);
                 } else {
                     // The world keeps running; your ship idles while the screen is open.
@@ -869,7 +1043,7 @@ impl App {
             }
             Screen::Connecting(_) | Screen::Login(_) if !draw => None,
             Screen::Login(ls) => {
-                draw_start_screen(ls, &mut run.renderer, run.scale);
+                draw_start_screen(ls, &mut run.renderer, run.scale, cursor);
                 None
             }
             Screen::Connecting(conn) => {
@@ -1123,10 +1297,21 @@ fn ping_color(ping_ms: Option<u32>) -> u32 {
 /// where this client had three screens and made the player walk between them. The
 /// art of that window is Continuum's own and not ours to copy, so this is its
 /// arrangement drawn in the box the game draws for itself.
-fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
+fn draw_start_screen(
+    ls: &mut LoginScreen,
+    r: &mut Renderer,
+    scale: u32,
+    cursor: Option<(f32, f32)>,
+) {
     let c = Canvas::new(&ls.art, ls.atlas, r.size(), scale, (0.0, 0.0));
     let (login, b) = (&ls.login, &ls.browser);
     let focus = login.focused();
+    // The regions are collected here, as each thing is drawn, so what a pointer
+    // can click is the same rectangle a player can see. Last frame's are thrown
+    // away first.
+    let spots = &mut ls.spots;
+    spots.clear();
+    let hovered = |rect: Rect| cursor.is_some_and(|(mx, my)| rect.holds(mx, my));
 
     let w = START_COLS * 8.0;
     let left_w = START_LEFT_COLS * 8.0;
@@ -1163,8 +1348,10 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
         let Some(label) = profile_label(field) else {
             continue;
         };
-        if focus == field {
-            c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+        let row = Rect::new(x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+        spots.add(row, Spot::Field(field));
+        if focus == field || hovered(row) {
+            c.color_rect(r, ui_color::HIGHLIGHT, row.x, row.y, row.w, row.h);
         }
         c.text(r, x + 4.0, y, color::GREEN, label);
         let mut value = login.value(field);
@@ -1202,30 +1389,40 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
     for kind in 0u8..8 {
         let (row, col) = ((kind / 4) as f32, (kind % 4) as f32);
         let (sx, sy) = (x + 6.0 + col * pitch, y + row * 40.0);
-        if login.ship == kind {
-            c.color_rect(r, ui_color::HIGHLIGHT, sx - 2.0, sy - 2.0, 40.0, 40.0);
+        // `ship1`..`ship8`: the skin's own hot spots, and the reason this screen
+        // was never meant to be driven from the keyboard.
+        let box_ = Rect::new(sx - 2.0, sy - 2.0, 40.0, 40.0);
+        spots.add(box_, Spot::Ship(kind));
+        if login.ship == kind || hovered(box_) {
+            c.color_rect(r, ui_color::HIGHLIGHT, box_.x, box_.y, box_.w, box_.h);
         }
         c.ui(r, ls.art.ship(kind, 0), sx, sy, None, [1.0; 4]);
     }
     y += 2.0 * 40.0;
     let spectating = login.ship == oss_session::SPECTATOR;
-    if spectating {
-        c.color_rect(r, ui_color::HIGHLIGHT, x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+    let spec_row = Rect::new(x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+    spots.add(spec_row, Spot::Spectate);
+    if spectating || hovered(spec_row) {
+        c.color_rect(
+            r,
+            ui_color::HIGHLIGHT,
+            spec_row.x,
+            spec_row.y,
+            spec_row.w,
+            spec_row.h,
+        );
     }
     c.text(r, x + 6.0, y, color::WHITE, "S = Spectator");
 
     // --- Zones ---------------------------------------------------------------------
     let lx = x + list_x_off;
     let mut ly = top + 20.0;
-    if focus == crate::game::login::Field::Zones {
-        c.color_rect(
-            r,
-            ui_color::HIGHLIGHT,
-            lx - 2.0,
-            ly - 1.0,
-            list_w + 2.0,
-            13.0,
-        );
+    // `zones`: the whole list, so the wheel can stand in for `zoneup`/`zonedown`.
+    spots.set_list(Rect::new(lx - 2.0, ly - 1.0, list_w + 2.0, body_h));
+    let head = Rect::new(lx - 2.0, ly - 1.0, list_w + 2.0, 13.0);
+    spots.add(head, Spot::Field(crate::game::login::Field::Zones));
+    if focus == crate::game::login::Field::Zones || hovered(head) {
+        c.color_rect(r, ui_color::HIGHLIGHT, head.x, head.y, head.w, head.h);
     }
     c.text(r, lx, ly, color::DARK_RED, "Zone");
     c.text_right(r, x + w - 4.0, ly, color::DARK_RED, "Players  Ping");
@@ -1233,15 +1430,10 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
     let first = b.selected.saturating_sub(rows - 1);
     let name_chars = ((list_w - 18.0 * 8.0) / 8.0).max(4.0) as usize;
     for (i, z) in b.zones.iter().enumerate().skip(first).take(rows) {
-        if i == b.selected {
-            c.color_rect(
-                r,
-                ui_color::HIGHLIGHT,
-                lx - 2.0,
-                ly - 1.0,
-                list_w + 2.0,
-                13.0,
-            );
+        let row = Rect::new(lx - 2.0, ly - 1.0, list_w + 2.0, 12.0);
+        spots.add(row, Spot::Zone(i));
+        if i == b.selected || hovered(row) {
+            c.color_rect(r, ui_color::HIGHLIGHT, row.x, row.y, row.w, 13.0);
         }
         let name: String = z.name.chars().take(name_chars).collect();
         c.text(r, lx, ly, color::WHITE, &name);
@@ -1278,11 +1470,57 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
         .take(width)
         .collect();
     c.text(r, x + 4.0, foot + 6.0, color::GREEN, &described);
-    // The second line is whichever matters more: what went wrong, or how the zone
-    // list is getting on.
-    let (second, colour) = match &login.error {
-        Some(err) => (err.as_str(), color::RED),
-        None => (b.status.as_str(), color::WHITE),
+
+    // The key lines are buttons as well as reminders. Continuum's `play`, `quit`
+    // and `options` are visible buttons on its own start-up screen; ours were a
+    // line of footer text, which is why the options could be in the client for a
+    // week without the person who asked for them finding them.
+    let lines: [&[(&str, Option<Spot>)]; 2] = [
+        &[
+            ("Enter = Play", Some(Spot::Play)),
+            ("Tab/arrows = Move", None),
+            ("F2 = Options", Some(Spot::Options)),
+        ],
+        &[
+            ("F3 = Zones again", Some(Spot::RefreshZones)),
+            ("F5 = Sandbox", Some(Spot::Sandbox)),
+            ("Esc = Quit", Some(Spot::Quit)),
+        ],
+    ];
+    for (n, items) in lines.iter().enumerate() {
+        let ky = foot + 44.0 + n as f32 * 12.0;
+        // Four spaces between items, which is the spacing these two lines were
+        // written with when they were one string each.
+        let total: f32 = items
+            .iter()
+            .map(|(t, _)| t.chars().count() as f32 * 8.0)
+            .sum::<f32>()
+            + 32.0 * (items.len() - 1) as f32;
+        let mut kx = (x + w / 2.0 - total / 2.0).floor();
+        for (text, spot) in items.iter() {
+            let tw = text.chars().count() as f32 * 8.0;
+            if let Some(spot) = *spot {
+                let rect = Rect::new(kx - 2.0, ky - 1.0, tw + 4.0, 13.0);
+                spots.add(rect, spot);
+                if hovered(rect) {
+                    c.color_rect(r, ui_color::HIGHLIGHT, rect.x, rect.y, rect.w, rect.h);
+                }
+            }
+            c.text(r, kx, ky, color::YELLOW, text);
+            kx += tw + 32.0;
+        }
+    }
+
+    // The second line is whichever matters most: what went wrong, what the
+    // pointer is over, or how the zone list is getting on. The middle one is the
+    // job Continuum's `infobox` does, in the place it does it. Drawn after the
+    // key lines so that their regions are in before this asks what is under the
+    // pointer.
+    let hint = cursor.and_then(|(mx, my)| spots.at(mx, my)).map(Spot::hint);
+    let (second, colour) = match (&login.error, hint) {
+        (Some(err), _) => (err.as_str(), color::RED),
+        (None, Some(hint)) => (hint, color::YELLOW),
+        (None, None) => (b.status.as_str(), color::WHITE),
     };
     // Wrapped, not cut. A refused connection explains itself in a sentence and a
     // half -- "the zone didn't prove the key on record; remove its line from
@@ -1295,20 +1533,6 @@ fn draw_start_screen(ls: &LoginScreen, r: &mut Renderer, scale: u32) {
     {
         c.text(r, x + 4.0, foot + 18.0 + i as f32 * 12.0, colour, line);
     }
-    c.text_center(
-        r,
-        x + w / 2.0,
-        foot + 44.0,
-        color::YELLOW,
-        "Enter = Play    Tab/arrows = Move    F2 = Options",
-    );
-    c.text_center(
-        r,
-        x + w / 2.0,
-        foot + 56.0,
-        color::YELLOW,
-        "F3 = Zones again    F5 = Sandbox    Esc = Quit",
-    );
 }
 
 /// The label for a field of the profile block, or `None` for the fields that are

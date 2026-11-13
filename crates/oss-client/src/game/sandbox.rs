@@ -26,6 +26,7 @@ use super::hud::{self, RadarCache};
 use super::input::{Action, InputState, Stroke};
 use super::lvz::{Lvz, ScreenRefs};
 use super::online::Online;
+use super::start_spots::Rect;
 use super::statbox::{self, StatBox};
 use super::view::{self, Canvas, color};
 use crate::audio::Audio;
@@ -162,6 +163,10 @@ pub struct Sandbox {
     pub scale: u32,
     audio: Option<Audio>,
     net: Option<Online>,
+    /// Where the Esc menu's rows were drawn last frame, and the keystroke each
+    /// one answers to. Filled as the menu is drawn, so a row can never be
+    /// somewhere other than where it is shown.
+    menu_spots: Vec<(Rect, Stroke)>,
     /// Watching instead of flying (online spectator mode).
     pub(super) spectating: bool,
     spec_cam: (f32, f32),
@@ -351,6 +356,7 @@ impl Sandbox {
             .map(|o| (o.x as i32, o.y as i32))
             .collect();
         let mut s = Self {
+            menu_spots: Vec::new(),
             world,
             me_id,
             objects,
@@ -2830,6 +2836,22 @@ impl Sandbox {
         )
     }
 
+    /// The keystroke a click at this point means, where it lands on a menu row.
+    ///
+    /// `None` when the menu is down or the click missed every row -- and a miss
+    /// inside the menu is still a miss, not "any other key", because a pointer
+    /// that dismisses the menu wherever it lands would make the ships
+    /// unclickable at the edges.
+    pub fn click(&self, x: f32, y: f32) -> Option<Stroke> {
+        if !self.menu {
+            return None;
+        }
+        self.menu_spots
+            .iter()
+            .find(|(rect, _)| rect.holds(x, y))
+            .map(|(_, stroke)| *stroke)
+    }
+
     /// One of the menu's own keys, or `false` for "any other key".
     fn menu_key(&mut self, ch: char) -> bool {
         match ch.to_ascii_lowercase() {
@@ -2852,7 +2874,26 @@ impl Sandbox {
     /// (`SUBSPACE.EXE`, the block of strings beginning `-= Menu =-`); the frame,
     /// the fill and the rule under the title are Continuum's, out of `colors.bm2`.
     /// Only the entries this client actually has are listed.
-    fn draw_menu(&self, c: &Canvas, r: &mut Renderer) {
+    /// The digit keys the menu's eight ships answer to, in order, so a click on
+    /// a ship row is the same keystroke as typing its number.
+    const SHIP_DIGITS: [KeyCode; 8] = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+    ];
+
+    /// The rows are clickable, and a click on one **is** that key: the row
+    /// records the keystroke it answers to and the click puts it on the input
+    /// queue, so the menu's own logic never learns there was a pointer. That is
+    /// only possible because a keystroke is one thing carrying its character --
+    /// the menu reads characters, so a click that could only press a key code
+    /// would do nothing here, exactly as `--press` could not.
+    fn draw_menu(&mut self, c: &Canvas, r: &mut Renderer) {
         let ships = [
             "Ships",
             "1 = Warbird",
@@ -2864,12 +2905,17 @@ impl Sandbox {
             "7 = Lancaster",
             "8 = Shark",
         ];
-        let mut keys = vec!["Q  = Quit", "F1 = Help", "F2 = Stat box"];
+        let mut keys = vec![
+            ("Q  = Quit", Stroke::press(KeyCode::KeyQ).typing('q')),
+            ("F1 = Help", Stroke::press(KeyCode::F1)),
+            ("F2 = Stat box", Stroke::press(KeyCode::F2)),
+        ];
         if !self.news.is_empty() {
-            keys.push(" N = Zone news");
+            keys.push((" N = Zone news", Stroke::press(KeyCode::KeyN).typing('n')));
         }
-        keys.push(" O = Options");
-        keys.push("F12= Frame rate");
+        keys.push((" O = Options", Stroke::press(KeyCode::KeyO).typing('o')));
+        keys.push(("F12= Frame rate", Stroke::press(KeyCode::F12)));
+        self.menu_spots.clear();
         let rows = keys.len().max(ships.len() + usize::from(self.online()));
 
         // 40 characters across, as the original's longest line is, and up at the
@@ -2885,21 +2931,37 @@ impl Sandbox {
         c.separator(r, x, y + 13.0, w);
 
         let row_y = |i: usize| y + 18.0 + i as f32 * 12.0;
-        for (i, line) in keys.iter().enumerate() {
+        let half = 26.0 * 8.0;
+        for (i, (line, stroke)) in keys.iter().enumerate() {
+            self.menu_spots
+                .push((Rect::new(x, row_y(i) - 1.0, half, 12.0), *stroke));
             c.text(r, x + 2.0, row_y(i), color::WHITE, line);
         }
         // The ships sit at column 26 of the box, where the original puts them, with
         // their heading in dark red and spectator under the eighth.
-        let ship_x = x + 2.0 + 26.0 * 8.0;
+        let ship_x = x + 2.0 + half;
         for (i, line) in ships.iter().enumerate() {
             let colour = if i == 0 {
                 color::DARK_RED
             } else {
                 color::WHITE
             };
+            // The heading is a heading; the eight under it are the ships, by the
+            // digit the menu already answers to.
+            if let Some(digit) = char::from_digit(i as u32, 10).filter(|_| i > 0) {
+                let key = Self::SHIP_DIGITS[i - 1];
+                self.menu_spots.push((
+                    Rect::new(ship_x - 2.0, row_y(i) - 1.0, w - half, 12.0),
+                    Stroke::press(key).typing(digit),
+                ));
+            }
             c.text(r, ship_x, row_y(i), colour, line);
         }
         if self.online() {
+            self.menu_spots.push((
+                Rect::new(ship_x - 2.0, row_y(ships.len()) - 1.0, w - half, 12.0),
+                Stroke::press(KeyCode::KeyS).typing('s'),
+            ));
             c.text(r, ship_x, row_y(ships.len()), color::WHITE, "S = Spectator");
         }
         c.text(

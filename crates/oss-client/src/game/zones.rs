@@ -156,6 +156,29 @@ impl ZoneBrowser {
         }
     }
 
+    /// Moves the selection by whole rows, stopping at the ends.
+    ///
+    /// The scroll wheel's path in. Continuum's skin gives the list `zoneup` and
+    /// `zonedown` buttons beside it; a wheel over the list is where a pointer
+    /// looks for those now.
+    pub fn scroll_by(&mut self, rows: i32) {
+        if self.zones.is_empty() || rows == 0 {
+            return;
+        }
+        self.touched = true;
+        let last = self.zones.len() as i64 - 1;
+        self.selected = (self.selected as i64 + rows as i64).clamp(0, last) as usize;
+    }
+
+    /// Picks a row outright, as a click on it does. Out-of-range is ignored
+    /// rather than clamped: a click that lands on no row is not a choice.
+    pub fn select(&mut self, row: usize) {
+        if row < self.zones.len() {
+            self.touched = true;
+            self.selected = row;
+        }
+    }
+
     /// Keys: Up/Down choose, Enter picks, Esc goes back.
     ///
     /// The keys that walk the list take the OS repeats, so holding Down runs
