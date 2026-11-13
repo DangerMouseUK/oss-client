@@ -1274,7 +1274,8 @@ impl Sandbox {
     }
 
     /// Commands Continuum answers itself instead of sending on (nullspace
-    /// `ChatController::HandleInputCommands`): `?go`, `?namelen` and `?status`.
+    /// `ChatController::HandleInputCommands`): `?go`, `?namelen`, `?lines` and
+    /// `?status`.
     /// `?news` is ours — Continuum opens the news in a window of its own, which we
     /// have no equivalent of, so it gets a command and a menu key. Returns true
     /// when the line was handled here.
@@ -1311,6 +1312,15 @@ impl Sandbox {
             }
             "?namelen" if !rest.is_empty() => {
                 let reply = self.chat.set_namelen(rest);
+                self.message(reply, color::GREEN);
+                true
+            }
+            // Continuum's own: "Changes number of displayed message lines". With
+            // no number it says what it is, so a player who guesses the command
+            // learns the setting rather than having the line go to the zone,
+            // which has no such command and answers nothing.
+            "?lines" => {
+                let reply = self.chat.set_lines(rest);
                 self.message(reply, color::GREEN);
                 true
             }
@@ -2584,7 +2594,7 @@ impl Sandbox {
             cam,
         );
         ui.tints = tints;
-        let chat_top = ui.view_h - 16.0 - ChatLog::visible_rows(ui.view_h, false) as f32 * 12.0;
+        let chat_top = ui.view_h - 16.0 - self.chat.visible_rows(ui.view_h, false) as f32 * 12.0;
         self.radar_line = hud::radar_text(ui.cam.0, ui.cam.1);
         self.screen_refs = hud::screen_refs(
             &ui,
@@ -2703,7 +2713,7 @@ impl Sandbox {
         let mut y = c.view_h - 16.0;
         // The log stops short of the radar, as in Continuum, and wraps there.
         let width = chat_width(c);
-        let mut rows = ChatLog::visible_rows(c.view_h, self.menu);
+        let mut rows = self.chat.visible_rows(c.view_h, self.menu);
         if !self.chat.input.is_empty() {
             let line = &self.chat.input;
             // The line being typed wraps too, but cuts at the edge instead of at a
@@ -3159,6 +3169,7 @@ fn help_pages(bindings: &super::input::Bindings, online: bool) -> Vec<(&'static 
         Help::Heading("This client answers these itself"),
         Help::Text("  ?go [arena]  = Switch arena (no name: the next public)"),
         Help::Text("  ?namelen x   = Letters shown of a name (=x also works)"),
+        Help::Text("  ?lines x     = Message lines shown (=x also works)"),
         Help::Text("  ?status      = Your ship's status"),
         Help::Text("  ?news        = The zone's news"),
         Help::Text("  ?quit        = Leave for the login screen, as Q does"),
