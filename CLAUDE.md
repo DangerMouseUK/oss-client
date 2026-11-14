@@ -146,7 +146,7 @@ than an edit.
   private one, a broken intra-doc link, a bad code fence. oss-core's `main` went red on exactly
   that on 2026-11-11, after fmt, clippy and tests all passed locally.
   (CI's own `fmt` step runs plain `cargo fmt --check` — narrowed from `--all --check` in
-  `12b291b` on 2026-11-13, because the `--all` form reached `../oss-core` and would redden
+  `347c6dc` on 2026-11-13, because the `--all` form reached `../oss-core` and would redden
   this repo's CI for a formatting fault in that one. Read `.github/workflows/ci.yml` for what
   CI does today: this line said the opposite for a day, and nobody checked.)
   `cargo fmt --all` takes its package list from `cargo metadata`, which includes path
