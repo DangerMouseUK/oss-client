@@ -215,7 +215,12 @@ GPL-2.0-or-later (see [`LICENSE`](LICENSE)). The `oss-assets` crate is MIT so th
 tools can reuse it. The split across the three repositories is deliberate:
 [oss-core](https://github.com/DangerMouseUK/oss-core) is MIT so that anyone's bot, tool or
 alternative client can build on it whatever licence they use, while the client and server
-are GPL because they follow ASSS, whose own GPL source may be ported into them.
+are GPL so that the playable game and the server behind it stay open, and so does anything
+built from them.
+
+**Nothing in this repository comes from ASSS** — no source and no data. ASSS is a separate
+GPL implementation of the zone server, written in C; where this client matches it, it matches
+what a zone running ASSS puts on the wire, which was studied and implemented here fresh.
 
 **The graphics and sounds in `assets/classic` are Continuum's own**, bundled so that the
 client is playable from a fresh clone, as other SubSpace clients do. They are not this
