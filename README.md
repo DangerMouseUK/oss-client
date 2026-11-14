@@ -99,9 +99,15 @@ cargo run --release -p oss-client -- --server 127.0.0.1:5621 --name ConfTest --s
 
 ```
 group                           pass    fail    skip
-client                            15       0       0
-15 passed, 0 failed, 0 skipped
+client                            14       0       1
+14 passed, 0 failed, 1 skipped
 ```
+
+The skip is the VIE executable checksum: this client speaks OpenSec by default, and the
+suite skips that check for an OpenSec client, whose executable checksum is client-defined.
+**The numbers are a first run against a port this client has not used before.** A second
+run against the same port finds the map already cached, so `map-request` skips as well and
+the same command prints `13 0 2`.
 
 **Its physics are the server's physics.** `oss-sim` — the deterministic 100 Hz integer
 simulation of ships, weapons and collision — lives in
