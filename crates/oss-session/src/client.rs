@@ -102,7 +102,7 @@ pub struct SecurityChallenge {
     /// cannot be precomputed.
     pub key: u32,
     /// CRC-32 of the arena's map ([`oss_proto::checksum::map_crc32`]), when a map is
-    /// loaded. Later Continuum builds append it to the response; 0.40 does not.
+    /// loaded. Continuum 0.40 appends it to the response; 0.38 does not.
     pub map_crc32: Option<u32>,
 }
 
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(out.len(), SecurityResponse::CONT_CRC_LEN);
         assert!(SecurityResponse::is_continuum_len(out.len()));
 
-        // A 0.40 client sends the drift without the CRC.
+        // A 0.38 client sends the drift without the CRC.
         out.clear();
         SecurityResponse {
             continuum: Some((0, None)),
