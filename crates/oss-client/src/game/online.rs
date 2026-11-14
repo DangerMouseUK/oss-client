@@ -9,10 +9,28 @@ use std::time::Instant;
 use oss_session::map::{MapCache, default_cache_dir};
 use oss_session::replay::{Player as ReplayPlayer, Recorder};
 use oss_session::security::{
-    Identities, KnownServers, SecurityMode, client_handshake, fingerprint,
+    HandshakeRequest, Identities, KnownServers, Security, SecurityMode, built_in, fingerprint,
 };
 use oss_session::udp::UdpDriver;
-use oss_session::{Session, SessionConfig, SessionEvent, State};
+use oss_session::{Profile, Session, SessionConfig, SessionEvent, State};
+
+/// What a build outside this repository can supply to a connection. Both halves
+/// default to `None`, which is this repository's own client and nothing else.
+///
+/// The two go together: a zone picks which login form it expects from the
+/// encryption rather than from the packet, so a connection given a handshake and
+/// not the client to go with it is dropped at login with nothing said. See
+/// [`oss_session::client`].
+#[derive(Debug, Clone, Default)]
+pub struct Supplied {
+    /// Where the handshake comes from. `None` is
+    /// [`oss_session::security::built_in`] -- the modes
+    /// [`ServerOptions::security`] names.
+    pub security: Option<Security>,
+    /// Which client the session presents itself as. `None` is
+    /// [`oss_session::VieClient`], as [`SessionConfig`] defaults to.
+    pub client: Option<Profile>,
+}
 
 /// The zone's news, cached beside its maps under Continuum's name for it.
 const NEWS_FILE: &str = "news.txt";
@@ -132,7 +150,16 @@ impl Online {
         (&self.server, self.session.cipher_name().unwrap_or("none"))
     }
 
-    pub fn connect(opts: &ServerOptions, resolution: (u16, u16)) -> Result<Self, String> {
+    /// Opens a session to the zone.
+    ///
+    /// `supplied` is what a build outside this repository provides for the
+    /// connection; [`Supplied::default`] is this repository's own client, which is
+    /// what the binary here passes. See [`crate::Options::supplied`].
+    pub fn connect(
+        opts: &ServerOptions,
+        resolution: (u16, u16),
+        supplied: &Supplied,
+    ) -> Result<Self, String> {
         let driver =
             UdpDriver::connect(&opts.server).map_err(|e| format!("{}: {e}", opts.server))?;
         let cfg = SessionConfig {
@@ -143,6 +170,10 @@ impl Online {
             resolution,
             want_lvz: true,
             new_user: opts.new_user,
+            client: supplied
+                .client
+                .clone()
+                .unwrap_or_else(|| SessionConfig::default().client),
             ..Default::default()
         };
         let seed = std::time::SystemTime::now()
@@ -172,7 +203,13 @@ impl Online {
                 }
             }
         });
-        let handshake = client_handshake(opts.security, pin, identity, seed);
+        let security = supplied.security.clone().unwrap_or_else(built_in);
+        let handshake = security.handshake(HandshakeRequest {
+            mode: opts.security,
+            pinned: pin,
+            identity,
+            seed,
+        });
         let mut session = Session::with_handshake(cfg, now, handshake);
         if let Some(path) = &opts.record {
             let started = std::time::SystemTime::now()
@@ -516,7 +553,102 @@ fn progress_line(name: &str, received: usize, total: usize, done: usize, started
 
 #[cfg(test)]
 mod tests {
-    use super::{overall_percent, progress_line};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use oss_net::{Handshake, VieClientHandshake};
+    use oss_session::security::{HandshakeRequest, SecurityMode, SecurityProfile};
+    use oss_session::{ClientProfile, LoginForm, Profile, SecurityAnswer, SecurityChallenge};
+
+    use super::{Online, ServerOptions, Supplied, overall_percent, progress_line};
+
+    /// A stand-in for a build outside this repository, supplying both halves. The
+    /// handshake it returns is the VIE one and the login form the SubSpace one,
+    /// because what a supplied client *is* is not this repository's business;
+    /// what this proves is that a zone is joined with what was supplied, and that
+    /// the request reaches the profile as the connection filled it in.
+    #[derive(Debug)]
+    struct StubSupplied {
+        calls: Arc<AtomicUsize>,
+        mode: Arc<AtomicUsize>,
+    }
+
+    impl SecurityProfile for StubSupplied {
+        fn handshake(&self, request: HandshakeRequest) -> Box<dyn Handshake> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.mode.store(request.mode as usize, Ordering::SeqCst);
+            Box::new(VieClientHandshake::new(request.seed))
+        }
+    }
+
+    impl ClientProfile for StubSupplied {
+        fn login(&self) -> LoginForm {
+            LoginForm::vie()
+        }
+        fn security(&self, _challenge: SecurityChallenge) -> SecurityAnswer {
+            SecurityAnswer {
+                exe_checksum: 0,
+                continuum: None,
+            }
+        }
+    }
+
+    fn options() -> ServerOptions {
+        ServerOptions {
+            server: "127.0.0.1:5000".into(),
+            name: "Ace".into(),
+            password: String::new(),
+            arena: None,
+            ship: oss_session::SPECTATOR,
+            freq: None,
+            follow: None,
+            attach: None,
+            record: None,
+            security: SecurityMode::Vie,
+            known_servers: None,
+            identities: None,
+            new_user: false,
+        }
+    }
+
+    /// The seam the graphical client gains: what a build outside this repository
+    /// supplies is what the session is opened with -- the handshake, and the
+    /// client it presents itself as. Nothing is sent here (a UDP socket is
+    /// connected, not a zone), so this needs no server.
+    #[test]
+    fn what_is_supplied_is_what_the_session_is_opened_with() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mode = Arc::new(AtomicUsize::new(usize::MAX));
+        let stub = Arc::new(StubSupplied {
+            calls: Arc::clone(&calls),
+            mode: Arc::clone(&mode),
+        });
+        let supplied = Supplied {
+            security: Some(Arc::clone(&stub) as _),
+            client: Some(Arc::clone(&stub) as Profile),
+        };
+        let opts = options();
+        let net = Online::connect(&opts, (800, 600), &supplied).expect("a local socket");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the profile was asked");
+        assert_eq!(
+            mode.load(Ordering::SeqCst),
+            SecurityMode::Vie as usize,
+            "and told what the connection asked for"
+        );
+        assert!(
+            Arc::ptr_eq(&net.session.config().client, &(stub as Profile)),
+            "the session presents the client it was given"
+        );
+        assert_eq!(net.session.cipher_name(), None, "nothing has connected yet");
+        drop(net);
+
+        // And with nothing supplied the client is this repository's own: the stub
+        // is not consulted again, and the session is back on the default profile.
+        let net = Online::connect(&opts, (800, 600), &Supplied::default()).expect("a local socket");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(net.session.config().client.login().kind, 0x09);
+        drop(net);
+    }
 
     #[test]
     fn progress_names_the_file_and_its_place_in_the_set() {

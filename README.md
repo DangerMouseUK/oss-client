@@ -144,7 +144,8 @@ encryption.** Continuum's key expansion is not public and this repository does n
 which is deliberate rather than a gap waiting to be filled. Zones that accept VIE — which
 includes zones running ASSS and the original server — are reachable, as are OpenSec zones.
 The security path is a trait, so a build that supplies its own cipher can reach more without
-anything here changing.
+anything here changing — including the graphical client, which is a library as well as a
+binary for exactly that reason.
 [docs/encryption.md](docs/encryption.md) says exactly what this means for you.
 
 **A public zone may still turn you away for its own reasons.** The zones this client has

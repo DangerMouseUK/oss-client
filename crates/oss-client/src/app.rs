@@ -16,7 +16,7 @@ use crate::audio::Audio;
 use crate::game::art::{self, Art};
 use crate::game::input::{InputState, Stroke, char_for, shifted_char};
 use crate::game::login::{Choice, Login};
-use crate::game::online::{Online, ServerOptions};
+use crate::game::online::{Online, ServerOptions, Supplied};
 use crate::game::sandbox::Sandbox;
 use crate::game::settings_ui::{SettingsUi, UiAction};
 use crate::game::start_spots::{Rect, Spot, Spots};
@@ -163,7 +163,7 @@ pub struct Options {
     ///
     /// **Not the settings screen.** These go into the client's own input, which
     /// that screen does not read; only the pointer takes the other road into
-    /// egui (see [`App::egui_pointer`]). A scripted run drives it by clicking
+    /// egui (see `App::egui_pointer`). A scripted run drives it by clicking
     /// and dragging, and cannot type into it at all.
     pub press: Vec<ScriptedKey>,
     /// `--click` and `--drag`, expanded into pointer edges at the given times
@@ -176,7 +176,7 @@ pub struct Options {
     /// screenshot shows.
     ///
     /// While the settings screen is up these go to it instead, in the same
-    /// units; see [`App::egui_pointer`] for why that one takes a different road.
+    /// units; see `App::egui_pointer` for why that one takes a different road.
     pub pointer: Vec<ScriptedPoint>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
@@ -201,6 +201,14 @@ pub struct Options {
     pub directories: Vec<String>,
     /// Connection encryption.
     pub security: oss_session::security::SecurityMode,
+    /// What a build outside this repository supplies for the connection: the
+    /// handshake, and the client the session presents itself as. The default is
+    /// neither, which is this repository's own client — the modes
+    /// [`Options::security`] names, and [`oss_session::VieClient`].
+    ///
+    /// Set between [`crate::options`] and [`run`]; see [`Supplied`] and the crate
+    /// documentation.
+    pub supplied: Supplied,
     /// `--security` was given (it wins over the settings file).
     pub security_from_cli: bool,
     /// Offer zones an OpenSec identity key.
@@ -498,7 +506,7 @@ impl ApplicationHandler for App {
                 let z = &z;
                 let size = window.inner_size();
                 let res = ((size.width / scale) as u16, (size.height / scale) as u16);
-                let net = match Online::connect(z, res) {
+                let net = match Online::connect(z, res, &self.options.supplied) {
                     Ok(n) => n,
                     Err(e) => return self.fail(event_loop, e),
                 };
@@ -957,7 +965,7 @@ impl App {
                         (size.width / run.scale) as u16,
                         (size.height / run.scale) as u16,
                     );
-                    match Online::connect(&opts, res) {
+                    match Online::connect(&opts, res, &self.options.supplied) {
                         Ok(net) => {
                             run.window
                                 .set_title(&format!("Open SubSpace — {}", opts.server));

@@ -12,6 +12,10 @@
 //! After an OpenSec connection to a server with no key on record, the server's key
 //! is remembered (trust on first use) in a `known_servers.txt` file.
 //!
+//! A build outside this repository can supply its own handshake instead of picking
+//! one of these modes: see [`SecurityProfile`], the companion to
+//! [`crate::ClientProfile`] one layer up. [`BuiltIn`] is what everything here uses.
+//!
 //! The client also offers an identity key (OpenSec `CLIENT_AUTH`), which zones may
 //! use for bans. Following the spec's linkability advice (section 4.6) each zone
 //! gets its own key, made on first use and kept in `identities.txt`, so zones can't
@@ -19,7 +23,9 @@
 //! ignores it.
 
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use oss_net::opensec::{IdentityKey, OpenSecClientHandshake, os_entropy};
 use oss_net::{Fallback, Handshake, VieClientHandshake};
@@ -78,6 +84,56 @@ pub fn client_handshake(
             FALLBACK_AFTER_MS,
         )),
     }
+}
+
+/// Everything a handshake is built from: the mode asked for, the server's key if
+/// one is on record, the identity to offer, and the connection's seed.
+///
+/// The session fills this in; a [`SecurityProfile`] decides what to do with it.
+#[derive(Debug, Clone)]
+pub struct HandshakeRequest {
+    /// What `--security` (or the settings file) asked for.
+    pub mode: SecurityMode,
+    /// The server's OpenSec key, if one is on record for this address.
+    pub pinned: Option<[u8; 32]>,
+    /// The OpenSec identity to offer this zone, if any.
+    pub identity: Option<IdentityKey>,
+    /// The connection's seed, as [`client_handshake`] takes it.
+    pub seed: u32,
+}
+
+/// Where a connection's handshake comes from.
+///
+/// [`BuiltIn`] is the default and covers every [`SecurityMode`] in this
+/// repository. **Implement this outside the repository to connect with a cipher
+/// that is not in it**: the implementation returns an `oss_net::Handshake` of its
+/// own and this crate neither inspects it nor knows anything about it. It is the
+/// same promise [`crate::ClientProfile`] makes for the login packets one layer up,
+/// and `oss_net::Handshake` and `oss_net::Cipher` make one layer down.
+pub trait SecurityProfile: Debug + Send + Sync {
+    /// The handshake to open the connection with.
+    fn handshake(&self, request: HandshakeRequest) -> Box<dyn Handshake>;
+}
+
+/// A handle to a [`SecurityProfile`], so options carrying one stay `Clone`
+/// (the same shape as [`crate::Profile`]).
+pub type Security = Arc<dyn SecurityProfile>;
+
+/// The profiles in this repository: OpenSec and VIE, picked by
+/// [`HandshakeRequest::mode`]. Defers to [`client_handshake`], so it is exactly
+/// what a caller that supplies no profile of its own gets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuiltIn;
+
+impl SecurityProfile for BuiltIn {
+    fn handshake(&self, request: HandshakeRequest) -> Box<dyn Handshake> {
+        client_handshake(request.mode, request.pinned, request.identity, request.seed)
+    }
+}
+
+/// The default profile: [`BuiltIn`].
+pub fn built_in() -> Security {
+    Arc::new(BuiltIn)
 }
 
 /// A file of 32-byte keys by "host:port", one `host:port hexkey` per line.
@@ -200,6 +256,9 @@ pub fn fingerprint(public: &[u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use oss_net::opensec::{OpenSecAcceptor, ServerKey};
     use oss_net::{Config, Connection, Event, Server, VieAcceptor};
@@ -359,6 +418,97 @@ mod tests {
         assert_eq!(a2.public(), a.public());
         assert_eq!(fingerprint(&[0xab; 32]), "abababababababab");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the profile was asked for: the mode, the key on record, the seed.
+    type Asked = (SecurityMode, Option<[u8; 32]>, u32);
+
+    /// A stand-in for a build outside this repository: it hands the session a
+    /// handshake of its own instead of picking one of the modes here. What it
+    /// returns is the VIE handshake, because what a supplied cipher *is* is not
+    /// this repository's business; what this proves is that the session connects
+    /// with whatever it was handed, and that the request reaches the profile
+    /// intact.
+    #[derive(Debug)]
+    struct StubSupplied {
+        calls: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Option<Asked>>>,
+    }
+
+    impl SecurityProfile for StubSupplied {
+        fn handshake(&self, request: HandshakeRequest) -> Box<dyn Handshake> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen.lock().unwrap() = Some((request.mode, request.pinned, request.seed));
+            Box::new(VieClientHandshake::new(request.seed))
+        }
+    }
+
+    #[test]
+    fn a_supplied_profile_is_what_connects() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(None));
+        let supplied: Security = Arc::new(StubSupplied {
+            calls: Arc::clone(&calls),
+            seen: Arc::clone(&seen),
+        });
+        // Asked for OpenSec with a key on record -- which `BuiltIn` would refuse to
+        // downgrade -- and handed to a VIE-only server. It connects, so the
+        // handshake used was the supplied one and not this crate's.
+        let key = ServerKey::generate(&os_entropy());
+        let request = HandshakeRequest {
+            mode: SecurityMode::OpenSec,
+            pinned: Some(key.public()),
+            identity: None,
+            seed: 7,
+        };
+        let (cipher, _) = connect(
+            supplied.handshake(request),
+            vec![Box::new(VieAcceptor::default())],
+        )
+        .expect("the supplied handshake connects");
+        assert_eq!(cipher, "vie");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((SecurityMode::OpenSec, Some(key.public()), 7)),
+            "the request reaches the profile as the session filled it in"
+        );
+    }
+
+    /// The default profile is the modes in this repository and nothing else: for
+    /// every mode it must do what [`client_handshake`] does, since that is the path
+    /// every existing caller is on.
+    #[test]
+    fn the_built_in_profile_is_this_repositorys_modes() {
+        let key = ServerKey::generate(&os_entropy());
+        let both = || vec![opensec_server(&key), Box::new(VieAcceptor::default()) as _];
+        let built = built_in();
+        let via = |mode, pinned| {
+            built.handshake(HandshakeRequest {
+                mode,
+                pinned,
+                identity: None,
+                seed: 7,
+            })
+        };
+        assert_eq!(
+            connect(via(SecurityMode::Auto, None), both()).map(|c| c.0),
+            Some("opensec"),
+        );
+        assert_eq!(
+            connect(via(SecurityMode::Vie, None), both()).map(|c| c.0),
+            Some("vie"),
+        );
+        assert_eq!(
+            connect(via(SecurityMode::OpenSec, None), both()).map(|c| c.0),
+            Some("opensec"),
+        );
+        // A key on record is still never downgraded through the seam.
+        let other = ServerKey::generate(&os_entropy());
+        assert_eq!(
+            connect(via(SecurityMode::Auto, Some(other.public())), both()),
+            None
+        );
     }
 
     #[test]

@@ -46,6 +46,11 @@ What that means in practice:
 - The session layer's security path is a trait, so a build that supplies its own cipher can
   register it through `oss_net::Acceptor` / `oss_net::Cipher` without changing
   anything here. That is how a real Continuum 0.40 client came to play on `oss-server`.
+- That seam reaches the graphical client as well as a headless one. `oss-client` is a
+  library beside its binary: a build outside this repository calls `oss_client::options`,
+  fills in `Options::supplied` with a handshake and the client to go with it, and calls
+  `oss_client::run`. Every zone that client joins is then joined with what it supplied.
+  Nothing here implements either half, and nothing here knows what one returns.
 
 The *shape* of the Continuum handshake (`00 10`–`00 14`) is documented in
 [oss-core's docs/protocol/encryption.md](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/encryption.md),
