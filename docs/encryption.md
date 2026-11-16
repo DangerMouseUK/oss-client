@@ -3,8 +3,30 @@
 ## Which cipher is used
 
 Connections try **OpenSec** first and fall back to **VIE** for servers that do not speak it.
-`--security auto|opensec|vie`, or `[network] security` in the settings file, changes the
-policy: `opensec` refuses to fall back, `vie` never offers OpenSec.
+`--security auto|opensec|vie|none`, or `[network] security` in the settings file, changes the
+policy: `opensec` refuses to fall back, `vie` never offers OpenSec, `none` is below.
+
+**VIE is the floor, and nothing automatic goes below it.** Each step down is triggered by an
+attempt that failed, and anyone able to disturb the traffic can make every stronger attempt
+look as though it failed. A ladder whose bottom rung is cleartext therefore hands that
+attacker cleartext for the price of being a nuisance, without breaking any cipher. Keeping
+VIE as the bottom rung costs nothing — it is the path every existing zone speaks anyway —
+and it means the worst an attacker can arrange by interfering is a VIE session rather than a
+readable one.
+
+So the client also refuses the two answers that used to put it in the clear. A server saying
+"I will not encrypt" — which on the wire is just your own connection key sent back to you —
+ends the connection instead of starting an unencrypted one, because nothing in that exchange
+is signed and anything on the network path can send it. You will see
+`Couldn't connect to <zone>: the server's 00 02 refused encryption...`.
+
+**`--security none` is the way past that, and it is for development.** It sends your password
+in the clear. It is never selected for you: the automatic policy cannot reach it, a server
+cannot ask for it, and a key remembered for the zone does not override it. The server has to
+have been set to allow it as well (`Security:AllowUnencrypted` in its `global.conf`), so an
+unencrypted session takes a decision at each end. The zone-list lookup is the one connection
+this client makes that still accepts an unencrypted answer, because it carries only public
+information in both directions and refusing would risk the zone browser to buy nothing.
 
 Three schemes have been used over the life of this game — VIE, Continuum's own, and OpenSec.
 [oss-core's docs/protocol/encryption.md](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/encryption.md#the-three-eras)

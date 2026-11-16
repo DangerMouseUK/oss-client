@@ -58,7 +58,19 @@ impl ZoneListFetch {
         Self {
             conn: Connection::client(
                 Config::client(),
-                Box::new(VieClientHandshake::new(seed)),
+                // The one link in this repository that takes "I will not
+                // encrypt" for an answer. It asks a public directory for the
+                // public zone list: there is no password, no identity and
+                // nothing in either direction that is not already public, so an
+                // attacker who forced it into the clear would learn what they
+                // could have asked for themselves. What is known is that this
+                // lookup worked against real directories while it accepted that
+                // answer, and this project has never recorded which answer they
+                // give; refusing it could therefore take the zone browser away
+                // from players to buy nothing. A game session is the opposite
+                // case on both counts and refuses it -- see
+                // `VieClientHandshake::accept_refusal`.
+                Box::new(VieClientHandshake::new(seed).accept_refusal()),
                 now_ms,
             ),
             min_players,

@@ -461,6 +461,14 @@ impl Online {
                              changed its key, remove its line from known_servers.txt.",
                                 self.server
                             )
+                        } else if let oss_session::Reason::HandshakeFailed(why) = reason {
+                            // The handshake's own sentence, rather than the
+                            // debug form of the reason wrapped around it. A
+                            // connection setup can now fail for a reason the
+                            // player can act on -- a zone that will not encrypt
+                            // needs `--security none` to reach, deliberately --
+                            // and that reading should not need the source.
+                            format!("Couldn't connect to {}: {why}.", self.server)
                         } else {
                             format!("Disconnected ({reason:?})")
                         });

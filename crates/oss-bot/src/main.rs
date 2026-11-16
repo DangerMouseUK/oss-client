@@ -33,8 +33,10 @@ Options:
                          bot needs this against a zone that has just come up
   --duration <secs>      Disconnect after this long (default: run until Ctrl+C)
   --map-cache <dir>      Where downloaded maps are kept
-  --security <mode>      vie (default), opensec, or auto (OpenSec, falling back
-                         to VIE); bots don't pin server keys
+  --security <mode>      vie (default), opensec, auto (OpenSec, falling back
+                         to VIE), or none; bots don't pin server keys. The none
+                         mode sends the password in the clear and only works
+                         against a server set to allow it
   --identity <file>      Offer an OpenSec identity key, one per bot number and
                          zone, kept in <file> (made if missing); a renamed bot
                          keeps its key
@@ -106,7 +108,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
             "--fly" => o.fly = true,
             "--security" => {
                 o.security = SecurityMode::from_name(&value("--security")?)
-                    .ok_or("--security must be vie, opensec or auto")?
+                    .ok_or("--security must be vie, opensec, auto or none")?
             }
             "--identity" => o.identity = Some(value("--identity")?.into()),
             "--chat" => o.chat = Some(value("--chat")?),

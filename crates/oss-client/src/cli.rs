@@ -68,7 +68,11 @@ Options:
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
-  --security <mode>         auto (OpenSec, falling back to VIE), opensec or vie
+  --security <mode>         auto (OpenSec, falling back to VIE), opensec, vie,
+                            or none. The none mode sends your password in the
+                            clear and only works against a server set to allow
+                            it: it is for development, and nothing selects it
+                            for you
   --config <file>           Settings file, which must already exist; only the
                             default is written for you (oss-client.ini in the
                             user's settings folder)
@@ -336,7 +340,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--security" => {
                 security = Some(
                     oss_session::security::SecurityMode::from_name(&value("--security")?)
-                        .ok_or("--security must be auto, opensec or vie")?,
+                        .ok_or("--security must be auto, opensec, vie or none")?,
                 )
             }
             other => return Err(format!("unknown argument {other}")),

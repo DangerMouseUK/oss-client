@@ -8,6 +8,17 @@
 //!   on record, require OpenSec (never fall back: that would be a downgrade).
 //! - **opensec**: OpenSec only.
 //! - **vie**: VIE only.
+//! - **none**: no encryption, for development work. A person has to ask for it; it
+//!   is not on the ladder that **auto** walks down, and nothing a server sends can
+//!   select it. The server has to have been set to allow it too, so both ends are a
+//!   decision. Do not use it to reach a zone you do not run: the login packet
+//!   carries your password.
+//!
+//! **VIE is the floor of the automatic path.** Each step down is triggered by an
+//! attempt that failed, and failure is cheap to manufacture for anyone positioned to
+//! disturb the traffic; a ladder whose bottom rung is cleartext hands that attacker
+//! cleartext for the price of being a nuisance. VIE costs nothing to keep as the
+//! bottom rung, because it is the path every legacy client uses anyway.
 //!
 //! After an OpenSec connection to a server with no key on record, the server's key
 //! is remembered (trust on first use) in a `known_servers.txt` file.
@@ -39,7 +50,18 @@ pub enum SecurityMode {
     Auto,
     OpenSec,
     Vie,
+    /// No encryption, for development work. Never reached automatically.
+    None,
 }
+
+/// Every mode, in the order `--security` lists them. Enumerated once so that a
+/// new mode cannot be added to the type and missed by the parser.
+pub const MODES: [SecurityMode; 4] = [
+    SecurityMode::Auto,
+    SecurityMode::OpenSec,
+    SecurityMode::Vie,
+    SecurityMode::None,
+];
 
 impl SecurityMode {
     pub fn name(self) -> &'static str {
@@ -47,13 +69,18 @@ impl SecurityMode {
             SecurityMode::Auto => "auto",
             SecurityMode::OpenSec => "opensec",
             SecurityMode::Vie => "vie",
+            SecurityMode::None => "none",
         }
     }
 
     pub fn from_name(s: &str) -> Option<Self> {
-        [SecurityMode::Auto, SecurityMode::OpenSec, SecurityMode::Vie]
-            .into_iter()
-            .find(|m| m.name().eq_ignore_ascii_case(s))
+        MODES.into_iter().find(|m| m.name().eq_ignore_ascii_case(s))
+    }
+
+    /// Whether this mode encrypts. Only [`SecurityMode::None`] does not, and
+    /// only a person can choose it.
+    pub fn encrypts(self) -> bool {
+        !matches!(self, SecurityMode::None)
     }
 }
 
@@ -74,6 +101,9 @@ pub fn client_handshake(
         }
     };
     match (mode, pinned) {
+        // Asked for by a person, so it overrides a key on record: an explicit
+        // policy takes precedence over the opportunistic one (RFC 7435).
+        (SecurityMode::None, _) => Box::new(VieClientHandshake::unencrypted()),
         (SecurityMode::Vie, _) => Box::new(VieClientHandshake::new(seed)),
         (SecurityMode::OpenSec, pin) | (SecurityMode::Auto, pin @ Some(_)) => {
             Box::new(opensec(pin))
@@ -509,6 +539,54 @@ mod tests {
             connect(via(SecurityMode::Auto, Some(other.public())), both()),
             None
         );
+    }
+
+    /// `none` is reached by asking for it and no other way. A server that will
+    /// not encrypt gets a connection out of the mode that asked and out of
+    /// nothing else, including `auto`, which is the mode that walks down a
+    /// ladder: VIE is the bottom rung of that ladder and `none` is not on it.
+    #[test]
+    fn no_encryption_is_only_ever_asked_for() {
+        let refusing =
+            || -> Vec<Box<dyn oss_net::Acceptor>> { vec![Box::new(oss_net::NullAcceptor)] };
+
+        let (cipher, peer) = connect(
+            client_handshake(SecurityMode::None, None, None, 7),
+            refusing(),
+        )
+        .expect("the mode that asked connects");
+        assert_eq!(cipher, "none");
+        assert_eq!(peer, None);
+
+        for mode in [SecurityMode::Auto, SecurityMode::Vie, SecurityMode::OpenSec] {
+            assert_eq!(
+                connect(client_handshake(mode, None, None, 7), refusing()),
+                None,
+                "{} must not end unencrypted",
+                mode.name()
+            );
+        }
+
+        // And asking for it is a person's decision, so it wins over a key on
+        // record for the server -- an explicit policy over an opportunistic one.
+        let key = ServerKey::generate(&os_entropy());
+        let (cipher, _) = connect(
+            client_handshake(SecurityMode::None, Some(key.public()), None, 7),
+            refusing(),
+        )
+        .expect("an explicit mode is not overridden by a remembered key");
+        assert_eq!(cipher, "none");
+    }
+
+    #[test]
+    fn every_mode_round_trips_through_its_name() {
+        for m in MODES {
+            assert_eq!(SecurityMode::from_name(m.name()), Some(m));
+        }
+        assert_eq!(SecurityMode::from_name("NONE"), Some(SecurityMode::None));
+        assert_eq!(SecurityMode::from_name("plaintext"), None);
+        assert!(MODES.iter().filter(|m| !m.encrypts()).count() == 1);
+        assert!(!SecurityMode::None.encrypts());
     }
 
     #[test]
