@@ -16,8 +16,10 @@ name: Dev build
 #
 # Be clear about what that does and does not buy, because it is easy to assume
 # more. THIS REPOSITORY IS PUBLIC, so an artifact here is NOT private: anyone
-# who finds the run page can download it (the web UI wants a GitHub account;
-# the REST API serves artifacts of a public repository unauthenticated). What
+# who finds the run page can download it. The web UI asks for a GitHub account;
+# whether the REST API also hands artifacts to anonymous callers has moved
+# between artifact versions and the public docs disagree, so do NOT treat
+# "needs an account" as a privacy boundary -- it is not one either way. What
 # this workflow avoids is not secrecy. It is the tag and the release. Nothing
 # is added to the public tag list, nothing appears under Releases, nothing
 # claims a version number, and the file deletes itself after 14 days instead of
