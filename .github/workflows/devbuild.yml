@@ -1,0 +1,295 @@
+name: Dev build
+
+# What this is for, and why it is not release.yml.
+#
+# Someone needs a runnable client on a machine that has no checkout and no Rust
+# toolchain, WITHOUT cutting a release. release.yml cannot do that: every path
+# into it needs a tag to exist first -- it triggers on pushed `v*` tags, and its
+# `workflow_dispatch` has a `tag` input marked `required: true`. A git tag is
+# public the moment it is pushed, even when the release hanging off it is a
+# draft, so "just tag it and take the draft" puts a version number on the
+# repository's public tag list before anyone meant to announce one.
+#
+# This workflow therefore takes no tag, makes no tag, and makes no release. It
+# builds the same three platforms and uploads the result as a GitHub Actions
+# *artifact*, which lives on that run's own page and expires.
+#
+# Be clear about what that does and does not buy, because it is easy to assume
+# more. THIS REPOSITORY IS PUBLIC, so an artifact here is NOT private: anyone
+# who finds the run page can download it (the web UI wants a GitHub account;
+# the REST API serves artifacts of a public repository unauthenticated). What
+# this workflow avoids is not secrecy. It is the tag and the release. Nothing
+# is added to the public tag list, nothing appears under Releases, nothing
+# claims a version number, and the file deletes itself after 14 days instead of
+# standing as a permanent download the project appears to be offering. If you
+# need a build that is genuinely not readable by the public, this file is the
+# wrong tool and no workflow in a public repository is the right one.
+#
+# How to use it.
+#
+#   Actions -> "Dev build" (left sidebar) -> "Run workflow" -> pick the branch
+#   -> "Run workflow". When the run finishes, its summary page lists three
+#   files under "Artifacts". Download the one for your platform.
+#
+# This does NOT gate the commit it builds.
+#
+# release.yml runs `cargo test --workspace --locked` before it builds, because
+# the commit a tag points at is not necessarily one CI has seen. This workflow
+# deliberately does not: it is a build-and-download convenience, ci.yml already
+# gates `main`, and adding a test job here would roughly double the wait for
+# something whose whole point is to be quick to reach for. If you dispatch this
+# on a branch CI has not run, you are building an ungated commit and you know it.
+#
+# What this workflow cannot do.
+#
+#   1. `permissions: contents: read`, and no job raises it. `gh release create`
+#      and anything that writes a ref need `contents: write`, so a release or a
+#      tag is not merely absent from this file -- the token this file runs with
+#      cannot create one.
+#   2. There is no `gh` call of any kind below, and no `push:` or tag trigger.
+#      The only way this runs is a human pressing the button.
+#
+# Why the build steps are copied from release.yml rather than shared with it.
+#
+# They are near-identical and that is a real cost. They were still copied. A
+# shared reusable workflow or composite action would mean editing release.yml's
+# build job, and the only way to prove that edit did not break the release path
+# is to push a tag and watch a release build run -- which is exactly the thing
+# nobody wants to do yet, and the reason this file exists. A refactor that can
+# only be verified by doing the forbidden thing is not a safe refactor. So
+# release.yml is left untouched and byte-for-byte as it was.
+#
+#   If you change the build here, check whether release.yml needs the same
+#   change. The steps that are deliberately identical are: the system library
+#   install, the toolchain pin, the runner-is-the-target assertion, the
+#   `cargo build --release --locked -p oss-client -p oss-bot`, and the staging
+#   of assets/classic beside the executable.
+#
+# What is in each archive, and why it is not just a binary.
+#
+#   * `oss-client` -- the game client.
+#   * `oss-bot` -- the headless bot, built because release.yml builds it and
+#     because it shares nearly all of its dependencies with the client, so it
+#     costs very little on top.
+#   * `assets/classic/` -- the graphics and sounds the client draws with. NOT
+#     OPTIONAL. `AssetDirs::locate` looks for `assets/classic` beside the
+#     running executable (crates/oss-assets/src/dirs.rs), and that is the only
+#     one of its five candidate folders that exists on a machine with no
+#     checkout and no Continuum install. Without this folder the download
+#     starts and immediately prints an error instead of drawing anything.
+#   * `LICENSE` -- the GPL-2.0-or-later text covering the code.
+#   * `README.md` -- how to play, and the key bindings.
+#
+# Toolchain and caching, and what differs from release.yml.
+#
+#   * RUST_PINNED matches ci.yml and release.yml exactly. The bump procedure is
+#     written out beside the value in ci.yml.
+#   * Swatinem/rust-cache IS used here, which release.yml deliberately refuses.
+#     The reasoning there is that a release binary is handed to strangers and
+#     the build time saved is not worth another input to what is inside it.
+#     That argument is not void here -- the note above says these artifacts are
+#     publicly downloadable -- but it is much weaker: nobody is pointed at one,
+#     no page offers it, it is gone in 14 days, and it is not what the project
+#     tells anyone to download. Against that, this is the slowest of the three
+#     repositories to build from cold and this workflow is meant to be run
+#     often, so the cache earns its place. The rule that follows: if the
+#     provenance of a particular binary matters -- if you are about to hand it
+#     to someone, or keep it -- do not use one of these. Cut a real release.
+#     That is what release.yml is for, and it builds from nothing on purpose.
+#   * `--locked` is on the cargo invocation, as in release.yml, so the committed
+#     Cargo.lock is what gets built.
+#
+# Platform coverage, stated with its gaps. Same three runners as ci.yml and
+# release.yml, with the same caveats:
+#
+#   * Linux x86-64, Windows x86-64 and macOS arm64, built on the host runner.
+#     Nothing is cross-compiled.
+#   * macOS artefacts are arm64 (Apple Silicon) ONLY. `macos-latest` is an arm64
+#     image, so an Intel Mac is not covered by any file this workflow produces.
+#     The filenames say `aarch64-apple-darwin` so that gap is legible from the
+#     Actions page rather than discovered after the download.
+#   * The macOS build is a plain executable, not a `.app` bundle, and it is not
+#     signed or notarised. Gatekeeper will object to it on a machine it was not
+#     built on. Fixing that needs an Apple Developer identity and secrets this
+#     workflow does not have.
+#   * The Linux binary is built on `ubuntu-latest`, so it carries whatever glibc
+#     floor that image has on the day it runs, and it links the system windowing
+#     and audio libraries installed below -- any desktop Linux has them, a bare
+#     container does not.
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: "oss-core ref to build against (blank: oss-core's default branch)"
+        required: false
+        default: ""
+
+# Read-only, and nothing below raises it. See "What this workflow cannot do".
+permissions:
+  contents: read
+
+concurrency:
+  group: devbuild-${{ github.ref }}
+  # Unlike release.yml, which must never have two runs racing over one tag's
+  # draft, this writes nothing shared. A newer press of the button supersedes
+  # an older one, so cancel the older one rather than pay for both.
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must equal RUST_PINNED in ci.yml and release.yml. The bump procedure is
+  # written out in ci.yml, beside the value, and covers all three repositories
+  # in order.
+  RUST_PINNED: "1.100.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: oss-client
+    steps:
+      # No `ref:` -- a workflow_dispatch checks out the branch chosen in the
+      # "Run workflow" dropdown, which is the whole interface here.
+      - uses: actions/checkout@v4
+        with:
+          path: oss-client
+
+      # An empty `ref` is actions/checkout's documented default: oss-core's
+      # default branch. release.yml resolves a ref carefully because a release
+      # must say what it was built from; this one records the commit in the job
+      # summary instead, which is as much provenance as a dev build needs.
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          ref: ${{ inputs.core_ref }}
+          path: oss-core
+
+      - name: Linux system libraries (windowing, audio, gamepad)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-client
+
+      # The target triple is written into every filename below, so assert the
+      # runner really is that target rather than trusting the label. The day
+      # GitHub changes what an image is, this fails loudly instead of producing
+      # a file whose name is wrong. Copied from release.yml for the same reason.
+      - name: Runner is the target this job claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "$host" != "${{ matrix.target }}" ]; then
+            echo "::error title=Dev build::Runner ${{ matrix.os }} has host triple ${host}, but this job names its artefacts ${{ matrix.target }}."
+            exit 1
+          fi
+
+      - run: cargo build --release --locked -p oss-client -p oss-bot
+
+      - name: Stage the folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The commit actually checked out, short. NOT the workspace version
+          # from Cargo.toml: that says 0.1.0 for every commit on main, so a
+          # filename carrying it would claim far more than this build is. A dev
+          # build is identified by the commit it came from and nothing else.
+          sha="$(git rev-parse --short HEAD)"
+          name="oss-client-devbuild-${sha}-${{ matrix.target }}"
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          mkdir -p "dist/${name}/assets"
+          cp "target/release/oss-client${ext}" "dist/${name}/"
+          cp "target/release/oss-bot${ext}" "dist/${name}/"
+          cp LICENSE "dist/${name}/"
+          cp README.md "dist/${name}/"
+          # The client looks for `assets/classic` beside the executable. The
+          # folder's own README travels with it and says whose these files are.
+          cp -R assets/classic "dist/${name}/assets/classic"
+          # If this is ever empty the download starts and then cannot draw, so
+          # check rather than discover it after unzipping.
+          count="$(find "dist/${name}/assets/classic" -type f | wc -l)"
+          if [ "$count" -lt 2 ]; then
+            echo "::error title=Dev build::Staged assets/classic has ${count} files. The client cannot draw without them."
+            exit 1
+          fi
+          echo "Staged ${count} asset files."
+          echo "STAGE_NAME=${name}" >> "$GITHUB_ENV"
+
+      # Linux and macOS go up as a tar.gz inside the artifact, Windows as a
+      # plain folder. That asymmetry is deliberate and it is not cosmetic.
+      #
+      # actions/upload-artifact always zips what it is given, and a zip does not
+      # carry the Unix executable bit. Upload the bare folder on Linux or macOS
+      # and whoever downloads it gets an `oss-client` they cannot run until they
+      # `chmod +x` it. A tar.gz inside the zip keeps the bit, at the cost of one
+      # extra unpacking step. Windows has no such bit, so there the second
+      # archive would be pure friction -- the folder goes up as it is and one
+      # unzip is the whole job.
+      - name: Archive (tar.gz, Linux and macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf "${STAGE_NAME}.tar.gz" -C dist "${STAGE_NAME}"
+
+      - name: Upload (Linux and macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE_NAME }}
+          # Relative to the workspace, not to defaults.working-directory.
+          path: oss-client/${{ env.STAGE_NAME }}.tar.gz
+          if-no-files-found: error
+          # Explicit rather than inherited from the repository default, so the
+          # run summary below can state a real number. Long enough to fetch at
+          # leisure, short enough that a year of these does not pile up.
+          retention-days: 14
+
+      - name: Upload (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STAGE_NAME }}
+          # A directory: upload-artifact zips its CONTENTS, so the downloaded
+          # zip opens straight onto oss-client.exe and assets/.
+          path: oss-client/dist/${{ env.STAGE_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_sha="$(git -C "$GITHUB_WORKSPACE/oss-core" rev-parse HEAD)"
+          {
+            echo "## ${STAGE_NAME}"
+            echo
+            echo "Built from oss-client \`$(git rev-parse HEAD)\`, against oss-core \`${core_sha}\`."
+            echo
+            echo "This is **not** a release and there is **no tag**. The file is an Actions artifact on this run's page and is deleted after **14 days**. This repository is public, so the artifact is downloadable by anyone who finds this page -- it is unannounced and temporary, not private."
+            echo
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "Download it, unzip it, and run \`oss-client.exe\` from the unzipped folder. Keep \`assets\` beside the executable -- the client reads its graphics and sounds from there."
+            else
+              echo "Download it and unzip it; inside is \`${STAGE_NAME}.tar.gz\`. Unpack that (\`tar -xzf ${STAGE_NAME}.tar.gz\`) and run \`./oss-client\` from the folder it makes. Keep \`assets\` beside the executable -- the client reads its graphics and sounds from there. The tar keeps the executable bit; the zip around it does not, which is why there are two layers."
+            fi
+            echo
+            echo "No environment variables are needed. \`OSS_ASSETS_DIR\` and \`OSS_CONTINUUM_DIR\` only matter if you want to override the bundled graphics."
+          } >> "$GITHUB_STEP_SUMMARY"
