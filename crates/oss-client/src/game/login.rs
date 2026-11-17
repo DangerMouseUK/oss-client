@@ -6,7 +6,9 @@
 //! the two are drawn and driven together.
 //!
 //! Shown when the game starts without `--server` or `--sandbox`, and again when a
-//! connection fails or you leave a game. Tab or Up/Down move between fields,
+//! connection fails or you leave a game. Tab or Up/Down move between fields --
+//! except on the ship, where Up and Down walk the rows of the ship grid and
+//! reach spectator under it, and step out of the grid at either end.
 //! Left/Right change the ship, Enter plays, F2 opens the options, F3 asks the
 //! directories again, F5 flies the offline sandbox and Esc quits. The last zone, name,
 //! arena and ship (never the password) are remembered in `login.ini` beside the
@@ -242,6 +244,49 @@ impl Login {
         }
     }
 
+    /// How many ships are drawn across the grid on the start-up screen.
+    ///
+    /// Up and Down move by this much, so the keyboard walks the same shape the
+    /// eye sees. The drawing code lays the eight out in this many columns and
+    /// takes the number from here, so the two cannot drift apart.
+    pub const SHIP_COLUMNS: u8 = 4;
+
+    /// One row up or down the ship grid.
+    ///
+    /// The grid is [`Login::SHIP_COLUMNS`] ships across, two rows of them, with
+    /// spectator on a row of its own underneath -- which is how the screen draws
+    /// it, so Up and Down walking it is the keyboard following the picture.
+    ///
+    /// Returns `false` when there is no row that way, which is above the first
+    /// row of ships and below spectator. The caller then leaves the field
+    /// entirely, so the grid can always be stepped out of and Tab keeps working
+    /// exactly as it did.
+    fn step_ship_row(&mut self, down: bool) -> bool {
+        let cols = Self::SHIP_COLUMNS;
+        // Spectator is the last row, and the left-hand end of the bottom row of
+        // ships is what is directly above it.
+        if self.ship == SPECTATOR {
+            if down {
+                return false;
+            }
+            self.ship = cols;
+            return true;
+        }
+        if down {
+            self.ship = if self.ship + cols < 8 {
+                self.ship + cols
+            } else {
+                SPECTATOR
+            };
+            true
+        } else if self.ship >= cols {
+            self.ship -= cols;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Plays, as Enter does: the `play` hot spot's way in.
     ///
     /// Shares [`Login::submit`] rather than repeating it, so the pointer cannot
@@ -309,6 +354,28 @@ impl Login {
             match stroke.key {
                 Some(KeyCode::Tab) if !shift => self.focus = (self.focus + 1) % FIELDS.len(),
                 Some(KeyCode::Tab) => self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len(),
+                // The ships are drawn as a grid -- four across, two rows of
+                // them, and spectator on a row under those -- so while the ship
+                // has the focus, Up and Down walk that grid instead of stepping
+                // straight out of it. "The back/up/down around the ships is
+                // counter intuitive" was Up and Down leaving a visible grid the
+                // moment they were pressed in it.
+                Some(key @ (KeyCode::ArrowUp | KeyCode::ArrowDown))
+                    if self.focused() == Field::Ship =>
+                {
+                    let down = key == KeyCode::ArrowDown;
+                    if !self.step_ship_row(down) {
+                        // Off the top of the grid or off the bottom of it: on to
+                        // the next field, which is what these keys do everywhere
+                        // else on the form. Nothing can trap the cursor, and
+                        // nothing in the grid is reachable only by Tab.
+                        self.focus = if down {
+                            (self.focus + 1) % FIELDS.len()
+                        } else {
+                            (self.focus + FIELDS.len() - 1) % FIELDS.len()
+                        };
+                    }
+                }
                 Some(KeyCode::ArrowDown) if !on_list => {
                     self.focus = (self.focus + 1) % FIELDS.len()
                 }
@@ -336,6 +403,16 @@ impl Login {
             }
             // Keys that act once, however long they are held.
             match stroke.first_press() {
+                // The screen used to label spectator `S = Spectator` and then
+                // answer to no such key: the ship field takes no text, so the
+                // S went nowhere. The label is gone -- spectator is a cell of
+                // the ship grid now -- but the key it promised is here, and it
+                // matches the in-game menu, where S has always meant this.
+                // Only while the ship has the focus, so an S typed into a name
+                // is still an S.
+                Some(KeyCode::KeyS) if self.focused() == Field::Ship => {
+                    self.ship = SPECTATOR;
+                }
                 Some(KeyCode::Escape) => return Some(Choice::Quit),
                 Some(KeyCode::F2) => return Some(Choice::Options),
                 Some(KeyCode::F3) => return Some(Choice::RefreshZones),
@@ -439,6 +516,65 @@ mod tests {
             false,
         );
         assert_eq!(l.name, "ac", "not abc with the end bitten off");
+    }
+
+    /// "The back/up/down around the ships and zones is also counter intuitive."
+    /// The ships are drawn as a grid and Up/Down used to leave it on the first
+    /// press, so the second row could only be reached by pressing Right four
+    /// times.
+    #[test]
+    fn up_and_down_walk_the_ship_grid_and_then_leave_it() {
+        let mut l = Login::load(None, Some("Ace"), Box::new(Login::default().into_base()));
+        l.focus_on(Field::Ship);
+        l.ship = 0;
+
+        // Down steps a whole row, which is what the four-across grid looks like.
+        l.input(&strokes(&[KeyCode::ArrowDown], ""), false);
+        assert_eq!((l.focused(), l.ship), (Field::Ship, 4), "top row to bottom");
+        // Below the bottom row is spectator, drawn as a row of its own.
+        l.input(&strokes(&[KeyCode::ArrowDown], ""), false);
+        assert_eq!((l.focused(), l.ship), (Field::Ship, SPECTATOR));
+        // And below spectator there is no row, so the focus leaves the field.
+        l.input(&strokes(&[KeyCode::ArrowDown], ""), false);
+        assert_eq!(
+            l.focused(),
+            Field::Zones,
+            "out of the grid, not trapped in it"
+        );
+
+        // Back up the same way.
+        l.focus_on(Field::Ship);
+        l.input(&strokes(&[KeyCode::ArrowUp], ""), false);
+        assert_eq!(
+            (l.focused(), l.ship),
+            (Field::Ship, 4),
+            "spectator to the row above"
+        );
+        l.input(&strokes(&[KeyCode::ArrowUp], ""), false);
+        assert_eq!((l.focused(), l.ship), (Field::Ship, 0));
+        // Above the top row there is no row either.
+        l.input(&strokes(&[KeyCode::ArrowUp], ""), false);
+        assert_eq!(l.focused(), Field::Server, "the field above the ships");
+    }
+
+    /// Every cell of the grid can be reached with Up and Down alone, which is
+    /// the property that makes the keys worth changing at all: a choice you can
+    /// only get to with Left/Right is a choice someone will not find.
+    #[test]
+    fn every_ship_is_reachable_down_the_grid() {
+        for start in 0..Login::SHIP_COLUMNS {
+            let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
+            l.focus_on(Field::Ship);
+            l.ship = start;
+            l.input(&strokes(&[KeyCode::ArrowDown], ""), false);
+            assert_eq!(
+                l.ship,
+                start + Login::SHIP_COLUMNS,
+                "straight down a column"
+            );
+            l.input(&strokes(&[KeyCode::ArrowDown], ""), false);
+            assert_eq!(l.ship, SPECTATOR, "and on to spectator");
+        }
     }
 
     /// A key that types a character now arrives carrying it, which is what a

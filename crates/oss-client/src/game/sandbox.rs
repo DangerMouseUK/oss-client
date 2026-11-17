@@ -1436,15 +1436,34 @@ impl Sandbox {
     }
 
     /// Asks for a ship (online the server decides; offline it happens at once).
+    ///
+    /// Spectator used to be refused offline -- `kind < SPECTATOR` -- so the
+    /// sandbox had no way to stop flying, and the menu did not offer it. "There
+    /// is no spectator mode anywhere in the game options menu" was that, and it
+    /// was literally true wherever the player was offline. The offline arm now
+    /// does exactly what the server's own ship change does online: the ship goes
+    /// and the camera takes over where it was.
     fn request_ship(&mut self, kind: u8) {
         if let Some(net) = self.net.as_mut() {
             net.session.set_ship(kind);
             net.flush();
-        } else if kind < SPECTATOR {
-            let freq = self.me().freq;
-            let i = self.me_index();
-            self.world.ships.remove(i);
-            self.world.add_ship(self.me_id, kind, freq);
+            return;
+        }
+        // Where the ship was, read before it is taken away: stopping flying
+        // leaves you watching from where you were, which is what a player means
+        // by it. Online the zone decides where a spectator starts, so that path
+        // takes the position of the placeholder the server put there instead.
+        let (freq, was_at) = {
+            let me = self.me();
+            (me.freq, me.pos.to_f32())
+        };
+        let i = self.me_index();
+        self.world.ships.remove(i);
+        add_own_ship(&mut self.world, self.me_id, kind, freq);
+        self.spectating = kind == SPECTATOR;
+        if self.spectating {
+            self.spec_cam = was_at;
+        } else {
             self.spawn_warp_effect();
         }
     }
@@ -2864,16 +2883,18 @@ impl Sandbox {
 
     /// One of the menu's own keys, or `false` for "any other key".
     fn menu_key(&mut self, ch: char) -> bool {
-        match ch.to_ascii_lowercase() {
-            'q' => self.request_leave(),
-            'o' => self.open_settings = true,
-            's' if self.online() => self.request_ship(SPECTATOR),
-            'n' if !self.news.is_empty() => {
+        let Some(choice) = menu_choice(ch, !self.news.is_empty()) else {
+            return false;
+        };
+        match choice {
+            MenuChoice::Quit => self.request_leave(),
+            MenuChoice::Options => self.open_settings = true,
+            MenuChoice::Spectate => self.request_ship(SPECTATOR),
+            MenuChoice::News => {
                 self.news_open = true;
                 self.news_scroll = 0;
             }
-            d @ '1'..='8' => self.request_ship(d as u8 - b'1'),
-            _ => return false,
+            MenuChoice::Ship(kind) => self.request_ship(kind),
         }
         true
     }
@@ -2926,7 +2947,11 @@ impl Sandbox {
         keys.push((" O = Options", Stroke::press(KeyCode::KeyO).typing('o')));
         keys.push(("F12= Frame rate", Stroke::press(KeyCode::F12)));
         self.menu_spots.clear();
-        let rows = keys.len().max(ships.len() + usize::from(self.online()));
+        // Spectator is a row under the eight ships, and it is there whether or
+        // not there is a zone: "there's no spectator mode anywhere in the game
+        // options menu" was the row being hidden offline, which is where the
+        // lead was.
+        let rows = keys.len().max(ships.len() + 1);
 
         // 40 characters across, as the original's longest line is, and up at the
         // top of the screen: the menu puts the whole message log on screen beneath
@@ -2967,13 +2992,11 @@ impl Sandbox {
             }
             c.text(r, ship_x, row_y(i), colour, line);
         }
-        if self.online() {
-            self.menu_spots.push((
-                Rect::new(ship_x - 2.0, row_y(ships.len()) - 1.0, w - half, 12.0),
-                Stroke::press(KeyCode::KeyS).typing('s'),
-            ));
-            c.text(r, ship_x, row_y(ships.len()), color::WHITE, "S = Spectator");
-        }
+        self.menu_spots.push((
+            Rect::new(ship_x - 2.0, row_y(ships.len()) - 1.0, w - half, 12.0),
+            Stroke::press(KeyCode::KeyS).typing('s'),
+        ));
+        c.text(r, ship_x, row_y(ships.len()), color::WHITE, "S = Spectator");
         c.text(
             r,
             x + 2.0,
@@ -2997,26 +3020,18 @@ impl Sandbox {
         let Some((title, lines)) = pages.get(self.help_page) else {
             return;
         };
-        let w = 54.0 * 8.0;
-        let h = 20.0 + (lines.len() as f32 + 2.0) * 12.0;
+        let w = HELP_COLS * 8.0;
+        // Laid out against the box before the box is sized, so a line too long
+        // for it becomes two lines and a taller box rather than text out through
+        // the border. See [`PanelLines`].
+        let page = help_layout(lines, w);
+        let h = 20.0 + (page.len() as f32 + 2.0) * 12.0;
         let x = ((c.view_w - w) / 2.0).floor();
         let y = ((c.view_h - h) / 2.0).floor().max(4.0);
         c.panel(r, x, y, w, h);
         c.text_center(r, x + w / 2.0, y + 1.0, color::GREEN, title);
         c.separator(r, x, y + 13.0, w);
-        // Keys in yellow against their description in white, under a heading in
-        // dark red: Continuum's own `%Y`/`%W`/`%p` colours for this page.
-        for (i, line) in lines.iter().enumerate() {
-            let ly = y + 18.0 + i as f32 * 12.0;
-            match line {
-                Help::Heading(text) => c.text(r, x + 2.0, ly, color::DARK_RED, text),
-                Help::Key(key, text) => {
-                    c.text(r, x + 4.0, ly, color::YELLOW, key);
-                    c.text(r, x + 4.0 + 21.0 * 8.0, ly, color::WHITE, text);
-                }
-                Help::Text(text) => c.text(r, x + 2.0, ly, color::WHITE, text),
-            }
-        }
+        page.draw(c, r, x, y + 18.0, 12.0);
         let footer = if self.help_page + 1 < pages.len() {
             "F1 = More help        Esc = Back to game"
         } else {
@@ -3025,7 +3040,7 @@ impl Sandbox {
         c.text_center(
             r,
             x + w / 2.0,
-            y + 18.0 + (lines.len() as f32 + 1.0) * 12.0,
+            y + 18.0 + (page.len() as f32 + 1.0) * 12.0,
             color::YELLOW,
             footer,
         );
@@ -3041,6 +3056,197 @@ impl Sandbox {
 /// for a spectator, a dead ship and an offline game, where there is nobody to dodge.
 fn may_leave(in_a_fight: bool, energy: i32, max_energy: i32) -> bool {
     !in_a_fight || energy * 2 >= max_energy
+}
+
+/// What one of the menu's own keys means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuChoice {
+    Quit,
+    Options,
+    Spectate,
+    News,
+    Ship(u8),
+}
+
+/// What a character typed on the menu does, or `None` for "any other key to
+/// resume game".
+///
+/// Pulled out of the menu itself so that which rows the menu offers can be
+/// checked without a window and a renderer. The only thing that varies is the
+/// news row, which is there when the zone sent any news: spectator used to vary
+/// too -- it was answered only when there was a zone -- and that is what left
+/// the offline sandbox's menu with no spectator on it at all.
+fn menu_choice(ch: char, has_news: bool) -> Option<MenuChoice> {
+    match ch.to_ascii_lowercase() {
+        'q' => Some(MenuChoice::Quit),
+        'o' => Some(MenuChoice::Options),
+        's' => Some(MenuChoice::Spectate),
+        'n' if has_news => Some(MenuChoice::News),
+        d @ '1'..='8' => Some(MenuChoice::Ship(d as u8 - b'1')),
+        _ => None,
+    }
+}
+
+/// How many characters wide the help box is.
+const HELP_COLS: f32 = 54.0;
+/// How far in from the box's left edge a line of help text starts.
+const HELP_INSET: f32 = 2.0;
+/// Where a key's own name starts, and where its description does: the key gets
+/// the first 21 characters of the line, as `Commands.hlp` lays it out.
+const HELP_KEY_INSET: f32 = 4.0;
+const HELP_TEXT_INSET: f32 = HELP_KEY_INSET + 21.0 * 8.0;
+
+/// Text laid out for a bordered box, measured against the box as it goes in.
+///
+/// [`Canvas::panel`] draws a border and knows nothing about what will be put
+/// inside it; the drawing code puts text at an offset from the box's left edge
+/// and never asked how wide the box was. So the help pages ran seven of their
+/// lines out through the right-hand border -- by up to eighteen pixels, on the
+/// two pages the lead happened to read. Editing those seven strings would have
+/// left the next panel free to do the same thing, which is why the measuring
+/// lives here rather than in the strings.
+///
+/// Content is laid out first, wrapped to what the box can actually hold, and the
+/// box is then made tall enough for the result -- rather than the box being
+/// sized first and the text hoping to fit. [`PanelLines::over_the_edge`] is the
+/// instrument the tests use, and it reports on content as laid out, so a line
+/// added with a bad inset is caught even though wrapping would have saved a
+/// line added with a long string.
+#[derive(Default)]
+struct PanelLines {
+    /// The inside width of the box, in pixels.
+    w: f32,
+    /// One entry per drawn line; each carries the pieces on that line, by their
+    /// distance in from the box's left edge.
+    rows: Vec<Vec<(f32, u32, String)>>,
+}
+
+impl PanelLines {
+    fn new(w: f32) -> Self {
+        Self {
+            w,
+            rows: Vec::new(),
+        }
+    }
+
+    /// How many characters of the 8x12 font fit between `inset` and the border.
+    fn cols(&self, inset: f32) -> usize {
+        (((self.w - inset) / 8.0).floor()).max(0.0) as usize
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// A line of text, wrapped to whatever is left before the border.
+    fn push(&mut self, inset: f32, colour: u32, text: &str) {
+        for line in wrap_to(text, self.cols(inset)) {
+            self.rows.push(vec![(inset, colour, line)]);
+        }
+    }
+
+    /// A key and what it does, the key in its own column and the description
+    /// wrapped into the rest of the line with its continuations lined up under
+    /// itself.
+    fn push_key(&mut self, key: &str, key_colour: u32, text: &str, colour: u32) {
+        let mut wrapped = wrap_to(text, self.cols(HELP_TEXT_INSET)).into_iter();
+        let first = wrapped.next().unwrap_or_default();
+        self.rows.push(vec![
+            (HELP_KEY_INSET, key_colour, key.to_string()),
+            (HELP_TEXT_INSET, colour, first),
+        ]);
+        for line in wrapped {
+            self.rows.push(vec![(HELP_TEXT_INSET, colour, line)]);
+        }
+    }
+
+    /// Anything that would be drawn past the box's right-hand border, as the
+    /// text and how many pixels past it goes.
+    ///
+    /// Always empty for content that came through [`PanelLines::push`], which
+    /// wraps. It is not therefore a check that can never fail: a piece placed at
+    /// an inset that leaves no room, or a key name longer than its column, is
+    /// reported here, and the tests feed it both.
+    #[cfg(test)]
+    fn over_the_edge(&self) -> Vec<(&str, f32)> {
+        self.rows
+            .iter()
+            .flatten()
+            .filter_map(|(inset, _, text)| {
+                let past = inset + text.chars().count() as f32 * 8.0 - self.w;
+                (past > 0.0).then_some((text.as_str(), past))
+            })
+            .collect()
+    }
+
+    /// Draws every line, the first at `y` and the rest `line_h` apart.
+    fn draw(&self, c: &Canvas, r: &mut Renderer, x: f32, y: f32, line_h: f32) {
+        for (i, row) in self.rows.iter().enumerate() {
+            for (inset, colour, text) in row {
+                c.text(r, x + inset, y + i as f32 * line_h, *colour, text);
+            }
+        }
+    }
+}
+
+/// Wraps `text` to `cols` characters, keeping what it is indented by on the
+/// lines after the first.
+///
+/// Breaks at the last space that fits, and cuts mid-word where there is no space
+/// to break at -- a word too long for the box still may not cross the border.
+/// Deliberately not [`super::chat::wrap`]: that one strips the leading spaces,
+/// and the indent is what lines these pages' tables up.
+fn wrap_to(text: &str, cols: usize) -> Vec<String> {
+    if cols == 0 {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= cols {
+        return vec![text.to_string()];
+    }
+    // Continuations keep the original's indent, unless that leaves so little
+    // room that wrapping would never finish.
+    let indent: String = chars.iter().take_while(|c| **c == ' ').collect();
+    let indent = if indent.len() + 4 <= cols {
+        indent
+    } else {
+        String::new()
+    };
+    let mut out = Vec::new();
+    let mut rest: Vec<char> = chars;
+    loop {
+        let room = cols - if out.is_empty() { 0 } else { indent.len() };
+        if rest.len() <= room {
+            out.push(line_with(&indent, &rest, out.is_empty()));
+            return out;
+        }
+        // The last space that still fits; none means a hard cut, which is the
+        // only thing left that keeps the line inside the box.
+        let cut = rest[..=room]
+            .iter()
+            .rposition(|c| *c == ' ')
+            .filter(|p| *p > 0)
+            .unwrap_or(room);
+        out.push(line_with(&indent, &rest[..cut], out.is_empty()));
+        rest = rest[cut..].to_vec();
+        while rest.first() == Some(&' ') {
+            rest.remove(0);
+        }
+        if rest.is_empty() {
+            return out;
+        }
+    }
+}
+
+/// One wrapped line: the first keeps the text's own indent because it is still
+/// in it, and the rest are given it back.
+fn line_with(indent: &str, body: &[char], first: bool) -> String {
+    let body: String = body.iter().collect();
+    if first {
+        body
+    } else {
+        format!("{indent}{body}")
+    }
 }
 
 /// One line of a help page.
@@ -3125,6 +3331,24 @@ const FIXED_KEYS: &[(&str, &str)] = &[
     ("F1", "More help"),
 ];
 
+/// One help page, laid out for a box `w` pixels wide.
+///
+/// Keys in yellow against their description in white, under a heading in dark
+/// red: Continuum's own `%Y`/`%W`/`%p` colours for this page. Everything goes
+/// through [`PanelLines`], so nothing can be put on a page without being
+/// measured against the box it will be drawn in.
+fn help_layout(lines: &[Help], w: f32) -> PanelLines {
+    let mut page = PanelLines::new(w);
+    for line in lines {
+        match line {
+            Help::Heading(text) => page.push(HELP_INSET, color::DARK_RED, text),
+            Help::Key(key, text) => page.push_key(key, color::YELLOW, text, color::WHITE),
+            Help::Text(text) => page.push(HELP_INSET, color::WHITE, text),
+        }
+    }
+    page
+}
+
 /// The help pages. The first two are the keys, read out of `bindings`; the rest is
 /// this client and its commands.
 fn help_pages(bindings: &super::input::Bindings, online: bool) -> Vec<(&'static str, Vec<Help>)> {
@@ -3159,27 +3383,27 @@ fn help_pages(bindings: &super::input::Bindings, online: bool) -> Vec<(&'static 
         Help::Text("as you type, as they do in SubSpace and Continuum."),
         Help::Text("  'message       = to your team (// also works)"),
         Help::Text("  /message       = to the ticked player"),
-        Help::Text("  :name:message  = to that player by name (Tab finishes"),
-        Help::Text("                   a name, :: fills in the last one)"),
+        Help::Text("  :name:message  = to that player by name. Tab"),
+        Help::Text("                   finishes a name, :: repeats it."),
         Help::Text("  ;channel;msg   = to a chat channel"),
         Help::Text("  \"message       = to the enemy team"),
     ];
 
     let commands = vec![
         Help::Heading("This client answers these itself"),
-        Help::Text("  ?go [arena]  = Switch arena (no name: the next public)"),
-        Help::Text("  ?namelen x   = Letters shown of a name (=x also works)"),
+        Help::Text("  ?go [arena]  = Switch arena (blank: next public)"),
+        Help::Text("  ?namelen x   = Letters shown of a name (=x works)"),
         Help::Text("  ?lines x     = Message lines shown (=x also works)"),
         Help::Text("  ?status      = Your ship's status"),
         Help::Text("  ?news        = The zone's news"),
-        Help::Text("  ?quit        = Leave for the login screen, as Q does"),
+        Help::Text("  ?quit        = Back to the login screen, as Q does"),
         Help::Text(""),
-        Help::Text("Anything else beginning with ? goes to the zone, and the"),
-        Help::Text("zone decides what it does. ?help there lists what yours"),
+        Help::Text("Anything else starting with ? goes to the zone, and"),
+        Help::Text("the zone decides. ?help there lists what yours"),
         Help::Text("offers, which differs from zone to zone."),
         Help::Text(""),
-        Help::Text("Macros are set on the settings screen (O on the menu),"),
-        Help::Text("and %selfname, %tickname, %freq, %bounty, %flags,"),
+        Help::Text("Macros are set on the settings screen (menu: O), and"),
+        Help::Text("%selfname, %tickname, %freq, %bounty, %flags,"),
         Help::Text("%energy, %killer, %killed, %coord and %squad are"),
         Help::Text("replaced in anything you send."),
     ];
@@ -3261,6 +3485,9 @@ mod tests {
     use super::may_leave;
     use super::spawn_area;
     use super::view::lerp_direction;
+    use super::{
+        HELP_COLS, HELP_INSET, MenuChoice, PanelLines, color, help_layout, help_pages, menu_choice,
+    };
     use oss_proto::settings::{ClientSettings, SpawnPosition};
 
     #[test]
@@ -3299,5 +3526,170 @@ mod tests {
     fn direction_interpolates_the_short_way() {
         assert_eq!(lerp_direction(39_500, 500, 0.5), 0);
         assert_eq!(lerp_direction(0, 10_000, 0.5), 5);
+    }
+
+    /// Nothing on any help page is drawn past the box's right-hand border.
+    ///
+    /// **This one cannot catch a long string, and saying otherwise was the first
+    /// thing written here.** Laying a page out wraps it, so by the time this
+    /// looks, an over-long line has already become two that fit: restoring one
+    /// of the seven original strings leaves this test green, which is how that
+    /// was found rather than assumed. What it does guard is the insets -- a
+    /// piece placed where there is no room, which wrapping cannot save --
+    /// and [`the_border_check_can_say_no`] shows it refusing both ways that can
+    /// happen. The check that would have caught the seven is the next one.
+    #[test]
+    fn no_help_page_draws_outside_its_box() {
+        let w = HELP_COLS * 8.0;
+        for online in [false, true] {
+            for (title, lines) in help_pages(&super::super::input::Bindings::default(), online) {
+                let page = help_layout(&lines, w);
+                let over = page.over_the_edge();
+                assert!(
+                    over.is_empty(),
+                    "{title} (online: {online}) draws past the border: {over:?}"
+                );
+            }
+        }
+    }
+
+    /// "Help text runs outside the help window's border", on both the commands
+    /// page and this client's page. Seven lines did, by up to eighteen pixels.
+    ///
+    /// This is the one that would have caught them: it asks whether any line
+    /// had to be wrapped to fit, rather than whether the wrapped result fits.
+    /// Wrapping is the safety net and keeps text inside the border whatever
+    /// anyone writes; this says the pages do not need the net, which is what
+    /// keeps the command tables lined up on their `=` signs.
+    #[test]
+    fn no_help_line_has_to_be_wrapped_to_fit() {
+        let w = HELP_COLS * 8.0;
+        for online in [false, true] {
+            for (title, lines) in help_pages(&super::super::input::Bindings::default(), online) {
+                let page = help_layout(&lines, w);
+                assert_eq!(
+                    page.len(),
+                    lines.len(),
+                    "{title} (online: {online}) has a line too long for the box, \
+                     so it wrapped: shorten it to {} characters",
+                    PanelLines::new(w).cols(HELP_INSET)
+                );
+            }
+        }
+    }
+
+    /// The control for the border check, which otherwise could not come back
+    /// negative: a check that has never refused anything has not been tested.
+    ///
+    /// A piece placed at an inset with no room left is reported, and so is a key
+    /// name longer than the column it is given -- the two ways content can still
+    /// cross the border once the wrapping is doing its job.
+    #[test]
+    fn the_border_check_can_say_no() {
+        let w = HELP_COLS * 8.0;
+        let mut p = PanelLines::new(w);
+        // Straight past the edge: pushed at an inset that leaves nothing.
+        p.rows
+            .push(vec![(w - 8.0, color::WHITE, "far too long".to_string())]);
+        let over = p.over_the_edge();
+        assert_eq!(over.len(), 1, "an over-wide piece is reported");
+        assert_eq!(over[0].1, 11.0 * 8.0, "and by how much it is over");
+
+        // A key name wider than its 21-character column.
+        let mut p = PanelLines::new(w);
+        p.push_key(&"K".repeat(60), color::YELLOW, "does a thing", color::WHITE);
+        assert_eq!(p.over_the_edge().len(), 1, "a key too long for its column");
+    }
+
+    /// The safety net itself: a line too long for the box becomes more lines,
+    /// each of which fits, rather than one line that does not.
+    #[test]
+    fn a_line_too_long_for_the_box_is_wrapped_rather_than_spilled() {
+        let w = HELP_COLS * 8.0;
+        let mut p = PanelLines::new(w);
+        let budget = p.cols(HELP_INSET);
+        assert_eq!(budget, 53, "53 characters fit beside a 2-pixel inset");
+        let long =
+            "Anything else starting with ? goes to the zone, and the zone decides what it does";
+        assert!(long.len() > budget, "the line this test is about is over");
+        p.push(HELP_INSET, color::WHITE, long);
+        assert!(p.len() > 1, "it became more than one line");
+        assert!(p.over_the_edge().is_empty(), "and none of them is over");
+
+        // An indent is kept on the lines after the first, which is what holds
+        // the command tables lined up when one of them does have to wrap.
+        let mut p = PanelLines::new(w);
+        p.push(
+            HELP_INSET,
+            color::WHITE,
+            &format!("    {}", "word ".repeat(20)),
+        );
+        assert!(p.rows.len() > 1);
+        for row in p.rows.iter().skip(1) {
+            assert!(
+                row[0].2.starts_with("    "),
+                "continuations keep the indent"
+            );
+        }
+
+        // A word with nowhere to break is cut rather than allowed out of the
+        // box: staying inside the border wins over keeping the word whole.
+        let mut p = PanelLines::new(w);
+        p.push(HELP_INSET, color::WHITE, &"x".repeat(200));
+        assert!(p.over_the_edge().is_empty(), "an unbreakable word is cut");
+    }
+
+    /// The menu is the other bordered box on this screen, and its two columns
+    /// are the kind of thing that fits until someone writes a longer ship name.
+    #[test]
+    fn the_menu_columns_hold_what_is_put_in_them() {
+        // The box, and the column the ships start at, as `draw_menu` sets them.
+        let w = 40.0 * 8.0;
+        let half = 26.0 * 8.0;
+        let p = PanelLines::new(w);
+        let ships = [
+            "Ships",
+            "1 = Warbird",
+            "2 = Javelin",
+            "3 = Spider",
+            "4 = Leviathan",
+            "5 = Terrier",
+            "6 = Weasel",
+            "7 = Lancaster",
+            "8 = Shark",
+            "S = Spectator",
+        ];
+        let room = p.cols(2.0 + half);
+        for line in ships {
+            assert!(
+                line.chars().count() <= room,
+                "{line:?} is {} characters in a column of {room}",
+                line.chars().count()
+            );
+        }
+        // And the widest line of the left-hand column.
+        assert!("PgUp/PgDn = Scroll messages".chars().count() <= p.cols(2.0));
+    }
+
+    /// "There's no spectator mode anywhere in the game options menu." Offline,
+    /// that was exactly true: the menu hid the row and the ship change refused
+    /// spectator outright, so the sandbox -- where the lead was -- could not
+    /// stop flying.
+    #[test]
+    fn the_menu_offers_spectator_with_or_without_a_zone() {
+        // `false` here is "no news", which offline always is. S used to be
+        // answered only when there was a zone, so this is the case that failed.
+        assert_eq!(menu_choice('s', false), Some(MenuChoice::Spectate));
+        assert_eq!(menu_choice('S', true), Some(MenuChoice::Spectate));
+        // The news row is the one that genuinely varies, and still does.
+        assert_eq!(menu_choice('n', false), None, "no news, no row");
+        assert_eq!(menu_choice('n', true), Some(MenuChoice::News));
+        // The rest of the menu, so that pulling this out changed nothing else.
+        assert_eq!(menu_choice('q', false), Some(MenuChoice::Quit));
+        assert_eq!(menu_choice('o', false), Some(MenuChoice::Options));
+        assert_eq!(menu_choice('1', false), Some(MenuChoice::Ship(0)));
+        assert_eq!(menu_choice('8', false), Some(MenuChoice::Ship(7)));
+        assert_eq!(menu_choice('9', false), None, "any other key resumes");
+        assert_eq!(menu_choice('x', true), None);
     }
 }

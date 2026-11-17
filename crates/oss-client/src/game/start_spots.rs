@@ -75,7 +75,7 @@ impl Spot {
             Spot::Field(Field::Password) => "Your password, if the zone knows you.",
             Spot::Field(Field::Arena) => "Arena to enter, or blank for any public one.",
             Spot::Field(Field::Server) => "The zone's address, as host:port.",
-            Spot::Field(Field::Ship) => "The ship you will fly.",
+            Spot::Field(Field::Ship) => "The ship you will fly, or spectator.",
             Spot::Field(Field::Zones) => "Zones the directory servers know about.",
             Spot::Ship(_) => "Fly this ship.",
             Spot::Spectate => "Enter watching rather than flying.",

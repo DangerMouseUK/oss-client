@@ -906,8 +906,21 @@ impl App {
                 pointed = cursor.and_then(|(mx, my)| ls.spots.at(mx, my));
                 match pointed {
                     Some(Spot::Field(field)) => ls.login.focus_on(field),
-                    Some(Spot::Ship(kind)) => ls.login.ship = kind,
-                    Some(Spot::Spectate) => ls.login.ship = oss_session::SPECTATOR,
+                    // Picking a ship takes the focus with it, so that choosing
+                    // the one you already have still shows something: the
+                    // heading's name turns yellow and its line lights up.
+                    // Without that, clicking Spectator while already
+                    // spectating set spectator to spectator and the screen
+                    // said nothing at all -- which is indistinguishable from a
+                    // click that missed.
+                    Some(Spot::Ship(kind)) => {
+                        ls.login.ship = kind;
+                        ls.login.focus_on(crate::game::login::Field::Ship);
+                    }
+                    Some(Spot::Spectate) => {
+                        ls.login.ship = oss_session::SPECTATOR;
+                        ls.login.focus_on(crate::game::login::Field::Ship);
+                    }
                     Some(Spot::Zone(row)) => {
                         ls.browser.select(row);
                         ls.login.focus_zones();
@@ -1480,7 +1493,9 @@ fn draw_start_screen(
     // Tall enough for whichever column needs more, and for a list worth reading.
     let rows = b.zones.len().clamp(8, 14);
     let list_h = 14.0 + rows as f32 * 12.0;
-    let left_h = 14.0 + 4.0 * 14.0 + 10.0 + 14.0 + 2.0 * 40.0 + 14.0;
+    // Heading, four profile lines, the gap, the ship heading, and the ship grid:
+    // three rows of forty, the third of them spectator's own cell.
+    let left_h = 14.0 + 4.0 * 14.0 + 10.0 + 14.0 + 3.0 * 40.0;
     let body_h = list_h.max(left_h);
     // The foot carries the zone's blurb, two lines for anything that went wrong,
     // and the two key lines.
@@ -1529,9 +1544,25 @@ fn draw_start_screen(
 
     // --- Ships, as the originals show them: the ships themselves ------------------
     y += 10.0;
+    // The heading names the chosen ship beside it, and that word -- "Spectator",
+    // when you are spectating -- is the only place on this screen the choice
+    // appears in writing, so it is the first thing a pointer goes for. It was
+    // not a region at all: the click landed on nothing, changed nothing and said
+    // nothing, which is what "you can't directly click Spectator" was. It takes
+    // the focus now, exactly as clicking a line of the profile does.
+    let ship_row = Rect::new(x + 2.0, y - 1.0, left_w - 4.0, 13.0);
+    spots.add(ship_row, Spot::Field(crate::game::login::Field::Ship));
+    if focus == crate::game::login::Field::Ship || hovered(ship_row) {
+        c.color_rect(
+            r,
+            ui_color::HIGHLIGHT,
+            ship_row.x,
+            ship_row.y,
+            ship_row.w,
+            ship_row.h,
+        );
+    }
     c.text(r, x + 4.0, y, color::DARK_RED, "Ship");
-    // The chosen ship is named beside the heading, so the row below is only the
-    // one thing it offers.
     c.text(
         r,
         x + 4.0 + 6.0 * 8.0,
@@ -1545,33 +1576,47 @@ fn draw_start_screen(
     );
     y += 14.0;
     let pitch = 56.0;
-    for kind in 0u8..8 {
-        let (row, col) = ((kind / 4) as f32, (kind % 4) as f32);
+    let cols = Login::SHIP_COLUMNS;
+    // The eight ships and spectator, as one grid of nine cells.
+    //
+    // Spectator used to be a line of text under the grid reading `S = Spectator`:
+    // the same choice the eight beside it offer as a picture you click, offered
+    // instead as a keystroke to type. Two kinds of thing for one action, and the
+    // one that looks like a label is the one that is not. Worse, the key it named
+    // was never implemented here -- nothing on this screen answered to S -- so the
+    // one instruction it did give was false.
+    for slot in 0..=cols * 2 {
+        let (row, col) = ((slot / cols) as f32, (slot % cols) as f32);
         let (sx, sy) = (x + 6.0 + col * pitch, y + row * 40.0);
-        // `ship1`..`ship8`: the skin's own hot spots, and the reason this screen
-        // was never meant to be driven from the keyboard.
+        // `ship1`..`ship8` and `spectate`: the skin's own hot spots, and the
+        // reason this screen was never meant to be driven from the keyboard.
+        let spectate = slot == cols * 2;
+        let kind = if spectate {
+            oss_session::SPECTATOR
+        } else {
+            slot
+        };
         let box_ = Rect::new(sx - 2.0, sy - 2.0, 40.0, 40.0);
-        spots.add(box_, Spot::Ship(kind));
+        spots.add(
+            box_,
+            if spectate {
+                Spot::Spectate
+            } else {
+                Spot::Ship(slot)
+            },
+        );
         if login.ship == kind || hovered(box_) {
             c.color_rect(r, ui_color::HIGHLIGHT, box_.x, box_.y, box_.w, box_.h);
         }
-        c.ui(r, ls.art.ship(kind, 0), sx, sy, None, [1.0; 4]);
+        if spectate {
+            // There is no spectator sprite to draw -- the whole point is that
+            // there is no ship -- so the cell carries the word instead, in the
+            // same box, the same size, with the same highlight.
+            c.text_center(r, box_.x + box_.w / 2.0, sy + 12.0, color::WHITE, "SPEC");
+        } else {
+            c.ui(r, ls.art.ship(slot, 0), sx, sy, None, [1.0; 4]);
+        }
     }
-    y += 2.0 * 40.0;
-    let spectating = login.ship == oss_session::SPECTATOR;
-    let spec_row = Rect::new(x + 2.0, y - 1.0, left_w - 4.0, 13.0);
-    spots.add(spec_row, Spot::Spectate);
-    if spectating || hovered(spec_row) {
-        c.color_rect(
-            r,
-            ui_color::HIGHLIGHT,
-            spec_row.x,
-            spec_row.y,
-            spec_row.w,
-            spec_row.h,
-        );
-    }
-    c.text(r, x + 6.0, y, color::WHITE, "S = Spectator");
 
     // --- Zones ---------------------------------------------------------------------
     let lx = x + list_x_off;
