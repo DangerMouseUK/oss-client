@@ -305,10 +305,17 @@ pub fn run(options: Options) -> Result<(), String> {
         // which made `cargo run --release -p oss-client` -- the command the README
         // gives first -- fail on any machine without a Continuum install, because
         // nothing copies `assets/classic` next to the executable. It is still
-        // ordered after that folder, so a packaged build that ships its own assets
-        // wins; in one that does not, the baked path simply does not exist and the
-        // search moves on.
-        dev_dir: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/classic")),
+        // ordered after the folder beside the executable, so a packaged build that
+        // ships its own assets wins.
+        //
+        // The folder is found at run time, by walking up from the running
+        // executable. It used to be `env!("CARGO_MANIFEST_DIR")`, which resolves
+        // when the client is compiled and therefore wrote the building machine's
+        // absolute path -- its user name included -- into every binary built from
+        // it, shipped ones included. An installed copy finds nothing above itself
+        // and the search simply moves on, as it did with a baked path that did not
+        // exist on the player's machine.
+        dev_dir: oss_assets::checkout_assets_dir(),
         discover_install: true,
     };
     let dir = AssetDirs::locate(&search).map_err(|e| {

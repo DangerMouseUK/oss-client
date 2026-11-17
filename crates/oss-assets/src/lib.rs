@@ -12,7 +12,7 @@ pub mod image;
 pub mod locate;
 pub mod sound;
 
-pub use dirs::{ASSETS_ENV_VAR, AssetDirs, AssetSearch};
+pub use dirs::{ASSETS_ENV_VAR, AssetDirs, AssetSearch, checkout_assets_dir};
 pub use image::{Image, ImageError, decode_bmp, decode_image, decode_png};
 pub use locate::{AssetError, ContinuumDir, ENV_VAR};
 pub use sound::{Sound, SoundError, decode_wave};

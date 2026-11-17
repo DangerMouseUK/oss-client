@@ -29,7 +29,7 @@ pub struct AssetSearch {
     /// The repository's bundled folder, for a binary built from the checkout.
     /// Set it in every profile: a release build run from the repository needs it
     /// just as much as a debug one, since neither copies the folder next to the
-    /// executable.
+    /// executable. [`checkout_assets_dir`] finds it without baking a path in.
     pub dev_dir: Option<PathBuf>,
     /// Also try to find a Continuum install automatically.
     pub discover_install: bool,
@@ -39,6 +39,42 @@ pub struct AssetSearch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetDirs {
     roots: Vec<PathBuf>,
+}
+
+/// How far above the running executable a checkout's `assets/classic` is looked
+/// for. `target/release/oss-client` needs three levels; a cross-compiled
+/// `target/<triple>/release/oss-client` needs four. Stopping there keeps the
+/// search inside the build directory a checkout would actually produce.
+const CHECKOUT_SEARCH_DEPTH: usize = 4;
+
+/// The checkout's `assets/classic`, found at run time by walking up from the
+/// running executable.
+///
+/// This is the developer convenience behind [`AssetSearch::dev_dir`]: a binary
+/// built from a source checkout finds the repository's own graphics without
+/// anyone copying them next to the executable, so the README's first command
+/// works on a machine with no Continuum install. It is deliberately resolved
+/// here, at run time, rather than with `env!("CARGO_MANIFEST_DIR")` at compile
+/// time, because that macro bakes the building machine's absolute folder — and
+/// so its user name — into every binary built from it, including the one that
+/// ships.
+///
+/// Returns `None` when no folder above the executable holds a complete set,
+/// which is the normal case for an installed copy. Nothing about the search
+/// order changes: the folder next to the executable is still tried first, so a
+/// packaged build that ships its own assets still wins.
+pub fn checkout_assets_dir() -> Option<PathBuf> {
+    checkout_assets_above(std::env::current_exe().ok()?.parent()?)
+}
+
+/// [`checkout_assets_dir`] with the executable's folder given rather than asked
+/// for, so the walk can be tested without a second executable to run.
+fn checkout_assets_above(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .ancestors()
+        .take(CHECKOUT_SEARCH_DEPTH)
+        .map(|dir| dir.join("assets").join("classic"))
+        .find(|dir| is_install(dir))
 }
 
 fn env_path(var: &str) -> Option<PathBuf> {
@@ -157,6 +193,39 @@ mod tests {
         v.extend_from_slice(&[0; 24]);
         v.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 0]);
         v
+    }
+
+    #[test]
+    fn the_checkout_assets_are_found_above_the_executable() {
+        let base = std::env::temp_dir().join(format!("oss-asset-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let classic = base.join("checkout/assets/classic");
+        std::fs::create_dir_all(classic.join("graphics")).unwrap();
+        std::fs::write(classic.join("graphics/ships.bm2"), bmp([1, 2, 3])).unwrap();
+
+        // Where `cargo run` and `cargo run --release` put the binary.
+        let plain = base.join("checkout/target/release");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(checkout_assets_above(&plain), Some(classic.clone()));
+
+        // Where a cross-compiled build puts it: one level deeper, still inside
+        // the depth the walk allows.
+        let cross = base.join("checkout/target/x86_64-unknown-linux-gnu/release");
+        std::fs::create_dir_all(&cross).unwrap();
+        assert_eq!(checkout_assets_above(&cross), Some(classic.clone()));
+
+        // Deeper than a checkout's own build folder goes, so the walk stops
+        // before it: an installed copy must not reach half the disk.
+        let deep = base.join("checkout/target/a/b/c/d");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(checkout_assets_above(&deep), None);
+
+        // An installed copy, with nothing above it: no folder, no error.
+        let alone = base.join("elsewhere/bin");
+        std::fs::create_dir_all(&alone).unwrap();
+        assert_eq!(checkout_assets_above(&alone), None);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
