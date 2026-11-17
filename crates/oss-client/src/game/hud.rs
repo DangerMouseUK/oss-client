@@ -2,6 +2,7 @@
 //! (left), weapon/toggle icons and timed effects (right), radar with the map square
 //! above it (bottom right), messages (bottom left).
 
+use oss_proto::objects::reference;
 use oss_sim::{Ship, TileMap, cap, ship::active, tile, toggle};
 
 use super::art::{Art, anim_frame};
@@ -182,30 +183,71 @@ pub fn screen_refs(
 /// leaves 704 pixels either side and nothing can reach it.
 const BAR_HALF: f32 = 240.0;
 
-/// The least the bar is ever squeezed to, so it stays a gauge on any window.
+/// The least the bar is squeezed to while the player list is in its way. Below
+/// that it is left out, so what is drawn is still a gauge.
 const BAR_HALF_MIN: f32 = 80.0;
 
-/// The left edge the bar leaves to the stat box.
-///
-/// The stat box's default layout at its widest: three of border, the 124 its
-/// names-and-points columns take, room for a four-digit score, and three more
-/// of border. Continuum never had to think about this, because the only view it
-/// was measured at is wide enough that a centred 480 cannot reach the corner.
-const STATBOX_CLEARANCE: f32 = 3.0 + 124.0 + 4.0 * 8.0 + 3.0;
+/// Half the frame drawn over the middle of the bar (`hlthbar`, 116 across).
+const FRAME_HALF: f32 = 58.0;
 
-/// How wide half the energy bar may be on a view this wide.
+/// Clear space kept between the player list and the gauge: one glyph.
+const STATBOX_GAP: f32 = 8.0;
+
+/// How far right the player list reaches, in game pixels, or 0 while it is closed.
 ///
-/// The measured 480 wherever it fits, and it fits on every view at least 804
-/// game pixels across -- which is every ordinary one, including the lead's own
-/// fullscreen 1080p, where the layout was confirmed to look right. Below that
-/// the bar gives way rather than running through the stat box: a twelve-
-/// character name at scale 2 on a 1280-wide window had the energy bar straight
-/// through it, because scale 2 halves the view in game pixels and the stat box
-/// grows with the name in it. The bar shrinks symmetrically, so it stays
-/// centred, which is the one thing about it that is not negotiable.
-fn bar_half(view_w: f32) -> f32 {
-    let room = (view_w / 2.0).floor() - STATBOX_CLEARANCE;
-    BAR_HALF.min(room.max(BAR_HALF_MIN))
+/// Read off the list's own anchor (LVZ reference 3, its bottom-right corner, the
+/// right edge of the rectangle it draws) rather than worked out here, so the
+/// gauge follows whichever view the list is in, at whatever width that view
+/// has. It was a constant sized for the default view, and the full view --
+/// squad, wins, losses, rating and average -- is 452 across, four times wider;
+/// no constant here can stay right as the list gains a view, and this one has
+/// nothing to keep in step. The anchor is set when the list is drawn, which is
+/// after the HUD, so this is the previous frame's: the gauge catches up with a
+/// change of view one frame later.
+fn statbox_right(s: &Sandbox) -> f32 {
+    s.screen_refs[usize::from(reference::STATS_BOX)].0
+}
+
+/// What of the top-centre gauge there is room to draw.
+#[derive(Debug, PartialEq)]
+struct Gauge {
+    /// Half the bar's width, or `None` when the player list leaves no room for one.
+    bar_half: Option<f32>,
+    /// The frame over the middle of the bar.
+    frame: bool,
+}
+
+/// What of the gauge fits on a view `view_w` game pixels across when the player
+/// list reaches `list_right` (0 while it is closed).
+///
+/// With nothing in the way the bar is the measured 480, as wide as the view
+/// allows and never below [`BAR_HALF_MIN`]: that is every ordinary view, including
+/// the lead's own fullscreen 1080p, where the layout was confirmed to look right.
+/// Continuum was only ever measured at a view wide enough that its list cannot
+/// reach the centre, so it never had to decide what to do when it does, and there
+/// is no reference for it; everything below is ours.
+///
+/// The list is drawn over the HUD, so a gauge that reaches it is a gauge with a
+/// hole in it, and a narrow view or a wide list view makes that happen: a
+/// twelve-character name at scale 2 on a 1280-wide window did it, and so does the
+/// full view on a 1280-wide window at scale 1. So the bar gives way, symmetrically
+/// because staying centred is the one thing about it that is not negotiable, down
+/// to [`BAR_HALF_MIN`]. When the list reaches so far that even that does not fit,
+/// the bar is left out rather than drawn under the list; the energy number at the
+/// top right still reads it, and closing the list brings the bar back.
+fn gauge(view_w: f32, list_right: f32) -> Gauge {
+    let centre = (view_w / 2.0).floor();
+    if list_right <= 0.0 {
+        return Gauge {
+            bar_half: Some(BAR_HALF.min(centre).max(BAR_HALF_MIN)),
+            frame: true,
+        };
+    }
+    let room = centre - list_right - STATBOX_GAP;
+    Gauge {
+        bar_half: (room >= BAR_HALF_MIN).then_some(BAR_HALF.min(room)),
+        frame: room >= FRAME_HALF,
+    }
 }
 
 fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
@@ -221,9 +263,11 @@ fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
     let energy = me.energy.max(0) as f32 / 1000.0;
     let frac = (energy / ship_max).clamp(0.0, 1.0);
 
-    if g.w > 0 {
+    let fit = gauge(c.view_w, statbox_right(s));
+    if g.w > 0
+        && let Some(half) = fit.bar_half
+    {
         // Background track, current-max track, then the pulsing energy bar.
-        let half = bar_half(c.view_w);
         let top_w = ship_max / max_possible * half;
         c.ui(
             r,
@@ -252,11 +296,11 @@ fn draw_energy(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
         let w = (frac * top_w).round();
         c.ui(r, bar, center_x - w, center_y, Some((w * 2.0, 6.0)), white);
     }
-    if a.hlthbar.w > 0 {
+    if a.hlthbar.w > 0 && fit.frame {
         c.ui(
             r,
             a.hlthbar.frame(116, 28, 0),
-            center_x - 58.0,
+            center_x - FRAME_HALF,
             0.0,
             None,
             white,
@@ -704,31 +748,144 @@ pub fn radar_image(map: &TileMap, dim: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::statbox;
+
+    /// Every view the player list can be in, laid out the way the game lays it out,
+    /// each with the right edge the game would publish for it (`statbox_right`).
+    ///
+    /// The players are the worst case for width: the longest names, a squad that
+    /// fills its column, and scores of every length up to ten digits.
+    fn every_list_view() -> Vec<(statbox::View, f32)> {
+        let players: Vec<statbox::Entry> = (0..4)
+            .map(|i| statbox::Entry {
+                pid: i,
+                name: "TestingTesting".into(),
+                squad: "LongSquad10".into(),
+                freq: i % 2,
+                kill_points: 10i32.pow(i as u32 * 3),
+                flag_points: 1_000_000_000,
+                wins: 12_345,
+                losses: 6_789,
+                flags: 1_234,
+                ..Default::default()
+            })
+            .collect();
+        let mut views = Vec::new();
+        let mut list = statbox::StatBox::default();
+        // F2 walks the views and ends on Hidden, which has no width.
+        loop {
+            if let Some(l) = list.layout(0, &players) {
+                // `Sandbox::draw_statbox`: the corner is the rectangle's right
+                // edge, which is `x + w` plus the three pixels it is drawn wider by.
+                let (x, _, w, _) = l.rect;
+                views.push((list.view, x + w + 3.0));
+            }
+            list.cycle();
+            if list.view == statbox::View::default() {
+                break;
+            }
+        }
+        views
+    }
 
     /// "A tiny bit of overlap with the energy bar and the player name/score/
-    /// squad area." Reproduced with a fourteen-character name at scale 2 on a
-    /// 1280-wide window, clean at scale 1 -- so it is the view's width in game
-    /// pixels that decides it, and the bar is what gives way.
+    /// squad area." The first time it was a long name on a narrow view; the second
+    /// time it was the full view, 452 across, on a window of the ordinary size. The
+    /// rule that holds both, and every list view added later: **whatever the list
+    /// is, and however wide the view, the gauge does not reach it.** Swept over
+    /// every view at every width from nothing to 8K, because a fix for the cases
+    /// somebody has seen is how this came back.
     #[test]
-    fn the_energy_bar_keeps_off_the_stat_box_on_a_narrow_view() {
-        // The width it was measured at, and every ordinary one: unchanged.
-        assert_eq!(bar_half(1888.0), BAR_HALF, "the measured client area");
-        assert_eq!(bar_half(1920.0), BAR_HALF, "fullscreen 1080p, scale 1");
-        assert_eq!(bar_half(1280.0), BAR_HALF, "a 1280 window at scale 1");
-        assert_eq!(bar_half(960.0), BAR_HALF, "1920 at scale 2");
-        assert_eq!(bar_half(804.0), BAR_HALF, "the narrowest that still fits");
+    fn the_energy_gauge_never_reaches_the_player_list() {
+        let views = every_list_view();
+        assert!(views.len() >= 6, "every view but the hidden one: {views:?}");
+        for (view, right) in views {
+            for width in 0..=7680 {
+                let view_w = width as f32;
+                let centre = (view_w / 2.0).floor();
+                let fit = gauge(view_w, right);
+                if let Some(half) = fit.bar_half {
+                    assert!(
+                        centre - half >= right,
+                        "{view:?} on a {width}-wide view: the bar starts at {} and the list ends at {right}",
+                        centre - half
+                    );
+                    assert!(
+                        (BAR_HALF_MIN..=BAR_HALF).contains(&half),
+                        "{view:?} {width}"
+                    );
+                }
+                if fit.frame {
+                    assert!(
+                        centre - FRAME_HALF >= right,
+                        "{view:?} on a {width}-wide view: the frame starts at {} and the list ends at {right}",
+                        centre - FRAME_HALF
+                    );
+                }
+            }
+        }
+    }
 
-        // The case the lead hit: 1280 at scale 2 is a 640-pixel view.
-        let half = bar_half(640.0);
-        assert!(half < BAR_HALF, "the bar has to give way somewhere");
-        assert!(
-            320.0 - half >= STATBOX_CLEARANCE,
-            "and it must clear the stat box: left edge {} vs {STATBOX_CLEARANCE}",
-            320.0 - half
-        );
-        // Never squeezed out of existence, however small the window.
-        assert_eq!(bar_half(200.0), BAR_HALF_MIN);
-        assert_eq!(bar_half(0.0), BAR_HALF_MIN);
+    /// The other half of the rule, which the sweep above cannot say: the gauge
+    /// gives way only where it has to. The measured 480 stays on every view and
+    /// every list that leave room for it, and a list wider than the room is the
+    /// only thing that makes the bar leave.
+    #[test]
+    fn the_energy_gauge_keeps_its_measured_width_wherever_it_fits() {
+        for (view, right) in every_list_view() {
+            // The client area it was measured at, and fullscreen 1080p: every
+            // view, the widest included, leaves the bar alone.
+            for width in [1888.0, 1920.0, 2560.0] {
+                assert_eq!(
+                    gauge(width, right),
+                    Gauge {
+                        bar_half: Some(BAR_HALF),
+                        frame: true
+                    },
+                    "{view:?} on {width}"
+                );
+            }
+        }
+        // Nothing open, nothing in the way: the measured bar however small the
+        // window, which is what it always was.
+        for width in [1920.0, 960.0, 640.0, 200.0, 0.0] {
+            let fit = gauge(width, 0.0);
+            assert!(fit.frame, "{width}");
+            assert!(fit.bar_half.is_some_and(|h| h >= BAR_HALF_MIN), "{width}");
+        }
+        assert_eq!(gauge(1280.0, 0.0).bar_half, Some(BAR_HALF));
+        assert_eq!(gauge(0.0, 0.0).bar_half, Some(BAR_HALF_MIN));
+    }
+
+    /// The two reproductions, by the numbers they were seen at.
+    #[test]
+    fn the_two_ways_the_energy_bar_met_the_player_list() {
+        let views = every_list_view();
+        let right_of = |v| views.iter().find(|(w, _)| *w == v).expect("view").1;
+
+        // Seen: a long name, 1280 at scale 2 -- a 640-pixel view -- in the default
+        // view. The bar is squeezed, not dropped.
+        let names = gauge(640.0, right_of(statbox::View::Names));
+        assert!(names.bar_half.is_some_and(|h| h < BAR_HALF), "{names:?}");
+        assert!(names.frame);
+
+        // Seen: the full view on the default 1280-wide window at scale 1. The
+        // bar ran from 400 to 880 and the list ends at 458. It is squeezed and
+        // still there, still centred, and now clear.
+        let full = right_of(statbox::View::Full);
+        assert_eq!(full, 458.0, "the full view is 452 across plus its border");
+        let half = gauge(1280.0, full)
+            .bar_half
+            .expect("room for a smaller bar");
+        assert!(half < BAR_HALF);
+        assert!(640.0 - half >= full + STATBOX_GAP);
+
+        // And at scale 2 the full view reaches past the middle of the screen, so
+        // there is no honest place for a centred bar: it is left out, not drawn
+        // under the list.
+        let squeezed = gauge(640.0, full);
+        assert_eq!(squeezed.bar_half, None);
+        assert!(!squeezed.frame);
     }
 
     #[test]
