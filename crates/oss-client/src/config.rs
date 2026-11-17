@@ -26,6 +26,30 @@ use crate::game::input::{Action, Binding, Bindings, Mods, PadBindings, PadButton
 
 pub const FILE_NAME: &str = "oss-client.ini";
 
+/// The directory servers a fresh install asks for zones, the one proven to
+/// answer first.
+///
+/// These are the game's own, not ours to choose: the same three names, in the
+/// same role, that ASSS ships in its `conf/global.conf` for a zone to register
+/// with. That is what makes them the right list -- they are where the zones
+/// actually list themselves, so they are where a client has to ask.
+///
+/// Measured on 2026-11-17 through this client's own directory code:
+/// `sscentral.sscuservers.net` answered with 21 zones;
+/// `ssdir.playsubspace.com` resolved but did not answer; `zones.sscentral.com`
+/// did not resolve at all, its whole domain returning SERVFAIL, having
+/// answered on 2026-11-12. The two that are down are kept rather than dropped,
+/// because a directory list exists to be redundant and these are known-good
+/// addresses having a bad week, not guesses. An unreachable one costs a first
+/// run nothing: it is dropped with a note and the rest are merged.
+///
+/// Port 4990 is the client-facing one; zones register on 4991.
+pub const DEFAULT_DIRECTORIES: [&str; 3] = [
+    "sscentral.sscuservers.net:4990",
+    "ssdir.playsubspace.com:4990",
+    "zones.sscentral.com:4990",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Integer pixel scale; `None` picks one from the display.
@@ -45,7 +69,8 @@ pub struct Config {
     pub ui_scale: u32,
     /// Gamepad buttons per action (the left stick always steers).
     pub pad: PadBindings,
-    /// Directory servers for the zone browser ("host:port"); none by default.
+    /// Directory servers for the zone browser ("host:port").
+    /// [`DEFAULT_DIRECTORIES`] unless the settings file says otherwise.
     pub directories: Vec<String>,
     /// Connection encryption (auto = OpenSec, falling back to VIE).
     pub security: oss_session::security::SecurityMode,
@@ -67,7 +92,7 @@ impl Default for Config {
             palette: Default::default(),
             ui_scale: 0,
             pad: PadBindings::default(),
-            directories: Vec::new(),
+            directories: DEFAULT_DIRECTORIES.iter().map(|&s| s.to_owned()).collect(),
             security: Default::default(),
             identity: true,
         }
@@ -164,12 +189,26 @@ impl Config {
                     .map(|m| c.security = m)
                     .ok_or_else(|| format!("expected auto, opensec or vie, got `{value}`")),
                 ("directory", "servers") => {
-                    c.directories = value
+                    // Every settings file written before this key had defaults
+                    // carries `servers =` with nothing after it, because
+                    // nothing was the default. Reading that as "no directory
+                    // servers" would leave precisely the players who have run
+                    // the client before -- the only ones who have a settings
+                    // file at all -- still staring at the empty zone browser
+                    // these defaults exist to fill. So an empty value means
+                    // the built-in list, and a player who genuinely wants no
+                    // zone browser says so in a word.
+                    let listed: Vec<String> = value
                         .split(',')
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect();
+                    c.directories = match listed.as_slice() {
+                        [] => DEFAULT_DIRECTORIES.iter().map(|&s| s.to_owned()).collect(),
+                        [one] if one.eq_ignore_ascii_case("none") => Vec::new(),
+                        _ => listed,
+                    };
                     Ok(())
                 }
                 ("player", "name") => {
@@ -261,9 +300,16 @@ impl Config {
         s += &format!(
             "[directory]\n\
              ; Directory servers for the zone browser (F3 on the login screen), as\n\
-             ; host:port, comma separated. None by default.\n\
+             ; host:port, comma separated. These are the game's own, and the zones\n\
+             ; list themselves on them. One that is unreachable is skipped and the\n\
+             ; rest are merged, so a directory having a bad day costs you nothing.\n\
+             ; Empty brings this list back; `none` turns the zone browser off.\n\
              servers = {}\n\n",
-            self.directories.join(", ")
+            if self.directories.is_empty() {
+                "none".to_owned()
+            } else {
+                self.directories.join(", ")
+            }
         );
         // No `[player] name`. The name is the start-up screen's and is
         // remembered in `login.ini`; a file that still carries the key is read
@@ -501,6 +547,47 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(Config::parse(&custom.to_text()).0, custom);
+    }
+
+    /// A player who has just installed the client must have somewhere to play
+    /// without editing a file first. The browser had nothing to ask, so it
+    /// told them to go and add a directory server by hand before they could
+    /// see a single zone.
+    #[test]
+    fn a_fresh_install_has_directory_servers() {
+        let c = Config::default();
+        assert_eq!(c.directories, DEFAULT_DIRECTORIES, "out of the box");
+        assert!(
+            c.to_text().contains("sscentral.sscuservers.net:4990"),
+            "and the file written on the first run says so"
+        );
+    }
+
+    /// Every settings file written before this key had defaults carries
+    /// `servers =` with nothing after it. Those players -- the only ones with
+    /// a settings file at all -- are exactly the ones stuck with an empty zone
+    /// browser, so an empty value has to mean the built-in list rather than
+    /// "the player chose none".
+    #[test]
+    fn an_old_empty_list_picks_the_defaults_up_and_none_opts_out() {
+        let (old, warnings) = Config::parse("[directory]\nservers =\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            old.directories, DEFAULT_DIRECTORIES,
+            "an old file catches up"
+        );
+
+        let (off, warnings) = Config::parse("[directory]\nservers = none\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(off.directories.is_empty(), "and `none` is how you opt out");
+
+        // ... which has to survive being written back out, or the opt-out
+        // would last exactly until the next save.
+        assert!(off.to_text().contains("servers = none"));
+        assert!(Config::parse(&off.to_text()).0.directories.is_empty());
+
+        let (mine, _) = Config::parse("[directory]\nservers = dir.example:4990\n");
+        assert_eq!(mine.directories, ["dir.example:4990"], "a choice is kept");
     }
 
     /// The player name is read for an old file and never written back: its home

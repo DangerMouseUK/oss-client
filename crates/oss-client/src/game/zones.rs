@@ -2,13 +2,24 @@
 //! population and ping. Opened with F3 on the login screen.
 //!
 //! Only directory servers listed in the settings (`[directory] servers`) or given
-//! with `--directory` are contacted; none are configured by default.
+//! with `--directory` are contacted. A fresh install starts with the game's own,
+//! [`crate::config::DEFAULT_DIRECTORIES`], so the browser has somewhere to ask;
+//! `servers = none` in the settings file turns that off.
 
 use std::time::{Duration, Instant};
 
 use super::input::Stroke;
 use oss_session::directory::{DirectoryClient, ZoneInfo, ZonePinger};
 use winit::keyboard::KeyCode;
+
+/// "1 zone" or "7 zones" -- the count goes in front of the player, so it reads
+/// as English rather than as a field.
+fn count_zones(n: usize) -> String {
+    match n {
+        1 => "1 zone".to_owned(),
+        n => format!("{n} zones"),
+    }
+}
 
 /// How often zones are pinged.
 const PING_EVERY: Duration = Duration::from_secs(2);
@@ -30,8 +41,15 @@ pub struct ZoneBrowser {
     /// Whether the player has moved the selection. Until they have, the highlight
     /// belongs on the top row and should follow the sort, not a particular zone.
     touched: bool,
-    /// Progress or problems, shown under the list.
+    /// Progress or problems, shown under the list. Written only by
+    /// [`ZoneBrowser::restate`], from the three counts below it.
     pub status: String,
+    /// How many directories were configured, for "1 of 3 did not answer".
+    configured: usize,
+    /// Directories that could not be reached, as "name: reason". Held apart
+    /// from [`ZoneBrowser::status`] so that one directory being down cannot
+    /// overwrite a list the others returned.
+    failed: Vec<String>,
     pinger: Option<ZonePinger>,
     last_ping: Option<Instant>,
     started: Instant,
@@ -40,32 +58,68 @@ pub struct ZoneBrowser {
 impl ZoneBrowser {
     /// Starts fetching from every configured directory.
     pub fn open(directories: &[String]) -> Self {
-        let mut status = Vec::new();
+        let mut failed = Vec::new();
         let mut fetches = Vec::new();
         for d in directories {
             match DirectoryClient::connect(d, 0) {
                 Ok(c) => fetches.push((d.clone(), c)),
-                Err(e) => status.push(format!("{d}: {e}")),
+                Err(e) => failed.push(format!("{d}: {e}")),
             }
         }
-        if directories.is_empty() {
-            status.push(
-                "No directory servers set. Add them under [directory] servers in the settings file."
-                    .into(),
-            );
-        } else if !fetches.is_empty() {
-            status.push("Fetching zone list...".into());
-        }
-        Self {
+        let mut browser = Self {
             fetches,
             zones: Vec::new(),
             selected: 0,
             touched: false,
-            status: status.join("  "),
+            status: String::new(),
+            configured: directories.len(),
+            failed,
             pinger: ZonePinger::new().ok(),
             last_ping: None,
             started: Instant::now(),
+        };
+        browser.restate();
+        browser
+    }
+
+    /// Rewrites the line under the list from what has actually happened: the
+    /// zones that arrived, the directories still being waited on, and the ones
+    /// that failed.
+    ///
+    /// This used to be whatever had gone wrong most recently, and a failure
+    /// overwrote it outright -- so a directory that was down reported itself
+    /// while the zones the others had returned sat on the screen above it.
+    /// Shipping three by default made that the ordinary case rather than a
+    /// rare one, because two of the three do not answer today.
+    fn restate(&mut self) {
+        if self.configured == 0 && self.zones.is_empty() {
+            self.status =
+                "No directory servers set. Add them under [directory] servers in the settings file."
+                    .into();
+            return;
         }
+        let counted = count_zones(self.zones.len());
+        let mut line = match (self.fetches.is_empty(), self.zones.is_empty()) {
+            (false, true) => "Fetching zone list...".to_owned(),
+            (false, false) => format!("{counted}, still fetching..."),
+            (true, _) => counted,
+        };
+        // A directory that is down is worth a word once the list it could not
+        // contribute to has arrived. When nothing arrived at all it is the
+        // whole story, so it is told in full -- an empty browser that explains
+        // itself beats one that just sits there.
+        if !self.failed.is_empty() {
+            if !self.zones.is_empty() {
+                line += &format!(
+                    "  ({} of {} directories did not answer)",
+                    self.failed.len(),
+                    self.configured
+                );
+            } else if self.fetches.is_empty() {
+                line = self.failed.join("  ");
+            }
+        }
+        self.status = line;
     }
 
     /// Network work for this frame.
@@ -75,7 +129,7 @@ impl ZoneBrowser {
         let mut found = Vec::new();
         for (i, (name, client)) in self.fetches.iter_mut().enumerate() {
             if let Err(e) = client.pump() {
-                self.status = format!("{name}: {e}");
+                self.failed.push(format!("{name}: {e}"));
                 done.push(i);
                 continue;
             }
@@ -85,24 +139,25 @@ impl ZoneBrowser {
                     done.push(i);
                 }
                 Some(Err(e)) => {
-                    self.status = format!("{name}: {e}");
+                    self.failed.push(format!("{name}: {e}"));
                     done.push(i);
                 }
                 None if timed_out => {
-                    self.status = format!("{name}: no answer");
+                    self.failed.push(format!("{name}: no answer"));
                     done.push(i);
                 }
                 None => {}
             }
         }
+        let settled = !done.is_empty();
         for i in done.into_iter().rev() {
             self.fetches.remove(i);
         }
         if !found.is_empty() {
+            // `add` restates for us once the new zones are in and sorted.
             self.add(found);
-        }
-        if self.fetches.is_empty() && self.status.starts_with("Fetching") {
-            self.status = format!("{} zones", self.zones.len());
+        } else if settled {
+            self.restate();
         }
         // The pings carry the real populations; the directory's figures were only a
         // starting point. Re-sort when they disagree, or the list ends up ordered by
@@ -133,6 +188,7 @@ impl ZoneBrowser {
             }
         }
         self.sort();
+        self.restate();
         self.last_ping = None;
     }
 
@@ -281,6 +337,49 @@ mod tests {
 
     fn names(b: &ZoneBrowser) -> Vec<&str> {
         b.zones.iter().map(|z| z.name.as_str()).collect()
+    }
+
+    /// A directory that is down must not hide the zones the other directories
+    /// returned. The line under the list used to be whatever had gone wrong
+    /// most recently, so once three directories shipped by default -- two of
+    /// which do not answer today -- a full zone list announced itself as a
+    /// failure.
+    #[test]
+    fn a_dead_directory_does_not_hide_the_zones_that_arrived() {
+        // Neither of these carries a port, so `connect` refuses them on the
+        // spot and no name is ever looked up: the test stays offline.
+        let mut b = ZoneBrowser::open(&["nowhere".to_owned(), "also-nowhere".to_owned()]);
+        assert!(b.zones.is_empty());
+        assert!(
+            !b.status.contains("No directory servers"),
+            "two were set -- they failed, which is a different thing: {}",
+            b.status
+        );
+        assert!(
+            b.status.contains("nowhere"),
+            "with nothing to show, the reason is the whole story: {}",
+            b.status
+        );
+
+        b.add(vec![zone("Trench Wars", "10.0.0.1:5400", 49)]);
+        assert!(
+            b.status.starts_with("1 zone") && !b.status.starts_with("1 zones"),
+            "the count reads as English, and leads: {}",
+            b.status
+        );
+        assert!(
+            b.status.contains("2 of 2 directories did not answer"),
+            "the failures keep a word, after the list: {}",
+            b.status
+        );
+    }
+
+    /// With no directories at all there is nothing to wait for, so the browser
+    /// says what to do rather than reporting an empty list.
+    #[test]
+    fn no_directories_configured_says_so() {
+        let b = ZoneBrowser::open(&[]);
+        assert!(b.status.contains("No directory servers"), "{}", b.status);
     }
 
     #[test]
