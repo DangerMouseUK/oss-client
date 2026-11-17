@@ -117,10 +117,13 @@ impl UdpDriver {
 mod tests {
     use super::*;
 
-    /// The login's `server_ip` is the IPv4 address as a host-order `u32`, and
-    /// these two are read off real captures rather than derived: a client
-    /// dialling 127.0.0.1 put `01 00 00 7F` at offset 89, and one dialling
-    /// Trench Wars at 207.148.16.165 put 0xCF9410A5 there.
+    /// The login's `server_ip` is the IPv4 address as a host-order `u32`: each
+    /// byte of the dword is one number of the address, lowest number first. A
+    /// client dialling 127.0.0.1 put `01 00 00 7F` at offset 89 of a real
+    /// capture, which is where the encoding was read from rather than guessed.
+    /// The second case is the same rule applied to an address from the range
+    /// reserved for documentation, so that a routable one belonging to
+    /// somebody else is not written down here.
     #[test]
     fn the_server_address_encodes_the_way_a_real_client_sends_it() {
         let d = |s: &str| -> u32 {
@@ -131,7 +134,8 @@ mod tests {
         };
         assert_eq!(d("127.0.0.1:5000"), 0x7F00_0001);
         assert_eq!(d("127.0.0.1:5000").to_le_bytes(), [0x01, 0x00, 0x00, 0x7F]);
-        assert_eq!(d("207.148.16.165:5400"), 0xCF94_10A5);
+        assert_eq!(d("192.0.2.10:5400"), 0xC000_020A);
+        assert_eq!(d("192.0.2.10:5400").to_le_bytes(), [0x0A, 0x02, 0x00, 0xC0]);
         assert_eq!(d("[::1]:5000"), 0, "IPv6 cannot be carried in the field");
     }
 
