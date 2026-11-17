@@ -68,13 +68,16 @@ cargo run --release -p oss-client -- --sandbox path/to/map.lvl
 
 ![The zone browser listing live zones](docs/images/zone-browser.png)
 
-*Live zones, their populations and their pings, from the public directory servers — after
-adding them, because the client ships with none.*
+*Live zones, their populations and their pings, from the public directory servers the client
+ships with.*
 
-F3 on the login screen lists zones from the directory servers you configure, with population,
-ping and the zone's own description. **None are configured by default** — the client contacts
-nothing you have not asked it to. Add them with `[directory] servers = host:port` in the
-settings file, or `--directory host:port`.
+F3 on the login screen lists zones from the directory servers, with population, ping and the
+zone's own description. **Three are configured by default** — the game's own, the ones zones
+register themselves with — and the client asks them for the zone list when the login screen
+opens, then again each time you press F3. **`[directory] servers = none` in the settings file
+turns the zone browser off**, and the client then contacts no directory at all. Name your own
+with `[directory] servers = host:port`, or `--directory host:port`, which **adds to** the list
+rather than replacing it.
 
 ## Why you would trust it
 
