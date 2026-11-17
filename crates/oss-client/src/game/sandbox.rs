@@ -91,8 +91,10 @@ pub struct Sandbox {
     /// Online: the server moved us to another arena and its map hasn't arrived yet.
     arena_change: bool,
     statbox: StatBox,
-    /// Bottom-right of the stat box as last drawn (an LVZ anchor).
-    statbox_corner: (f32, f32),
+    /// Bottom-right of the stat box as last drawn (an LVZ anchor, and where the
+    /// F12 frame-rate line starts looking for clear space). `(0.0, 0.0)` while the
+    /// player list is hidden.
+    pub(super) statbox_corner: (f32, f32),
     pub(super) lvz: Lvz,
     pub(super) flags: Flags,
     pub(super) balls: Balls,

@@ -953,7 +953,12 @@ impl App {
                     self.settings = Some(SettingsUi::new(current_config(&self.options)));
                 }
                 Some(Choice::RefreshZones) => {
-                    ls.browser = crate::game::zones::ZoneBrowser::open(&self.options.directories);
+                    // Keeps the zones on screen while the directories are asked
+                    // again; the line under the list says a refresh is running.
+                    ls.browser.refresh(&self.options.directories);
+                    // Whatever went wrong last time is not what is happening now,
+                    // and an error on that line hides the refresh behind it.
+                    ls.login.error = None;
                 }
                 None => {}
                 Some(Choice::Quit) => {
@@ -1686,7 +1691,7 @@ fn draw_start_screen(
             ("F2 = Options", Some(Spot::Options)),
         ],
         &[
-            ("F3 = Zones again", Some(Spot::RefreshZones)),
+            ("F3 = Zone Refresh", Some(Spot::RefreshZones)),
             ("F5 = Sandbox", Some(Spot::Sandbox)),
             ("Esc = Quit", Some(Spot::Quit)),
         ],
@@ -1723,8 +1728,13 @@ fn draw_start_screen(
     let hint = cursor.and_then(|(mx, my)| spots.at(mx, my)).map(Spot::hint);
     let (second, colour) = match (&login.error, hint) {
         (Some(err), _) => (err.as_str(), color::RED),
-        (None, Some(hint)) => (hint, color::YELLOW),
-        (None, None) => (b.status.as_str(), color::WHITE),
+        // While a directory is still being waited on, how the list is getting on
+        // beats what the pointer is over. Clicking "F3 = Zone Refresh" leaves the
+        // pointer on the button, so the button's own description would otherwise
+        // sit there for the whole fetch and the refresh would have no answer at
+        // all -- which is the half of this the wording never fixed.
+        (None, Some(hint)) if !b.busy() => (hint, color::YELLOW),
+        (None, _) => (b.status.as_str(), color::WHITE),
     };
     // Wrapped, not cut. A refused connection explains itself in a sentence and a
     // half -- "the zone didn't prove the key on record; remove its line from

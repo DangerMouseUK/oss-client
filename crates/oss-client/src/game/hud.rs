@@ -698,7 +698,30 @@ fn draw_messages(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
             r.present_mode,
             s.world.tick
         );
-        c.text(r, 4.0, 30.0, color::WHITE, &line);
+        c.text(r, 4.0, fps_line_y(s.statbox_corner.1), color::WHITE, &line);
+    }
+}
+
+/// Where the F12 frame-rate line is drawn, given the bottom edge of the player
+/// list (`0.0` while the list is hidden).
+///
+/// It used to be a fixed `y = 30`, which is **exactly** the second row of the
+/// player list: `BORDER + HEADER_HEIGHT + 1 + ROW` in [`super::statbox`] is
+/// `3 + 14 + 1 + 12`. The list is drawn after this, so online -- where there is
+/// always more than one player -- the second name was painted straight over the
+/// frame rate, and F12 looked as though it did nothing. Measured on 2026-11-17
+/// against a local zone with three other players: "122 fps" came out as "bot2ps".
+/// Offline there is only ever one row, so the sandbox showed it perfectly, which
+/// is why reading the code twice did not find this.
+fn fps_line_y(statbox_bottom: f32) -> f32 {
+    /// Where it sits with no player list under it: the old place.
+    const TOP: f32 = 30.0;
+    /// Clear of the list's bottom border.
+    const GAP: f32 = 4.0;
+    if statbox_bottom > 0.0 {
+        statbox_bottom + GAP
+    } else {
+        TOP
     }
 }
 
@@ -956,6 +979,28 @@ mod tests {
         // Measured: with the player list closed, reference 3 is the screen origin.
         let hidden = screen_refs(&c, (0.0, 0.0), 992.0, false, "4:53pm  A1");
         assert_eq!(hidden[3], (0.0, 0.0), "3 S stat box, hidden");
+    }
+
+    /// F12 was reported twice as doing nothing. It worked; the line was drawn at
+    /// the second row of the player list and the list was drawn on top of it.
+    #[test]
+    fn the_frame_rate_line_clears_the_player_list() {
+        use super::fps_line_y;
+        // The row pitch the collision came from: statbox's BORDER + HEADER_HEIGHT
+        // + 1 + ROW. If any of those move, this is the number to re-measure.
+        let second_row = 3.0 + 14.0 + 1.0 + 12.0;
+        assert_eq!(
+            second_row, 30.0,
+            "the old fixed y, which is the row it was hiding under"
+        );
+        // A list four rows tall ends at 18 + 4*12 = 66.
+        let bottom = 66.0;
+        assert!(
+            fps_line_y(bottom) >= bottom,
+            "the line must start below the list, not inside it"
+        );
+        // Hidden list: back to where it has always been.
+        assert_eq!(fps_line_y(0.0), 30.0);
     }
 
     #[test]

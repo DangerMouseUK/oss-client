@@ -57,7 +57,37 @@ pub struct SessionConfig {
     pub machine_id: u32,
     /// Minutes from UTC.
     pub timezone_bias: i16,
-    /// Ask for the arena's LVZ files (graphics; bots usually don't need them).
+    /// Set the arena-entry packet's optional-graphics byte: *"send me every LVZ
+    /// file, including the ones this arena marks optional"*. Bots usually don't
+    /// need any of them.
+    ///
+    /// **It does two different jobs depending on what kind of client the server
+    /// thinks you are, and the difference is worth knowing before changing it.**
+    /// ASSS decides what to list in `core/mapnewsdl.c`:
+    ///
+    /// ```text
+    /// if (p->type == T_CONT || p->flags.want_all_lvz)    /* line 137 */
+    ///     for each file: if (!data->optional || p->flags.want_all_lvz)  /* 145 */
+    /// else
+    ///     /* the map, and nothing else */
+    /// ```
+    ///
+    /// `want_all_lvz` is this byte (`core/arenaman.c:599`), and `T_CONT` means the
+    /// session negotiated Continuum's own cipher — which this repository does not
+    /// implement, so a client built from here is `T_VIE`. So:
+    ///
+    /// - **A Continuum-capable build with this set** is listed the arena's files
+    ///   *including the optional ones*, which Continuum itself is never offered.
+    ///   That is strictly more downloading than the real client does, and
+    ///   clearing the byte is what makes it match.
+    /// - **A build from this repository with this set** is listed the same
+    ///   everything. Clearing the byte leaves it the map and no graphics at all,
+    ///   because the byte is the only way a non-Continuum client is offered any.
+    ///
+    /// A zone marks a file optional by prefixing it with `+` in its arena
+    /// settings (`General:LevelFiles`, read in `core/mapdata.c:521`);
+    /// `SubspaceServer.NET` does the same thing in
+    /// `Modules/MapNewsDownload.cs:155,161`. Both read on 2026-11-17.
     pub want_lvz: bool,
     /// Register the name on login: the login packet's "new user" byte
     /// (mervbot `generatePassword`, `clientprot.cpp`).

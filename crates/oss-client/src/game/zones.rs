@@ -53,6 +53,9 @@ pub struct ZoneBrowser {
     pinger: Option<ZonePinger>,
     last_ping: Option<Instant>,
     started: Instant,
+    /// A refresh is running and the zones on screen are the ones from last time,
+    /// waiting to be replaced by the first directory that answers.
+    refreshing: bool,
 }
 
 impl ZoneBrowser {
@@ -77,9 +80,40 @@ impl ZoneBrowser {
             pinger: ZonePinger::new().ok(),
             last_ping: None,
             started: Instant::now(),
+            refreshing: false,
         };
         browser.restate();
         browser
+    }
+
+    /// Asks the directories again, keeping the list that is already on screen.
+    ///
+    /// F3 used to throw the browser away and build a new one, so every zone
+    /// vanished for the three to eleven seconds the directories take to answer:
+    /// the list went blank, the address stayed in the Zone field, and the only
+    /// sign of life was a small line reading "Fetching zone list...". A player
+    /// cannot tell that from a key that crashed something. So the previous list
+    /// stays up, the line under it says a refresh is running, and the zones are
+    /// replaced by the first directory that answers rather than up front.
+    pub fn refresh(&mut self, directories: &[String]) {
+        let zones = std::mem::take(&mut self.zones);
+        let (selected, touched) = (self.selected, self.touched);
+        *self = Self::open(directories);
+        self.selected = selected.min(zones.len().saturating_sub(1));
+        self.touched = touched;
+        self.zones = zones;
+        // Nothing to wait for (every directory refused on the spot, or none is
+        // configured): this is not a refresh in progress, it is already over.
+        self.refreshing = !self.fetches.is_empty();
+        self.restate();
+    }
+
+    /// Whether a directory is still being waited on. The screen gives the line
+    /// under the list priority over the pointer's hint while this holds, so that
+    /// clicking the refresh button -- which leaves the pointer sitting on it --
+    /// does not hide the progress behind the button's own description.
+    pub fn busy(&self) -> bool {
+        !self.fetches.is_empty()
     }
 
     /// Rewrites the line under the list from what has actually happened: the
@@ -101,6 +135,15 @@ impl ZoneBrowser {
         let counted = count_zones(self.zones.len());
         let mut line = match (self.fetches.is_empty(), self.zones.is_empty()) {
             (false, true) => "Fetching zone list...".to_owned(),
+            // A refresh with the previous list still on screen. Saying so is the
+            // whole point of F3 having an answer: the rows below are last time's
+            // until a directory replies.
+            (false, false) if self.refreshing => {
+                format!("Refreshing the zone list...  ({counted} from last time)")
+            }
+            // The refresh finished without a single directory answering, so what
+            // is on screen is still the old list. The failures are appended below.
+            (true, false) if self.refreshing => format!("{counted} from last time"),
             (false, false) => format!("{counted}, still fetching..."),
             (true, _) => counted,
         };
@@ -182,6 +225,13 @@ impl ZoneBrowser {
     /// Adds zones, skipping addresses already listed (several directories often
     /// list the same zones).
     fn add(&mut self, zones: Vec<ZoneInfo>) {
+        // The first answer to a refresh replaces last time's list outright, so a
+        // zone that has gone away goes away; the directories after it merge into
+        // the new list in the usual way.
+        if self.refreshing {
+            self.refreshing = false;
+            self.zones.clear();
+        }
         for z in zones {
             if !self.zones.iter().any(|o| o.address == z.address) {
                 self.zones.push(z);
@@ -372,6 +422,83 @@ mod tests {
             "the failures keep a word, after the list: {}",
             b.status
         );
+    }
+
+    /// A directory that is listening to nothing: the socket connects (UDP has no
+    /// handshake) and nothing is ever sent, because these tests never `pump`. It
+    /// is how a fetch-in-progress is reached without going near a real network.
+    const PENDING: &str = "127.0.0.1:1";
+
+    /// F3's real fault was not its wording. It threw the browser away, so every
+    /// zone vanished for the seconds the directories take, and a refresh looked
+    /// exactly like a key that had broken something.
+    #[test]
+    fn a_refresh_keeps_the_zones_on_screen_and_says_it_is_running() {
+        let dirs = [PENDING.to_owned()];
+        let mut b = ZoneBrowser::open(&dirs);
+        b.add(vec![
+            zone("Trench Wars", "10.0.0.1:5400", 49),
+            zone("Hyperspace", "10.0.0.2:5400", 34),
+        ]);
+        b.touched = true;
+        b.selected = 1;
+
+        b.refresh(&dirs);
+
+        assert_eq!(
+            names(&b),
+            ["Trench Wars", "Hyperspace"],
+            "the list a player was reading must still be there"
+        );
+        assert_eq!(b.selected, 1, "and so must the row they had highlighted");
+        assert!(
+            b.status.starts_with("Refreshing the zone list..."),
+            "the line under the list is where a refresh announces itself: {}",
+            b.status
+        );
+        assert!(
+            b.status.contains("2 zones from last time"),
+            "it has to say the rows below it are stale: {}",
+            b.status
+        );
+        assert!(b.busy(), "a directory is still being waited on");
+
+        // The first directory to answer replaces last time's list outright, so a
+        // zone that has gone away goes away rather than lingering for ever.
+        b.add(vec![zone("Hyperspace", "10.0.0.2:5400", 40)]);
+        assert_eq!(names(&b), ["Hyperspace"]);
+        assert!(
+            b.status.starts_with("1 zone") && !b.status.contains("from last time"),
+            "what is on screen is this fetch's, so it stops being called old: {}",
+            b.status
+        );
+    }
+
+    /// Every directory down during a refresh: the old rows stay, and the line
+    /// says they are old. Saying "2 zones" there would be a lie about freshness.
+    #[test]
+    fn a_refresh_nobody_answers_admits_the_list_is_last_times() {
+        let dirs = [PENDING.to_owned()];
+        let mut b = ZoneBrowser::open(&dirs);
+        b.add(vec![zone("Trench Wars", "10.0.0.1:5400", 49)]);
+        b.refresh(&dirs);
+        // What `pump` does when a directory gives up, without the ten-second wait.
+        b.fetches.clear();
+        b.failed.push(format!("{PENDING}: no answer"));
+        b.restate();
+
+        assert!(!b.busy(), "nothing left to wait for");
+        assert!(
+            b.status.starts_with("1 zone from last time"),
+            "{}",
+            b.status
+        );
+        assert!(
+            b.status.contains("1 of 1 directories did not answer"),
+            "{}",
+            b.status
+        );
+        assert_eq!(names(&b), ["Trench Wars"]);
     }
 
     /// With no directories at all there is nothing to wait for, so the browser
