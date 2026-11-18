@@ -993,8 +993,7 @@ impl Session {
                     }
                     return;
                 }
-                if login_succeeded(r.code) {
-                    let form = r.demo_data != 0;
+                if let Some(form) = login_admits(r.code, r.demo_data, self.cfg.name.is_empty()) {
                     self.events.push_back(SessionEvent::LoggedIn);
                     let notice = match r.code {
                         login_code::NO_SCORES => Some("Scores are not available in this zone."),
@@ -1948,6 +1947,35 @@ fn login_succeeded(code: u8) -> bool {
     )
 }
 
+/// Whether a login answer lets the player in and, if so, whether the zone
+/// wants its registration form: `Some(form)` for in, `None` for refused.
+///
+/// The form is asked for by the reply's demographics byte. One code means two
+/// things depending on the server, and this is where the two are told apart:
+///
+/// - **ASSS** sends `0x10` ([`login_code::NO_NAME`], `AUTH_NONAME` in `core.h`)
+///   as a refusal, and from one place only: a login whose name is blank
+///   (`core.c`, `PLogin`).
+/// - **Subspace Server .NET** sends `0x10` (`AuthCode.AskDemographics`,
+///   `IAuth.cs`) as a *success*, with the demographics byte set, when its
+///   billing server wants the form (`BillingUdp.cs`). Its own login counts it
+///   as OK.
+///
+/// So a `0x10` answering a login that carried a name cannot be ASSS's refusal,
+/// and is read as .NET's yes-with-a-form. Read the other way, as it was, such
+/// a .NET zone refused this client while letting every other one in. The byte
+/// is not trusted to decide it: ASSS's refusal leaves it uninitialised
+/// (`fail_login_with` fills only the code).
+fn login_admits(code: u8, demo_data: u8, name_blank: bool) -> Option<bool> {
+    if login_succeeded(code) {
+        Some(demo_data != 0)
+    } else if code == login_code::NO_NAME && !name_blank {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// What a refusal code means, for the player, and whether trying again could
 /// help.
 ///
@@ -1997,6 +2025,7 @@ fn login_message(code: u8) -> &'static str {
              trying again: retrying can extend a lockout."
         }
         login_code::TOO_LOW_USAGE => "This name has not played long enough to enter this zone.",
+        // Only for a blank name: with a name, `0x10` is a yes (`login_admits`).
         login_code::NO_NAME => "The zone received no name. Enter a name and try again.",
         login_code::TOO_MANY_DEMO | login_code::NO_DEMO => {
             "The zone does not admit this kind of client. Trying again will not help."
@@ -2151,6 +2180,56 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// `0x10` is ASSS's "no name" refusal and Subspace Server .NET's "yes, and
+    /// fill in the registration form". A login that carried a name cannot have
+    /// been refused for having none, so with a name it is the .NET yes: the
+    /// player is let in and the form is asked for. With a blank name it is
+    /// still ASSS's refusal, whatever byte 19 holds -- ASSS leaves it
+    /// uninitialised on that path. And the byte alone asks for the form on any
+    /// success code.
+    #[test]
+    fn code_0x10_is_a_yes_with_a_form_unless_the_name_was_blank() {
+        let response = |code: u8, demo: u8| {
+            let mut p = [0u8; 36];
+            p[0] = s2c::kind::LOGIN_RESPONSE;
+            p[1] = code;
+            p[19] = demo;
+            p
+        };
+        let run = |name: &str, code: u8, demo: u8| {
+            let cfg = SessionConfig {
+                name: name.into(),
+                ..Default::default()
+            };
+            let mut s = Session::new(cfg, 0, 1);
+            s.handle_packet(0, &response(code, demo));
+            let wanted = s.registration_wanted();
+            (s.events.into_iter().collect::<Vec<_>>(), wanted)
+        };
+
+        let (events, wanted) = run("Ace", login_code::NO_NAME, 1);
+        assert!(
+            matches!(events.first(), Some(SessionEvent::LoggedIn)),
+            "{events:?}"
+        );
+        assert!(events.contains(&SessionEvent::RegistrationWanted));
+        assert!(wanted);
+
+        let (events, _) = run("", login_code::NO_NAME, 0xCC);
+        assert!(matches!(
+            events.first(),
+            Some(SessionEvent::LoginFailed {
+                code: login_code::NO_NAME,
+                ..
+            })
+        ));
+
+        let (events, wanted) = run("Ace", login_code::OK, 1);
+        assert!(events.contains(&SessionEvent::RegistrationWanted) && wanted);
+        let (events, wanted) = run("Ace", login_code::OK, 0);
+        assert!(!events.contains(&SessionEvent::RegistrationWanted) && !wanted);
     }
 
     /// The arena list used to reach the game as "some other packet", which the
