@@ -23,7 +23,8 @@ cargo run --release -p oss-bot -- --server 127.0.0.1:5000 --ship 1 --count 3 --f
 `--duration secs` makes them leave on their own, `--security opensec|vie|auto|none` picks the
 cipher (`none` sends the password in the clear and only reaches a zone whose
 `Security:AllowUnencrypted` is set, so it is for a zone you run yourself),
-`--new-user` registers the name rather than expecting it to exist, and `--identity
+`--new-user` says yes when a zone offers to create a name it does not know (without it a
+bot declines), and `--identity
 <file>` gives each bot number its own OpenSec identity. `--help` lists the rest.
 
 `oss-bot` is built on `oss-session`, the same session layer the graphical client uses, so

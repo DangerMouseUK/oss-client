@@ -22,8 +22,11 @@ Play online:
   --name <name>             Player name (default: from the settings file)
   --password <pw>           Password (default empty)
   --arena <name>            Arena to enter (default: any public arena)
-  --new-user                Register the name instead of expecting it to exist.
-                            Subgame forgets its accounts when the zone restarts
+  --new-user                When the zone offers to create a name it does not
+                            know, say yes without asking: for scripted runs.
+                            Players are asked in a box instead, and never need
+                            this. Subgame forgets its accounts when the zone
+                            restarts, so every name is new to one just started
   --ship <1-8|spec>         Ship to enter in (default spec online, 1 offline)
   --freq <n>                Team to join (in game: type =n)
   --follow <name>           Spectate, following this player
@@ -59,8 +62,9 @@ Options:
                             a keyboard does (thrust, guns; repeatable; testing)
   --click <secs>:<x>,<y>    Click at that point <secs> in, in UI pixels (screen
                             pixels over the pixel scale) from the top-left: the
-                            start-up screen, or the settings screen while it is
-                            up (repeatable; testing)
+                            start-up screen, a box the zone asks you to answer,
+                            or the settings screen while it is up (repeatable;
+                            testing)
   --drag <secs>:<x>,<y>:<x>,<y>
                             Drag from the first point to the second, <secs> in,
                             in the same units -- what a slider answers to, where

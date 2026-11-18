@@ -28,7 +28,8 @@ Options:
   --fly                  Fly around (needs a ship): thrust, turn and shoot at random
   --chat <text>          Say this in public chat once in the arena; :name:text
                          sends it privately to that player once they're here
-  --new-user             Register the name instead of expecting it to exist.
+  --new-user             Create the name when the zone offers to (it does not
+                         know it). Without this a bot declines and disconnects.
                          Subgame forgets its accounts when the zone restarts, so a
                          bot needs this against a zone that has just come up
   --duration <secs>      Disconnect after this long (default: run until Ctrl+C)

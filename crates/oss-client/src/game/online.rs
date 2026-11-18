@@ -71,8 +71,9 @@ pub struct ServerOptions {
     pub known_servers: Option<PathBuf>,
     /// Your OpenSec identity keys, one per zone; `None` offers no identity.
     pub identities: Option<PathBuf>,
-    /// Register the name on login instead of expecting the zone to know it
-    /// ([`SessionConfig::new_user`]).
+    /// Say yes, without asking, when the zone offers to create a name it does
+    /// not know ([`SessionConfig::new_user`]). The graphical client asks the
+    /// player instead; this is for scripted runs.
     pub new_user: bool,
 }
 

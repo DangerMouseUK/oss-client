@@ -20,8 +20,9 @@ oss-bot --server 127.0.0.1:5000 --name MyBot --password secret
 ```
 
 Replace the address with the zone's, and the name and password with an account the zone accepts.
-On a zone that has just started and keeps no accounts, add `--new-user` to register the name
-instead of expecting it to exist. The bot prints each step as it happens — connected, logged
+On a zone that does not know the name -- one that has just started and keeps no accounts, say --
+add `--new-user`: when the zone offers to create the name, the bot says yes. Without it the bot
+declines and disconnects, since it has nobody to ask. The bot prints each step as it happens — connected, logged
 in, entering the arena, downloading the map — so a zone that stops it part-way shows where.
 
 **`oss-bot --help` lists the options the program you have accepts** — not every build of the bot
