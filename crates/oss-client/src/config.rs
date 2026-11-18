@@ -4,7 +4,8 @@
 //! A small INI file (`oss-client.ini` in the user's config folder, or `--config`).
 //! Missing entries keep their defaults, unknown or bad lines are reported and skipped,
 //! and the file is created with every default written out (as a reference) the first
-//! time the game runs. Command-line flags override it.
+//! time the game runs. Command-line flags override it for that run, and are never
+//! written into it.
 //!
 //! ```ini
 //! [video]
@@ -273,7 +274,7 @@ impl Config {
     pub fn to_text(&self) -> String {
         let mut s = String::from(
             "; oss-client settings. Delete a line to get its default back.\n\
-             ; Command-line flags override these.\n\n[video]\n",
+             ; Command-line flags override these for one run, and are never saved here.\n\n[video]\n",
         );
         s += &format!(
             "scale = {}          ; integer pixel scale 1-8, 0 = from the display\n",

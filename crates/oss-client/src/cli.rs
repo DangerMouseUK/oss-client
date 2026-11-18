@@ -398,6 +398,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             lvz,
             player_name: None,
             login_file: None,
+            saved: Default::default(),
         }));
     }
     let mode = match (sandbox, server) {
@@ -474,6 +475,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         lvz,
         player_name: None,
         login_file: None,
+        saved: Default::default(),
     }))
 }
 
@@ -514,6 +516,9 @@ fn apply_config(opts: &mut app::Options) -> Result<(), String> {
 }
 
 fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), String> {
+    // Kept as read, for the settings screen to start from: what follows lays
+    // the command line over these values for this run only.
+    opts.saved = cfg.clone();
     opts.scale = opts.scale.or(cfg.scale);
     opts.vsync |= cfg.vsync;
     opts.fullscreen |= cfg.fullscreen;

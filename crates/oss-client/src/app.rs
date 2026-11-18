@@ -226,6 +226,16 @@ pub struct Options {
     pub player_name: Option<String>,
     /// Where the login screen remembers the last zone and name.
     pub login_file: Option<PathBuf>,
+    /// The settings file as it was read, before anything on the command line
+    /// was laid over it.
+    ///
+    /// The settings screen starts from this, so its Save writes back what the
+    /// file said plus what the player changed on the screen -- never what the
+    /// command line asked for this once. It started from the merged options
+    /// instead, and a test run's `--directory 127.0.0.1:4991` was saved into
+    /// the lead's own settings, twice over, leaving the next ordinary start
+    /// with a local directory and no zone list (`B108`).
+    pub saved: crate::config::Config,
 }
 
 /// Waiting for the zone: shows progress until the arena is ready.
@@ -1299,25 +1309,10 @@ impl App {
 }
 
 /// The settings as they stand now, for the settings screen.
+/// What the settings screen opens on: the settings file's own values, never the
+/// command line's (see [`Options::saved`]).
 fn current_config(o: &Options) -> crate::config::Config {
-    {
-        crate::config::Config {
-            scale: o.scale,
-            vsync: o.vsync,
-            fullscreen: o.fullscreen,
-            mute: o.mute,
-            volume: o.volume,
-            name: o.player_name.clone(),
-            bindings: o.bindings.clone(),
-            macros: o.macros.clone(),
-            palette: o.palette,
-            ui_scale: o.ui_scale,
-            pad: o.pad.clone(),
-            directories: o.directories.clone(),
-            security: o.security,
-            identity: o.identity,
-        }
-    }
+    o.saved.clone()
 }
 
 impl App {
@@ -1360,6 +1355,7 @@ impl App {
             return;
         };
         let cfg = ui.cfg.clone();
+        self.options.saved = cfg.clone();
         let path = self.options.settings_path.clone();
         ui.status = Some(match &path {
             Some(p) => match std::fs::write(p, cfg.to_text()) {
@@ -1845,6 +1841,53 @@ fn known_servers_path(o: &Options) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `B108`: a test run's `--directory 127.0.0.1:4991` reached the lead's own
+    /// settings file, twice, and the next ordinary start showed a local
+    /// directory and no zones. The command line is for this run; the settings
+    /// screen, and so its Save, starts from what the file said.
+    ///
+    /// This fails on the version before the fix, which built the screen's
+    /// starting values from the merged options.
+    #[test]
+    fn the_command_line_is_never_saved_into_the_settings_file() {
+        let dir = std::env::temp_dir().join(format!("oss-client-b108-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        let file = dir.join("settings.ini");
+        std::fs::write(
+            &file,
+            "[directory]
+servers = dir.example:4990
+[video]
+scale = 3
+",
+        )
+        .expect("written");
+        let args = [
+            "--config",
+            file.to_str().expect("a path"),
+            "--directory",
+            "127.0.0.1:4991",
+            "--scale",
+            "1",
+            "--mute",
+        ];
+        let o = crate::cli::options(args.iter().map(|s| s.to_string()))
+            .expect("parsed")
+            .expect("not --help");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // This run does what the command line asked.
+        assert!(o.directories.iter().any(|d| d == "127.0.0.1:4991"));
+        assert_eq!(o.scale, Some(1));
+        assert!(o.mute);
+        // What a Save would write is the file's own, untouched.
+        let saved = current_config(&o).to_text();
+        assert!(!saved.contains("127.0.0.1"), "{saved}");
+        assert!(saved.contains("servers = dir.example:4990"), "{saved}");
+        assert!(saved.contains("scale = 3"), "{saved}");
+        assert!(saved.contains("mute = false"), "{saved}");
+    }
 
     /// "The scale number doesn't seem to stick or even take effect" -- the
     /// second half of that was choosing 0, which resolved to nothing at all.
