@@ -476,10 +476,18 @@ impl Sandbox {
         self.fps.fps
     }
 
-    /// The measured round trip to the zone, online and not in a replay.
+    /// The round trip to the zone, online and not in a replay, once one has
+    /// been measured.
+    ///
+    /// Taken from the clock-sync exchange: the client asks the zone for its
+    /// time and times the answer, which is a real request and reply, to 10 ms.
+    /// Not from the connection's smoothed estimate, which starts at an assumed
+    /// 200 ms and moves an eighth of the way per acknowledged reliable packet,
+    /// so a few seconds in it read 279 ms against a zone on the same machine.
     pub(super) fn ping_ms(&self) -> Option<u64> {
         let net = self.net.as_ref().filter(|n| !n.is_replay())?;
-        Some(net.session.rtt_ms())
+        let ticks = net.session.connection().sync_rtt_ticks()?;
+        Some(u64::from(ticks) * 10)
     }
 
     /// Camera centre (game pixels) for the current frame.
@@ -2631,6 +2639,13 @@ impl Sandbox {
         if self.arena_list.is_some() {
             return;
         }
+        // Under the frame-rate line when that is up: its detailed form is long
+        // enough to reach the middle of the screen, where this line sits.
+        let hint_y = if self.fps_view == hud::FpsView::Off {
+            40.0
+        } else {
+            (hud::fps_line_y(self.statbox_corner.1) + 14.0).max(40.0)
+        };
         if self.spectating
             && let Some(ship) = self.followed()
         {
@@ -2644,13 +2659,13 @@ impl Sandbox {
                 line += &format!("  Engy:{}", ship.energy_points());
             }
             let x = ((c.view_w - line.len() as f32 * 8.0) / 2.0).floor();
-            c.text(r, x, 40.0, color::YELLOW, &line);
+            c.text(r, x, hint_y, color::YELLOW, &line);
         } else if self.spectating {
             let msg = "Spectating: arrows move, Ctrl follows the stat box selection";
             c.text(
                 r,
                 ((c.view_w - msg.len() as f32 * 8.0) / 2.0).floor(),
-                40.0,
+                hint_y,
                 color::YELLOW,
                 msg,
             );

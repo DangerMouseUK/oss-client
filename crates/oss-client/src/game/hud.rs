@@ -739,8 +739,8 @@ impl FpsView {
 /// The frame-rate line for `view`, or `None` when it is off.
 ///
 /// `ping_ms` is `None` offline and while no round trip has been measured, and
-/// is then left out rather than shown as a nought that looks like a fast
-/// connection. `present` is how finished frames reach the screen (vsync, or
+/// is then left out rather than shown as a guess. It is measured to 10 ms, so
+/// anything quicker is shown as under that rather than as nought. `present` is how finished frames reach the screen (vsync, or
 /// one of the modes that do not wait for it), which is what decides whether
 /// the frame rate is capped at the display's.
 fn fps_line(
@@ -752,8 +752,10 @@ fn fps_line(
     tick: u32,
 ) -> Option<String> {
     let mut line = format!("{fps:.0} fps");
-    if let Some(ms) = ping_ms.filter(|&ms| ms > 0) {
-        line += &format!("  ping {ms} ms");
+    match ping_ms {
+        Some(ms) if ms < 10 => line += "  ping <10 ms",
+        Some(ms) => line += &format!("  ping {ms} ms"),
+        None => {}
     }
     match view {
         FpsView::Off => None,
@@ -775,7 +777,7 @@ fn fps_line(
 /// against a local zone with three other players: "122 fps" came out as "bot2ps".
 /// Offline there is only ever one row, so the sandbox showed it perfectly, which
 /// is why reading the code twice did not find this.
-fn fps_line_y(statbox_bottom: f32) -> f32 {
+pub(super) fn fps_line_y(statbox_bottom: f32) -> f32 {
     /// Where it sits with no player list under it: the old place.
     const TOP: f32 = 30.0;
     /// Clear of the list's bottom border.
@@ -1069,9 +1071,10 @@ mod tests {
             fps_line(FpsView::Plain, 60.0, None, 2.0, "Fifo", 1).as_deref(),
             Some("60 fps")
         );
+        // A zone on the same machine answers inside the 10 ms it is measured in.
         assert_eq!(
             fps_line(FpsView::Plain, 60.0, Some(0), 2.0, "Fifo", 1).as_deref(),
-            Some("60 fps")
+            Some("60 fps  ping <10 ms")
         );
         assert_eq!(fps_line(FpsView::Off, 60.0, None, 2.0, "Fifo", 1), None);
         // Three presses go round to off.
