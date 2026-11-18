@@ -5,7 +5,7 @@
 //! desktop's keyring over its message bus, which can be slow, or can put a
 //! prompt up and wait for the player. A screen that waited with it would freeze.
 //!
-//! What happens, and when (`D34`, and the research behind it):
+//! What happens, and when:
 //!
 //! * **At start**, [`Vault::probe`] asks whether this machine has a store. Until
 //!   it answers, and for good if it says no, the form has no Remember line.
@@ -55,7 +55,7 @@ impl Vault {
                 // A store that opens is offered even if it turns out to be
                 // locked when a password is read or saved: the store asks the
                 // player then, and saying no is their choice, not a missing
-                // feature (`D11b`). One that will not even open is not offered.
+                // feature. One that will not even open is not offered.
                 let store: Option<Arc<dyn PasswordStore>> = match OsStore::open() {
                     Ok(Some(s)) => Some(Arc::new(s)),
                     Ok(None) => None,

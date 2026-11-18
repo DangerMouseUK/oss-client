@@ -108,7 +108,7 @@ pub struct Login {
     /// Shown under the form (a failed connection, a missing field).
     pub error: Option<String>,
     /// "Remember password" is ticked. Unticked to begin with: remembering a
-    /// password is the player's choice (`D34`).
+    /// password is the player's choice.
     pub remember: bool,
     /// This machine has a password store, so the Remember line is on the form.
     vault: bool,

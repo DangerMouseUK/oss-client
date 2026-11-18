@@ -234,7 +234,7 @@ pub struct Options {
     /// command line asked for this once. It started from the merged options
     /// instead, and a test run's `--directory 127.0.0.1:4991` was saved into
     /// the lead's own settings, twice over, leaving the next ordinary start
-    /// with a local directory and no zone list (`B108`).
+    /// with a local directory and no zone list.
     pub saved: crate::config::Config,
 }
 
@@ -1858,7 +1858,7 @@ fn known_servers_path(o: &Options) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// `B108`: a test run's `--directory 127.0.0.1:4991` reached the lead's own
+    /// A test run's `--directory 127.0.0.1:4991` reached the lead's own
     /// settings file, twice, and the next ordinary start showed a local
     /// directory and no zones. The command line is for this run; the settings
     /// screen, and so its Save, starts from what the file said.
