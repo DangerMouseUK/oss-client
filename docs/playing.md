@@ -113,14 +113,17 @@ Ctrl+F1 = 'help at base
 ## The zone browser
 
 F3 on the login screen lists zones from the directory servers, with population and ping, and
-the selected zone's own description underneath. **Three are configured by default** — the
-game's own — and the client asks them for the zone list when the login screen opens, as well
-as each time you press F3.
+the selected zone's own description underneath. **Four are configured by default** — the
+game's own: `sscentral.trenchwars.org`, `sscentral.sscuservers.net`, `directory.poid.be` and
+`subspace.gamespec.org`. The client asks all four at once when the login screen opens, and
+again each time you press F3, and merges the zones they list. They do not all list the same
+zones, and some come and go, so one that does not answer is noted under the list and the
+others still fill it.
 
 Set your own with `[directory] servers = host:port` in the settings file, or
 `--directory host:port` on the command line (repeatable). **The flag adds to the file's list
 rather than replacing it**, so pointing the client at a local test directory does not stop the
-built-in ones being asked as well.
+built-in ones being asked as well, and it is never written into the settings file.
 
 **`[directory] servers = none` turns the zone browser off** and the client then contacts no
 directory at all. An empty value brings the built-in list back.

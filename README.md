@@ -72,9 +72,10 @@ cargo run --release -p oss-client -- --sandbox path/to/map.lvl
 ships with.*
 
 F3 on the login screen lists zones from the directory servers, with population, ping and the
-zone's own description. **Three are configured by default** — the game's own, the ones zones
-register themselves with — and the client asks them for the zone list when the login screen
-opens, then again each time you press F3. **`[directory] servers = none` in the settings file
+zone's own description. **Four are configured by default** — the game's own, the ones zones
+register themselves with — and the client asks all of them for the zone list at once when the
+login screen opens, then again each time you press F3, and merges what they say: directories
+do not all hold the same list, and one that is down costs nothing. **`[directory] servers = none` in the settings file
 turns the zone browser off**, and the client then contacts no directory at all. Name your own
 with `[directory] servers = host:port`, or `--directory host:port`, which **adds to** the list
 rather than replacing it.

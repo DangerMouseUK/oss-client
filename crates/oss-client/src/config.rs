@@ -27,28 +27,38 @@ use crate::game::input::{Action, Binding, Bindings, Mods, PadBindings, PadButton
 
 pub const FILE_NAME: &str = "oss-client.ini";
 
-/// The directory servers a fresh install asks for zones, the one proven to
-/// answer first.
+/// The directory servers a fresh install asks for zones.
 ///
-/// These are the game's own, not ours to choose: the same three names, in the
-/// same role, that ASSS ships in its `conf/global.conf` for a zone to register
-/// with. That is what makes them the right list -- they are where the zones
-/// actually list themselves, so they are where a client has to ask.
+/// Measured on 2026-11-18, four rounds of queries through this client's own
+/// directory code, and checked against the community's live status page and
+/// the directories a current open-source zone server tells zones to register
+/// with -- the same four in all three:
 ///
-/// Measured on 2026-11-17 through this client's own directory code:
-/// `sscentral.sscuservers.net` answered with 21 zones;
-/// `ssdir.playsubspace.com` resolved but did not answer; `zones.sscentral.com`
-/// did not resolve at all, its whole domain returning SERVFAIL, having
-/// answered on 2026-11-12. The two that are down are kept rather than dropped,
-/// because a directory list exists to be redundant and these are known-good
-/// addresses having a bad week, not guesses. An unreachable one costs a first
-/// run nothing: it is dropped with a note and the rest are merged.
+/// - `sscentral.trenchwars.org`: answered every time, with all 22 zones. One of
+///   the two directories real Continuum has built in. First, for the full list.
+/// - `sscentral.sscuservers.net`: answered every time, the fastest of the
+///   reliable ones, and the other one built into Continuum -- but it listed 17
+///   zones, missing five, among them the busiest zone in the game that day.
+/// - `directory.poid.be`: all 22 and the fastest of all, but on and off: it
+///   answered twice, then turned everyone away.
+/// - `subspace.gamespec.org`: answered every time with 6 zones the others also
+///   list. Kept as a fourth independent operator, for the day the first two
+///   are both down.
+///
+/// **Directories do not all hold the same list**, which is why the client asks
+/// every one of them at once and merges what comes back, rather than settling
+/// on whichever answered. One that is down costs nothing but a note.
+///
+/// `ssdir.playsubspace.com` and `zones.sscentral.com`, shipped before, are gone:
+/// neither answered a single query. The second's domain does not resolve, and
+/// looking it up takes several seconds to fail.
 ///
 /// Port 4990 is the client-facing one; zones register on 4991.
-pub const DEFAULT_DIRECTORIES: [&str; 3] = [
+pub const DEFAULT_DIRECTORIES: [&str; 4] = [
+    "sscentral.trenchwars.org:4990",
     "sscentral.sscuservers.net:4990",
-    "ssdir.playsubspace.com:4990",
-    "zones.sscentral.com:4990",
+    "directory.poid.be:4990",
+    "subspace.gamespec.org:4990",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -599,10 +609,16 @@ mod tests {
     fn a_fresh_install_has_directory_servers() {
         let c = Config::default();
         assert_eq!(c.directories, DEFAULT_DIRECTORIES, "out of the box");
-        assert!(
-            c.to_text().contains("sscentral.sscuservers.net:4990"),
-            "and the file written on the first run says so"
-        );
+        for dir in DEFAULT_DIRECTORIES {
+            assert!(
+                c.to_text().contains(dir),
+                "and the file written on the first run names {dir}"
+            );
+        }
+        // The two that answered nothing on 2026-11-18 are not shipped.
+        for gone in ["ssdir.playsubspace.com", "zones.sscentral.com"] {
+            assert!(!c.to_text().contains(gone), "{gone} is still listed");
+        }
     }
 
     /// Every settings file written before this key had defaults carries
