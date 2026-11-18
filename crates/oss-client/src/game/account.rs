@@ -12,8 +12,16 @@
 //! because a mistyped one is invisible -- the account would be made with it and
 //! the player let in, and nothing would look wrong until the next visit.
 //!
-//! The box works fully from the keyboard and fully from the pointer: every
-//! line that can be typed in can be clicked, and each key on its foot line is
+//! A zone whose billing server wants a registration form says so in its login
+//! reply ([`oss_session::SessionEvent::RegistrationWanted`]). That form, from
+//! 1998, has room for a real name, an e-mail address, a postal address, age,
+//! sex, the Windows registered owner and thirteen lines describing the
+//! computer. The box asks for the first two only -- what zones that ask are
+//! seen to want is the e-mail -- and says plainly that nothing else is sent.
+//! It can be skipped, and the zone is entered either way.
+//!
+//! Both boxes work fully from the keyboard and fully from the pointer: every
+//! line that can be typed in can be clicked, and each key on the foot line is
 //! a button as well, as the start-up screen's are.
 
 use std::fmt;
@@ -32,6 +40,17 @@ pub enum Answer {
     Create,
     /// Do not create it; go back.
     Cancel,
+    /// Send the registration form with these.
+    Send { real_name: String, email: String },
+    /// Do not send the form; enter the zone anyway.
+    Skip,
+}
+
+/// Which question the box is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    NewAccount,
+    Registration,
 }
 
 /// Something in the box a pointer can be over.
@@ -58,12 +77,16 @@ struct Entry {
 
 /// The longest password a login carries: a 32-byte field with its NUL.
 const PASSWORD_MAX: usize = 31;
+/// The registration form's real name and e-mail fields, less their NULs.
+const REAL_NAME_MAX: usize = 31;
+const EMAIL_MAX: usize = 63;
 
 /// The box, its fields and where the pointer can find them.
 ///
 /// `Debug` is written out rather than derived so a password typed into it
 /// cannot be printed.
 pub struct Prompt {
+    kind: Kind,
     title: &'static str,
     heading: &'static str,
     /// What the box says, one line each, before the fields.
@@ -106,6 +129,7 @@ impl Prompt {
         lines.push(String::new());
         lines.push("Type the password again, to be sure of it.".to_string());
         Self {
+            kind: Kind::NewAccount,
             title: "-= New Account =-",
             heading: "Unknown name",
             lines,
@@ -124,8 +148,41 @@ impl Prompt {
         }
     }
 
+    /// The zone's registration form: a real name and an e-mail address.
+    pub fn registration() -> Self {
+        let field = |label, max| Entry {
+            label,
+            value: String::new(),
+            secret: false,
+            max,
+        };
+        Self {
+            kind: Kind::Registration,
+            title: "-= Registration =-",
+            heading: "This zone asks you to register",
+            lines: vec![
+                "This zone's billing server asks new players".to_string(),
+                "for a real name and an e-mail address.".to_string(),
+                String::new(),
+                "Only these two are sent, nothing about this".to_string(),
+                "computer. Esc enters the zone without them.".to_string(),
+            ],
+            shown: Vec::new(),
+            fields: vec![
+                field("Real name", REAL_NAME_MAX),
+                field("E-mail", EMAIL_MAX),
+            ],
+            focus: 0,
+            yes: "Enter = Send",
+            no: "Esc = Skip",
+            error: None,
+            spots: Vec::new(),
+        }
+    }
+
     /// Applies one frame of keystrokes. `password` is the one the login was
-    /// sent with, which the second typing has to match.
+    /// sent with, which a new account's second typing has to match (the
+    /// registration form ignores it).
     ///
     /// Typing goes into the focused line, Backspace (held or not) takes from it,
     /// Tab and the arrows move between lines, Enter answers yes and Esc no.
@@ -158,7 +215,7 @@ impl Prompt {
                         return Some(answer);
                     }
                 }
-                Some(KeyCode::Escape) => return Some(Answer::Cancel),
+                Some(KeyCode::Escape) => return Some(self.no()),
                 _ => {}
             }
         }
@@ -173,12 +230,22 @@ impl Prompt {
                 None
             }
             Spot::Yes => self.yes(password),
-            Spot::No => Some(Answer::Cancel),
+            Spot::No => Some(self.no()),
+        }
+    }
+
+    fn no(&self) -> Answer {
+        match self.kind {
+            Kind::NewAccount => Answer::Cancel,
+            Kind::Registration => Answer::Skip,
         }
     }
 
     /// The yes, if the box's fields allow it; otherwise says why not.
     fn yes(&mut self, password: &str) -> Option<Answer> {
+        if self.kind == Kind::Registration {
+            return self.send();
+        }
         let again = self.fields.first().map_or("", |e| e.value.as_str());
         if again != password {
             // Cleared, so the second try starts from nothing rather than from
@@ -193,6 +260,32 @@ impl Prompt {
         }
         self.error = None;
         Some(Answer::Create)
+    }
+
+    /// The registration form's yes: an e-mail address is the one thing a zone
+    /// that asks is after, so it has to be there and look like one. The real
+    /// name may be left empty.
+    fn send(&mut self) -> Option<Answer> {
+        let value = |i: usize| {
+            self.fields
+                .get(i)
+                .map_or_else(String::new, |e| e.value.trim().to_string())
+        };
+        let (real_name, email) = (value(0), value(1));
+        let why = if email.is_empty() {
+            Some("Enter an e-mail address, or press Esc to skip the form.")
+        } else if !looks_like_email(&email) {
+            Some("That does not look like an e-mail address.")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.focus = 1;
+            self.error = Some(why.to_string());
+            return None;
+        }
+        self.error = None;
+        Some(Answer::Send { real_name, email })
     }
 
     fn spot_at(&self, x: f32, y: f32) -> Option<Spot> {
@@ -214,7 +307,14 @@ impl Prompt {
                     .iter()
                     .map(|(_, v)| LABEL_COLUMNS + v.chars().count()),
             )
-            .chain(self.fields.iter().map(|e| LABEL_COLUMNS + e.max + 1))
+            // A field as wide as it needs to be shown, not as long as it may get:
+            // a long value scrolls, and sixty-three columns of e-mail made a box
+            // wider than the screen.
+            .chain(
+                self.fields
+                    .iter()
+                    .map(|e| LABEL_COLUMNS + e.max.min(FIELD_COLUMNS) + 1),
+            )
             .chain([self.title.len(), foot, 40])
             .max()
             .unwrap_or(40)
@@ -233,8 +333,8 @@ impl Prompt {
             .min(((c.view_w - 16.0) / 8.0).max(20.0) as usize);
         let w = cols as f32 * 8.0;
         let rows = self.lines.len() + self.shown.len() + self.fields.len();
-        // Title, rule, heading, the rows, a gap, the error line, a rule, the keys.
-        let h = 20.0 + 14.0 + rows as f32 * 14.0 + 8.0 + 14.0 + 8.0 + 16.0;
+        // Title, rule, heading, the rows, a gap, two error lines, a rule, the keys.
+        let h = 20.0 + 14.0 + rows as f32 * 14.0 + 8.0 + 2.0 * ERROR_PITCH + 8.0 + 16.0;
         let x = ((c.view_w - w) / 2.0).floor();
         let top = ((c.view_h - h) / 2.0).floor().max(4.0);
         c.panel(r, x, top, w, h);
@@ -278,11 +378,18 @@ impl Prompt {
             y += 14.0;
         }
         y += 8.0;
+        // Wrapped onto two lines rather than cut at the edge, which lost the
+        // half of the sentence that says what to do.
         if let Some(err) = &self.error {
-            let shown: String = err.chars().take(width).collect();
-            c.text(r, x + 4.0, y, color::RED, &shown);
+            for (i, line) in super::chat::wrap(err, width, true)
+                .iter()
+                .take(2)
+                .enumerate()
+            {
+                c.text(r, x + 4.0, y + i as f32 * ERROR_PITCH, color::RED, line);
+            }
         }
-        y += 14.0 + 4.0;
+        y += 2.0 * ERROR_PITCH + 4.0;
         c.separator(r, x, y, w);
 
         // The foot line: both keys are buttons, as on the start-up screen.
@@ -306,6 +413,29 @@ impl Prompt {
 /// Where the values start, in characters from the box's left edge: the same
 /// ten the start-up screen's profile lines use.
 const LABEL_COLUMNS: usize = 10;
+
+/// The most columns a field asks the box for; longer values scroll.
+const FIELD_COLUMNS: usize = 32;
+
+/// The spacing of the error lines, which the start-up screen's foot uses too.
+const ERROR_PITCH: f32 = 12.0;
+
+/// Something, an `@`, something with a dot in it, and no spaces: enough to
+/// catch a name typed into the wrong line, without claiming to validate an
+/// address, which only sending to it can do.
+fn looks_like_email(s: &str) -> bool {
+    match s.split_once('@') {
+        Some((user, host)) => {
+            !user.is_empty()
+                && !host.contains('@')
+                && host.contains('.')
+                && !host.starts_with('.')
+                && !host.ends_with('.')
+                && !s.chars().any(char::is_whitespace)
+        }
+        None => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -393,6 +523,85 @@ mod tests {
         assert_eq!(p.click(10.0, 25.0, "pw"), Some(Answer::Create));
         assert_eq!(p.click(60.0, 25.0, "pw"), Some(Answer::Cancel));
         assert_eq!(p.click(200.0, 200.0, "pw"), None, "outside everything");
+    }
+
+    /// The form takes a real name and an e-mail, Tab moves between them, and
+    /// Enter sends both -- trimmed, so a stray space is not sent to the zone.
+    #[test]
+    fn the_form_sends_a_real_name_and_an_email() {
+        let mut p = Prompt::registration();
+        p.input(&typed("Ada Lovelace "), false, "");
+        p.input(&keys(&[KeyCode::Tab]), false, "");
+        p.input(&typed("ada@example.org"), false, "");
+        assert_eq!(
+            p.input(&keys(&[KeyCode::Enter]), false, ""),
+            Some(Answer::Send {
+                real_name: "Ada Lovelace".into(),
+                email: "ada@example.org".into(),
+            })
+        );
+    }
+
+    /// No e-mail, or something that is plainly not one, is refused with the
+    /// reason and the cursor on that line; Esc skips the form whatever is in it.
+    #[test]
+    fn the_form_wants_an_email_or_a_skip() {
+        let mut p = Prompt::registration();
+        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false, ""), None);
+        assert!(p.error.as_deref().is_some_and(|e| e.contains("Esc")));
+        assert_eq!(p.focus, 1);
+        p.input(&typed("Ada Lovelace"), false, "");
+        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false, ""), None);
+        assert!(
+            p.error
+                .as_deref()
+                .is_some_and(|e| e.contains("does not look"))
+        );
+        assert_eq!(
+            p.input(&keys(&[KeyCode::Escape]), false, ""),
+            Some(Answer::Skip)
+        );
+    }
+
+    /// The fields stop where the form's do on the wire, so nothing typed is cut
+    /// off unseen.
+    #[test]
+    fn the_form_fields_stop_at_the_wire_lengths() {
+        let mut p = Prompt::registration();
+        p.input(&typed(&"x".repeat(80)), false, "");
+        assert_eq!(p.fields[0].value.len(), REAL_NAME_MAX);
+        p.input(&keys(&[KeyCode::ArrowDown]), false, "");
+        p.input(&typed(&"y".repeat(80)), false, "");
+        assert_eq!(p.fields[1].value.len(), EMAIL_MAX);
+    }
+
+    /// Clicks work on the form as on the offer: the no is a skip there.
+    #[test]
+    fn the_pointer_can_send_or_skip_the_form() {
+        let mut p = Prompt::registration();
+        p.spots = vec![
+            (Rect::new(0.0, 0.0, 100.0, 13.0), Spot::Field(0)),
+            (Rect::new(0.0, 14.0, 100.0, 13.0), Spot::Field(1)),
+            (Rect::new(0.0, 30.0, 40.0, 13.0), Spot::Yes),
+            (Rect::new(50.0, 30.0, 40.0, 13.0), Spot::No),
+        ];
+        assert_eq!(p.click(10.0, 20.0, ""), None);
+        assert_eq!(p.focus, 1, "clicking a line focuses it");
+        p.input(&typed("a@b.co"), false, "");
+        assert!(matches!(p.click(10.0, 35.0, ""), Some(Answer::Send { .. })));
+        assert_eq!(p.click(60.0, 35.0, ""), Some(Answer::Skip));
+    }
+
+    #[test]
+    fn what_counts_as_an_email() {
+        for good in ["a@b.co", "first.last@mail.example.org", "x+y@z.io"] {
+            assert!(looks_like_email(good), "{good}");
+        }
+        for bad in [
+            "", "ada", "@b.co", "a@", "a@b", "a@.co", "a@b.", "a b@c.d", "a@b@c.d",
+        ] {
+            assert!(!looks_like_email(bad), "{bad}");
+        }
     }
 
     /// A password typed into the box is never printed by a log line.

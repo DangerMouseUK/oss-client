@@ -172,6 +172,12 @@ impl Bot {
                     );
                     self.session.disconnect();
                 }
+                // A bot fills in no forms: sending none is legal, and the zone
+                // lets it in either way.
+                SessionEvent::RegistrationWanted => {
+                    self.log("the zone asks for a registration form; skipping it");
+                    self.session.skip_registration();
+                }
                 SessionEvent::LoggedIn => self.log("logged in"),
                 SessionEvent::EnteredArena { pid } => {
                     self.log(format_args!("entering arena as pid {pid}"))

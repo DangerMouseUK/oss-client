@@ -66,6 +66,10 @@ struct Zone {
     logins: Vec<u8>,
     /// Arena requests received.
     go_arenas: usize,
+    /// The login reply's demographics byte: non-zero asks for the form.
+    demo_data: u8,
+    /// The registration form, when one arrived, and how long it was.
+    registration: Option<(oss_proto::c2s::Registration, usize)>,
     /// The login exactly as it arrived: length, type byte and client version. ASSS
     /// checks the length against the client type the encryption chose, so these are
     /// what decides whether a zone accepts us at all.
@@ -122,11 +126,13 @@ impl Zone {
                         code,
                         server_version: 134,
                         news_checksum: checksum::crc32(NEWS),
+                        demo_data: self.demo_data,
                         ..Default::default()
                     }
                     .encode(o)
                 });
             }
+            C2SPacket::Registration(r) => self.registration = Some((*r, pkt.len())),
             C2SPacket::GoArena(go) => {
                 self.go_arenas += 1;
                 assert_eq!(go.optional_graphics, Some(1), "asks for LVZ files");
@@ -417,6 +423,97 @@ fn a_second_unknown_name_answer_is_a_refusal_not_a_loop() {
     assert_eq!(code, 0x01);
     assert!(!message.contains("--"), "no command line in it: {message}");
     assert_eq!(zone.logins, [0, 1], "asked once, and no more");
+}
+
+/// A zone that wants the registration form says so in the login reply. The
+/// session reports it and holds the arena request until it is answered; the
+/// form that goes out is the full 766 bytes with the player's real name and
+/// e-mail, and nothing about the computer.
+#[test]
+fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
+    let cfg = SessionConfig {
+        name: "newbie".into(),
+        want_lvz: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone {
+        demo_data: 1,
+        ..Default::default()
+    };
+    let mut wanted = false;
+    for _ in 0..300 {
+        wanted |= step(&mut client, &mut server, &mut zone, &mut now)
+            .iter()
+            .any(|e| matches!(e, SessionEvent::RegistrationWanted));
+        if wanted {
+            break;
+        }
+    }
+    assert!(wanted);
+    assert!(client.registration_wanted());
+    for _ in 0..100 {
+        step(&mut client, &mut server, &mut zone, &mut now);
+    }
+    assert_eq!(zone.go_arenas, 0, "the arena waits for the form");
+
+    assert!(client.send_registration("  Ada Lovelace ", "ada@example.org"));
+    assert!(!client.send_registration("again", "x@y.z"), "one form only");
+    for _ in 0..300 {
+        step(&mut client, &mut server, &mut zone, &mut now);
+        if zone.go_arenas > 0 {
+            break;
+        }
+    }
+    let (form, len) = zone.registration.expect("the form arrived");
+    assert_eq!(len, oss_proto::c2s::Registration::LEN);
+    assert_eq!(form.real_name.to_str(), Some("Ada Lovelace"));
+    assert_eq!(form.email.to_str(), Some("ada@example.org"));
+    assert_eq!(form.from_home, 1);
+    assert!(form.win_owner.to_str().is_none_or(str::is_empty));
+    assert!(
+        form.hardware
+            .iter()
+            .all(|h| h.to_str().is_none_or(str::is_empty))
+    );
+    assert_eq!(zone.go_arenas, 1, "then the arena");
+}
+
+/// Skipping sends no form and still enters; a zone that does not ask is never
+/// sent one, and the session never stops to ask.
+#[test]
+fn skipping_the_form_or_not_being_asked_sends_none() {
+    for (demo_data, skip) in [(1, true), (0, false)] {
+        let mut now = 1_000u64;
+        let mut server = vie_server();
+        let cfg = SessionConfig {
+            want_lvz: true,
+            ..Default::default()
+        };
+        let mut client = Session::new(cfg, now, 0xBEEF);
+        let mut zone = Zone {
+            demo_data,
+            ..Default::default()
+        };
+        let mut asked = false;
+        for _ in 0..400 {
+            let now_asked = step(&mut client, &mut server, &mut zone, &mut now)
+                .iter()
+                .any(|e| matches!(e, SessionEvent::RegistrationWanted));
+            asked |= now_asked;
+            if now_asked && skip {
+                assert!(client.skip_registration());
+            }
+            if zone.go_arenas > 0 {
+                break;
+            }
+        }
+        assert_eq!(asked, demo_data != 0);
+        assert!(zone.registration.is_none(), "no form sent");
+        assert_eq!(zone.go_arenas, 1);
+    }
 }
 
 /// A stand-in for the private Continuum side: it answers in the Continuum *shape*

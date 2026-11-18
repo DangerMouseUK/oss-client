@@ -1,25 +1,31 @@
 //! Runs the minimal relay zone for local client/bot testing:
 //!
 //! ```text
-//! cargo run -p oss-session --example test_zone -- [--bind 127.0.0.1:5000] <map.lvl>
+//! cargo run -p oss-session --example test_zone -- [--bind 127.0.0.1:5000] [--ask-registration] <map.lvl>
 //! ```
 //!
 //! Serves the map with stock settings and relays positions and chat. Not a real
 //! server: use `oss-server` for anything beyond smoke tests.
+//!
+//! `--ask-registration` asks every player for the registration form, as a zone
+//! whose billing server wants one does, and logs the real name and e-mail of
+//! each form that arrives.
 
 fn main() {
     env_logger_init();
     let mut bind = "127.0.0.1:5000".to_string();
     let mut map = None;
+    let mut ask_registration = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bind" => bind = args.next().unwrap_or(bind),
+            "--ask-registration" => ask_registration = true,
             _ => map = Some(std::path::PathBuf::from(a)),
         }
     }
     let Some(map) = map else {
-        eprintln!("usage: test_zone [--bind host:port] <map.lvl>");
+        eprintln!("usage: test_zone [--bind host:port] [--ask-registration] <map.lvl>");
         std::process::exit(2);
     };
     let data = match std::fs::read(&map) {
@@ -42,6 +48,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    zone.ask_for_registration(ask_registration);
     eprintln!(
         "test zone on {} serving {name}",
         zone.local_addr().map(|a| a.to_string()).unwrap_or(bind)

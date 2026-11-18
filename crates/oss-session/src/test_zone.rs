@@ -45,6 +45,11 @@ pub struct TestZone {
     start: Instant,
     seed: u32,
     buf: Vec<u8>,
+    /// Ask every player for the registration form (the login reply's
+    /// demographics byte), as a zone whose billing server wants one does.
+    ask_registration: bool,
+    /// The forms received: (name, real name, e-mail).
+    registrations: Vec<(String, String, String)>,
 }
 
 impl TestZone {
@@ -79,7 +84,21 @@ impl TestZone {
             start: Instant::now(),
             seed: 0x5EED_0001,
             buf: vec![0; 2048],
+            ask_registration: false,
+            registrations: Vec::new(),
         })
+    }
+
+    /// Asks everyone who logs in from now on for the registration form, as a
+    /// zone whose billing server wants one does. `oss-biller` never asks, so this
+    /// is the local way to see a client answer it.
+    pub fn ask_for_registration(&mut self, ask: bool) {
+        self.ask_registration = ask;
+    }
+
+    /// The registration forms received, in order: (name, real name, e-mail).
+    pub fn registrations(&self) -> &[(String, String, String)] {
+        &self.registrations
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -195,10 +214,26 @@ impl TestZone {
                     &LoginResponse {
                         code: 0,
                         server_version: 134,
+                        demo_data: u8::from(self.ask_registration),
                         ..Default::default()
                     },
                     true,
                 );
+            }
+            C2SPacket::Registration(r) => {
+                let name = self
+                    .players
+                    .get(&from)
+                    .map_or_else(String::new, |p| p.name.clone());
+                let text = |b: &[u8]| {
+                    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+                    String::from_utf8_lossy(&b[..end]).into_owned()
+                };
+                let (real, email) = (text(r.real_name.as_bytes()), text(r.email.as_bytes()));
+                log::info!(
+                    "test zone: registration form from {name}: real name {real:?}, e-mail {email:?}"
+                );
+                self.registrations.push((name, real, email));
             }
             C2SPacket::GoArena(go) => self.enter(from, &go),
             C2SPacket::MapRequest(_) => {

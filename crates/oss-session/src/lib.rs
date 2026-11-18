@@ -25,7 +25,9 @@ use oss_net::{
     CipherKind, Config, Connection, DisconnectReason, Event as NetEvent, Handshake,
     VieClientHandshake,
 };
-use oss_proto::c2s::{self, GoArena, Login, MapRequest, SecurityResponse, SetFreq, SetShip};
+use oss_proto::c2s::{
+    self, GoArena, Login, MapRequest, Registration, SecurityResponse, SetFreq, SetShip,
+};
 use oss_proto::s2c::ChatBody;
 use oss_proto::s2c::{self, MapFilename, login_code};
 use oss_proto::wire::Redacted;
@@ -241,6 +243,10 @@ pub enum SessionEvent {
         /// The zone's own words, when it sent some (S2C `0x33`).
         zone_text: Option<String>,
     },
+    /// The zone let the player in and asks for its registration form (the login
+    /// reply's demographics byte). The session waits, short of the arena, until
+    /// [`Session::send_registration`] or [`Session::skip_registration`].
+    RegistrationWanted,
     /// The zone refused the login.
     LoginFailed {
         code: u8,
@@ -507,6 +513,8 @@ pub struct Session {
     new_user_sent: bool,
     /// [`SessionEvent::NewUserRequired`] is waiting for an answer.
     awaiting_new_user: bool,
+    /// [`SessionEvent::RegistrationWanted`] is waiting for an answer.
+    awaiting_registration: bool,
 }
 
 impl Session {
@@ -570,6 +578,7 @@ impl Session {
             last_data_ms: now_ms,
             new_user_sent: false,
             awaiting_new_user: false,
+            awaiting_registration: false,
         }
     }
 
@@ -750,6 +759,7 @@ impl Session {
 
     pub fn disconnect(&mut self) {
         self.awaiting_new_user = false;
+        self.awaiting_registration = false;
         self.conn.disconnect();
     }
 
@@ -774,6 +784,48 @@ impl Session {
     /// Whether [`SessionEvent::NewUserRequired`] is waiting for an answer.
     pub fn new_user_offered(&self) -> bool {
         self.awaiting_new_user
+    }
+
+    /// Whether [`SessionEvent::RegistrationWanted`] is waiting for an answer.
+    pub fn registration_wanted(&self) -> bool {
+        self.awaiting_registration
+    }
+
+    /// Answers [`SessionEvent::RegistrationWanted`] with the form (C2S `0x17`),
+    /// then goes on into the arena. Returns `false`, and sends nothing, when the
+    /// zone has not asked or the form has already gone.
+    ///
+    /// Only the real name and the e-mail come from the player. The rest of the
+    /// 1998 form is [`Registration::default`] -- empty city and state, age 0, no
+    /// processor -- with "connecting from home" set, as nullspace's version of
+    /// the form sets it. The machine fields (the Windows registered owner and
+    /// organisation, and thirteen hardware strings) go empty: nothing about the
+    /// computer leaves it.
+    pub fn send_registration(&mut self, real_name: &str, email: &str) -> bool {
+        if !std::mem::take(&mut self.awaiting_registration) {
+            return false;
+        }
+        let form = Registration {
+            real_name: FixedStr::new(real_name.trim().as_bytes()),
+            email: FixedStr::new(email.trim().as_bytes()),
+            from_home: 1,
+            ..Default::default()
+        };
+        self.send(&form, true);
+        self.go_arena();
+        true
+    }
+
+    /// Declines [`SessionEvent::RegistrationWanted`]: sends nothing and goes on
+    /// into the arena. Legal: the form is data the zone forwards if it comes,
+    /// and ASSS and Subspace Server .NET both treat its absence as nothing
+    /// happening. Returns `false` when the zone has not asked.
+    pub fn skip_registration(&mut self) -> bool {
+        if !std::mem::take(&mut self.awaiting_registration) {
+            return false;
+        }
+        self.go_arena();
+        true
     }
 
     fn send(&mut self, packet: &impl Packet, reliable: bool) {
@@ -942,6 +994,7 @@ impl Session {
                     return;
                 }
                 if login_succeeded(r.code) {
+                    let form = r.demo_data != 0;
                     self.events.push_back(SessionEvent::LoggedIn);
                     let notice = match r.code {
                         login_code::NO_SCORES => Some("Scores are not available in this zone."),
@@ -959,7 +1012,14 @@ impl Session {
                             sound: 0,
                         });
                     }
-                    self.go_arena();
+                    // The form is answered on the connecting screen, so the
+                    // arena waits for it; a recording has nobody to ask.
+                    if form && !self.playback {
+                        self.awaiting_registration = true;
+                        self.events.push_back(SessionEvent::RegistrationWanted);
+                    } else {
+                        self.go_arena();
+                    }
                 } else {
                     self.events.push_back(SessionEvent::LoginFailed {
                         code: r.code,

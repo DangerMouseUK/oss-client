@@ -117,6 +117,9 @@ pub struct Online {
     /// than in [`Online::error`], which would take the player back to the
     /// login form and the connection with it.
     pub new_account: Option<(String, Option<String>)>,
+    /// The zone let us in and asks for its registration form. The arena waits
+    /// for [`Online::send_registration`] or [`Online::skip_registration`].
+    pub registration: bool,
     /// Team requested on the command line.
     pub freq: Option<i16>,
     /// Player to follow (`--follow`), until found.
@@ -243,6 +246,7 @@ impl Online {
             status: format!("Connecting to {}...", opts.server),
             error: None,
             new_account: None,
+            registration: false,
             freq: opts.freq,
             follow: opts.follow.clone(),
             attach: opts.attach.clone(),
@@ -281,6 +285,7 @@ impl Online {
             ),
             error: None,
             new_account: None,
+            registration: false,
             freq: None,
             follow: recorder,
             attach: None,
@@ -376,6 +381,11 @@ impl Online {
                     );
                     self.status = format!("No account named '{name}' on this zone.");
                     self.new_account = Some((name.clone(), zone_text.clone()));
+                }
+                SessionEvent::RegistrationWanted => {
+                    log::info!("{} asks for the registration form", self.server);
+                    self.status = "The zone asks you to register.".into();
+                    self.registration = true;
                 }
                 SessionEvent::LoginFailed {
                     code,
@@ -537,6 +547,27 @@ impl Online {
     pub fn create_account(&mut self) {
         if self.new_account.take().is_some() && self.session.create_account() {
             self.status = "Creating the account...".into();
+            self.flush();
+        }
+    }
+
+    /// Sends the zone's registration form ([`Online::registration`]) and goes on
+    /// into the arena.
+    pub fn send_registration(&mut self, real_name: &str, email: &str) {
+        if std::mem::take(&mut self.registration)
+            && self.session.send_registration(real_name, email)
+        {
+            log::info!("sent the registration form to {}", self.server);
+            self.status = "Entering arena...".into();
+            self.flush();
+        }
+    }
+
+    /// Goes on into the arena without sending the registration form.
+    pub fn skip_registration(&mut self) {
+        if std::mem::take(&mut self.registration) && self.session.skip_registration() {
+            log::info!("skipped {}'s registration form", self.server);
+            self.status = "Entering arena...".into();
             self.flush();
         }
     }

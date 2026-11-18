@@ -1064,6 +1064,11 @@ impl App {
             {
                 conn.prompt = Some(Prompt::new_account(name, said.as_deref()));
             }
+            // The zone let us in and asks for its registration form: the same
+            // box, and the arena waits behind it.
+            if conn.prompt.is_none() && conn.net.registration {
+                conn.prompt = Some(Prompt::registration());
+            }
             let strokes = self.input.take_strokes();
             self.input.take_edges();
             let clicked = std::mem::take(&mut self.clicked);
@@ -1084,6 +1089,14 @@ impl App {
                         conn.net.create_account();
                     }
                     Some(Answer::Cancel) => give_up = Some("No account was created.".to_string()),
+                    Some(Answer::Send { real_name, email }) => {
+                        conn.prompt = None;
+                        conn.net.send_registration(&real_name, &email);
+                    }
+                    Some(Answer::Skip) => {
+                        conn.prompt = None;
+                        conn.net.skip_registration();
+                    }
                     None => {}
                 }
             } else if strokes
