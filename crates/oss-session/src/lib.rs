@@ -224,9 +224,17 @@ pub struct OwnPosition {
 pub enum SessionEvent {
     /// The transport handshake finished; logging in.
     Connected,
+    /// The zone refused the login.
     LoginFailed {
         code: u8,
+        /// What the code means, in a sentence for the player, with what to do
+        /// about it.
         message: &'static str,
+        /// The zone's own words, when it sent some (S2C `0x33`, just before the
+        /// refusal). They are what the player should read: a zone that locks a
+        /// name out after too many wrong passwords says so, and for how long,
+        /// while the code it refuses with only says "busy".
+        zone_text: Option<String>,
     },
     LoggedIn,
     /// Your player id in the arena.
@@ -454,6 +462,9 @@ pub struct Session {
     downloading: Option<u16>,
     /// CRC-32 of the zone's news file from the login reply (0 = the zone has none).
     news_checksum: u32,
+    /// The zone's own words about the login (S2C `0x33`), held until its answer
+    /// arrives so they go out with it.
+    login_text: Option<String>,
     /// A news request is in flight (the reply is an S2C `0x10` with no name).
     news_pending: bool,
     entering_done: bool,
@@ -521,6 +532,7 @@ impl Session {
             turf_flags: Default::default(),
             downloading: None,
             news_checksum: 0,
+            login_text: None,
             news_pending: false,
             entering_done: false,
             events: VecDeque::new(),
@@ -842,22 +854,40 @@ impl Session {
             }
         };
         match packet {
+            S2CPacket::LoginText(t) => {
+                let text = String::from_utf8_lossy(&t.text).trim().to_string();
+                log::info!("the zone's login text: {text}");
+                self.login_text = (!text.is_empty()).then_some(text);
+            }
             S2CPacket::LoginResponse(r) => {
                 self.news_checksum = r.news_checksum;
+                let zone_text = self.login_text.take();
                 // [`login_code::NO_SCORES`] is a *success*: the zone let you in, but its
                 // billing server is down so nothing you score will be kept. Continuum
                 // enters and says so, and a zone whose biller is off is otherwise
                 // unreachable -- a billerless subgame answers every login with it.
                 // Entering silently would hide that from the player, so say it the way
                 // the zone would: a green arena message.
-                if r.code == login_code::OK || r.code == login_code::NO_SCORES {
+                //
+                // [`login_code::SPEC_ONLY`] is a success too: ASSS counts it with
+                // the other two (`AUTH_IS_OK` in its `core.h`), and the player
+                // enters to watch. This client refused it, so such a zone could
+                // not be entered at all.
+                if login_succeeded(r.code) {
                     self.events.push_back(SessionEvent::LoggedIn);
-                    if r.code == login_code::NO_SCORES {
+                    let notice = match r.code {
+                        login_code::NO_SCORES => Some("Scores are not available in this zone."),
+                        login_code::SPEC_ONLY => {
+                            Some("This zone lets you watch only: you cannot fly here.")
+                        }
+                        _ => None,
+                    };
+                    for text in notice.map(str::to_string).into_iter().chain(zone_text) {
                         self.events.push_back(SessionEvent::Chat {
                             kind: chat_type::ARENA,
                             pid: -1,
                             name: None,
-                            text: "Scores are not available in this zone.".into(),
+                            text,
                             sound: 0,
                         });
                     }
@@ -866,6 +896,7 @@ impl Session {
                     self.events.push_back(SessionEvent::LoginFailed {
                         code: r.code,
                         message: login_message(r.code),
+                        zone_text,
                     });
                     self.conn.disconnect();
                 }
@@ -1761,25 +1792,70 @@ fn login_form_mismatch(cipher: Option<CipherKind>, continuum_form: bool) -> Opti
     }
 }
 
+/// Whether a login answer lets the player in. The three codes ASSS moves forward
+/// on (`AUTH_IS_OK` in its `core.h`): a plain yes, a yes with no scores kept,
+/// and a yes to watching only.
+fn login_succeeded(code: u8) -> bool {
+    matches!(
+        code,
+        login_code::OK | login_code::NO_SCORES | login_code::SPEC_ONLY
+    )
+}
+
+/// What a refusal code means, for the player, and whether trying again could
+/// help.
+///
+/// Each one was checked against what ASSS means by it (its `core.h` names and
+/// its `get_auth_code_msg`), and against what zones are seen to do with it. The
+/// old labels were the codes' names in lower case -- "server busy" -- and that
+/// one is what a billed zone answers when it has **locked a name out** after
+/// repeated wrong passwords. A player told only "busy" tries again, which is
+/// how a lockout of minutes became one of hours on 2026-11-17. So the wording
+/// says what to do, and where trying again cannot help or can make it worse, it
+/// says that first.
 fn login_message(code: u8) -> &'static str {
     match code {
-        login_code::NEW_USER => "unknown name (new user)",
-        login_code::BAD_PASSWORD => "wrong password",
-        login_code::FULL => "arena full",
-        login_code::LOCKED => "locked out",
-        login_code::NO_PERMISSION | login_code::NO_PERMISSION2 => "no permission",
-        login_code::SPEC_ONLY => "spectator only",
-        login_code::TOO_MANY_POINTS => "too many points",
-        login_code::TOO_SLOW => "connection too slow",
-        login_code::NO_NEW_CONNECTIONS => "server not accepting new connections",
-        login_code::BAD_NAME => "bad name",
-        login_code::OFFENSIVE_NAME => "offensive name",
-        login_code::NO_SCORES => "no scores",
-        login_code::SERVER_BUSY => "server busy",
-        login_code::TOO_LOW_USAGE => "too low usage",
-        login_code::NO_NAME => "no name",
-        login_code::TOO_MANY_DEMO | login_code::NO_DEMO => "demo version not allowed",
-        _ => "login refused",
+        login_code::NEW_USER => {
+            "This name is not registered on this zone. Check the spelling; a new name \
+             has to be registered first (start with --new-user)."
+        }
+        login_code::BAD_PASSWORD => {
+            "Wrong password for this name. Check it before trying again: many zones \
+             lock a name out after a few wrong tries."
+        }
+        login_code::FULL => "The zone is full. Try again later.",
+        login_code::LOCKED => {
+            "This name or this computer is banned from the zone. Trying again will not help."
+        }
+        login_code::NO_PERMISSION | login_code::NO_PERMISSION2 => {
+            "The zone does not let this name in. Trying again will not help."
+        }
+        login_code::TOO_MANY_POINTS => {
+            "This name has too many points for this zone. Trying again will not help."
+        }
+        login_code::TOO_SLOW => "The zone found the connection too slow. Try again later.",
+        login_code::NO_NEW_CONNECTIONS => {
+            "The zone is not accepting new players right now. Try again later."
+        }
+        login_code::BAD_NAME => {
+            "The zone does not accept this name. Choose another; the same one will be \
+             refused again."
+        }
+        login_code::OFFENSIVE_NAME => "The zone refused this name as offensive. Choose another.",
+        login_code::SERVER_BUSY => {
+            "The zone refused the login as busy. Billed zones also answer this way when \
+             they have locked a name out after wrong passwords, so wait a while before \
+             trying again: retrying can extend a lockout."
+        }
+        login_code::TOO_LOW_USAGE => "This name has not played long enough to enter this zone.",
+        login_code::NO_NAME => "The zone received no name. Enter a name and try again.",
+        login_code::TOO_MANY_DEMO | login_code::NO_DEMO => {
+            "The zone does not admit this kind of client. Trying again will not help."
+        }
+        login_code::CUSTOM_TEXT => {
+            "The zone refused the login and sent no reason. Wait before trying again."
+        }
+        _ => "The zone refused the login, with a code this client does not know.",
     }
 }
 
@@ -1909,6 +1985,14 @@ mod tests {
             Some("Scores are not available in this zone.")
         );
 
+        // Spectator-only lets you in to watch, and says so.
+        let spec = run(login_code::SPEC_ONLY);
+        assert!(matches!(spec.first(), Some(SessionEvent::LoggedIn)));
+        assert!(spec.iter().any(|e| matches!(
+            e,
+            SessionEvent::Chat { text, .. } if text.contains("watch only")
+        )));
+
         // A code that really is a refusal still refuses.
         let bad = run(login_code::BAD_PASSWORD);
         assert!(matches!(
@@ -1960,6 +2044,86 @@ mod tests {
                 listed("empty", 0, false),
             ])]
         );
+    }
+
+    /// Hyperspace, 2026-11-17: the zone said exactly what was wrong in a login
+    /// text, then refused with the "busy" code, and the client showed only
+    /// "server busy". The player retried, and the lockout grew. The zone's own
+    /// words now come with the refusal.
+    #[test]
+    fn a_refusal_carries_the_zones_own_words() {
+        let text = s2c::LoginText {
+            text: b"You have tried too many wrong passwords. Try again in a few hours".to_vec(),
+        };
+        let mut data = Vec::new();
+        text.encode(&mut data);
+        let mut response = [0u8; 36];
+        response[0] = s2c::kind::LOGIN_RESPONSE;
+        response[1] = login_code::SERVER_BUSY;
+
+        let mut s = Session::new(SessionConfig::default(), 0, 1);
+        s.handle_packet(0, &data);
+        s.handle_packet(0, &response);
+        let failed = s.events.iter().find_map(|e| match e {
+            SessionEvent::LoginFailed {
+                code,
+                zone_text,
+                message,
+            } => Some((*code, zone_text.clone(), *message)),
+            _ => None,
+        });
+        let (code, zone_text, message) = failed.expect("refused");
+        assert_eq!(code, login_code::SERVER_BUSY);
+        assert_eq!(
+            zone_text.as_deref(),
+            Some("You have tried too many wrong passwords. Try again in a few hours")
+        );
+        assert!(message.contains("wait"), "busy says to wait: {message}");
+
+        // Without a text first, there is none, and the code speaks alone.
+        let mut s = Session::new(SessionConfig::default(), 0, 1);
+        s.handle_packet(0, &response);
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::LoginFailed {
+                zone_text: None,
+                ..
+            }
+        )));
+    }
+
+    /// Every refusal code has words of its own, and the ones where trying again
+    /// cannot help, or can make it worse, say so.
+    #[test]
+    fn every_refusal_says_what_to_do() {
+        let refusals = (0u8..=0x13).filter(|c| !login_succeeded(*c));
+        for code in refusals {
+            let m = login_message(code);
+            assert!(
+                !m.contains("code this client does not know"),
+                "{code:#04x}: {m}"
+            );
+        }
+        for code in [
+            login_code::LOCKED,
+            login_code::NO_PERMISSION,
+            login_code::NO_PERMISSION2,
+            login_code::TOO_MANY_POINTS,
+            login_code::TOO_MANY_DEMO,
+            login_code::NO_DEMO,
+        ] {
+            assert!(
+                login_message(code).contains("will not help"),
+                "{code:#04x}: {}",
+                login_message(code)
+            );
+        }
+        for code in [login_code::BAD_PASSWORD, login_code::SERVER_BUSY] {
+            assert!(login_message(code).contains("lock"), "{code:#04x}");
+        }
+        assert!(login_succeeded(login_code::OK));
+        assert!(login_succeeded(login_code::NO_SCORES));
+        assert!(login_succeeded(login_code::SPEC_ONLY));
     }
 
     #[test]

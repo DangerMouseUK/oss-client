@@ -157,8 +157,11 @@ impl Bot {
                     let cipher = self.session.cipher_name().unwrap_or("?");
                     self.log(format!("connected ({cipher})"));
                 }
-                SessionEvent::LoginFailed { message, .. } => {
-                    log::warn!("[{}] login failed: {message}", self.label)
+                SessionEvent::LoginFailed {
+                    message, zone_text, ..
+                } => {
+                    let why = zone_text.as_deref().unwrap_or(message);
+                    log::warn!("[{}] login failed: {why}", self.label)
                 }
                 SessionEvent::LoggedIn => self.log("logged in"),
                 SessionEvent::EnteredArena { pid } => {

@@ -361,8 +361,20 @@ impl Online {
                     let cached = self.stored_file(NEWS_FILE);
                     self.session.request_news_if_new(cached.as_deref());
                 }
-                SessionEvent::LoginFailed { message, .. } => {
-                    self.error = Some(format!("Login failed: {message}"))
+                SessionEvent::LoginFailed {
+                    code,
+                    message,
+                    zone_text,
+                } => {
+                    log::info!("login refused, code {code:#04x}: {message}");
+                    // The zone's own words, when it sent some, are what to read:
+                    // they say why and for how long, which a code cannot. Ours
+                    // would only talk over them -- "busy" beside "try again in a
+                    // few hours" -- so they are shown alone.
+                    self.error = Some(match zone_text {
+                        Some(text) => format!("The zone refused the login: {text}"),
+                        None => message.to_string(),
+                    });
                 }
                 SessionEvent::MapNeeded { name, .. } => {
                     // The arena's content starts here, so the count starts here too.

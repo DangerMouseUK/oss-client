@@ -641,5 +641,8 @@ fn rejected_login_is_reported() {
             break;
         }
     }
-    assert_eq!(failed, Some("wrong password"));
+    assert!(
+        failed.is_some_and(|m| m.starts_with("Wrong password")),
+        "{failed:?}"
+    );
 }
