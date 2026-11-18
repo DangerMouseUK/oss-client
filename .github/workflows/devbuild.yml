@@ -236,16 +236,19 @@ jobs:
           echo "Staged ${count} asset files."
           echo "STAGE_NAME=${name}" >> "$GITHUB_ENV"
 
-      # Linux and macOS go up as a tar.gz inside the artifact, Windows as a
-      # plain folder. That asymmetry is deliberate and it is not cosmetic.
+      # One download, extracted once, gives one folder -- the same rule as
+      # release.yml. Linux and macOS go up as a tar.gz, Windows as a plain
+      # folder, and the asymmetry is deliberate.
       #
-      # actions/upload-artifact always zips what it is given, and a zip does not
-      # carry the Unix executable bit. Upload the bare folder on Linux or macOS
-      # and whoever downloads it gets an `oss-client` they cannot run until they
-      # `chmod +x` it. A tar.gz inside the zip keeps the bit, at the cost of one
-      # extra unpacking step. Windows has no such bit, so there the second
-      # archive would be pure friction -- the folder goes up as it is and one
-      # unzip is the whole job.
+      # A zip does not carry the Unix executable bit, so a folder uploaded the
+      # ordinary way (upload-artifact zips it) would give Linux and macOS an
+      # `oss-client` that cannot run until someone `chmod +x` it. So there the
+      # folder goes into a tar.gz, which keeps the bit and has one top-level
+      # folder because `tar -xzf` unpacks where it stands, and the tar.gz goes
+      # up with `archive: false` (upload-artifact v7): the artifact IS the
+      # tar.gz, with no zip around it. On Windows there is no such bit, so the
+      # folder goes up as it is; upload-artifact zips its CONTENTS, and
+      # Explorer's "Extract All" makes the one folder.
       - name: Archive (tar.gz, Linux and macOS)
         if: runner.os != 'Windows'
         shell: bash
@@ -253,11 +256,12 @@ jobs:
 
       - name: Upload (Linux and macOS)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.STAGE_NAME }}
+          # No `name`: with `archive: false` the artifact takes the file's name.
           # Relative to the workspace, not to defaults.working-directory.
           path: oss-client/${{ env.STAGE_NAME }}.tar.gz
+          archive: false
           if-no-files-found: error
           # Explicit rather than inherited from the repository default, so the
           # run summary below can state a real number. Long enough to fetch at
@@ -266,7 +270,7 @@ jobs:
 
       - name: Upload (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.STAGE_NAME }}
           # A directory: upload-artifact zips its CONTENTS, so the downloaded
@@ -290,7 +294,7 @@ jobs:
             if [ "$RUNNER_OS" = "Windows" ]; then
               echo "Download it, unzip it, and run \`oss-client.exe\` from the unzipped folder. Keep \`assets\` beside the executable -- the client reads its graphics and sounds from there."
             else
-              echo "Download it and unzip it; inside is \`${STAGE_NAME}.tar.gz\`. Unpack that (\`tar -xzf ${STAGE_NAME}.tar.gz\`) and run \`./oss-client\` from the folder it makes. Keep \`assets\` beside the executable -- the client reads its graphics and sounds from there. The tar keeps the executable bit; the zip around it does not, which is why there are two layers."
+              echo "Download \`${STAGE_NAME}.tar.gz\`, unpack it (\`tar -xzf ${STAGE_NAME}.tar.gz\`), and run \`./oss-client\` from the folder it makes. Keep \`assets\` beside the executable -- the client reads its graphics and sounds from there."
             fi
             echo
             echo "No environment variables are needed. \`OSS_ASSETS_DIR\` and \`OSS_CONTINUUM_DIR\` only matter if you want to override the bundled graphics."
