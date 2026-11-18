@@ -1104,6 +1104,12 @@ impl App {
                         && let Some(stroke) = game.click(mx, my)
                     {
                         self.input.press(stroke);
+                        // A click is a press and a release. Without the release
+                        // the key stays held as far as the key table knows, and
+                        // the real key does nothing until the window loses focus.
+                        if let Some(key) = stroke.key {
+                            self.input.release(key);
+                        }
                     }
                     game.update(&mut self.input);
                 } else {

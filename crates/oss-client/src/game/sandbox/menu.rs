@@ -4,14 +4,29 @@ use oss_session::SPECTATOR;
 use winit::keyboard::KeyCode;
 
 use super::Sandbox;
-use crate::game::input::Stroke;
+use crate::game::input::{Action, Stroke};
 use crate::game::start_spots::Rect;
 use crate::game::view::{Canvas, color};
 use crate::gfx::Renderer;
 
 impl Sandbox {
     /// Keys while the menu is up.
-    pub(super) fn menu_input(&mut self, strokes: &[Stroke]) {
+    pub(super) fn menu_input(&mut self, edges: &[Action], strokes: &[Stroke]) {
+        // The menu lists F2 and F12, so they work while it is up -- they used to
+        // be thrown away unread here -- and it stays up, because in Continuum the
+        // menu is where display switches are flipped. F11 changes ship, so it
+        // puts the menu away as choosing a ship does.
+        for e in edges {
+            match e {
+                Action::StatBox => self.statbox.cycle(),
+                Action::ShowFps => self.fps_view = self.fps_view.next(),
+                Action::Spectate => {
+                    self.toggle_spectator();
+                    self.menu = false;
+                }
+                _ => {}
+            }
+        }
         for stroke in strokes {
             match stroke.key {
                 // Keys that type nothing never reach Continuum's menu, so they
@@ -101,6 +116,7 @@ impl Sandbox {
                 self.news_scroll = 0;
             }
             MenuChoice::Ship(kind) => self.request_ship(kind),
+            MenuChoice::FrameRate => self.fps_view = self.fps_view.next(),
         }
         true
     }
@@ -240,6 +256,8 @@ enum MenuChoice {
     Spectate,
     News,
     Ship(u8),
+    /// Esc then F: Continuum's frame-rate key, which its menu does not list.
+    FrameRate,
 }
 
 /// What a character typed on the menu does, or `None` for "any other key to
@@ -256,6 +274,7 @@ fn menu_choice(ch: char, has_news: bool) -> Option<MenuChoice> {
         'o' => Some(MenuChoice::Options),
         's' => Some(MenuChoice::Spectate),
         'n' if has_news => Some(MenuChoice::News),
+        'f' => Some(MenuChoice::FrameRate),
         d @ '1'..='8' => Some(MenuChoice::Ship(d as u8 - b'1')),
         _ => None,
     }
@@ -328,6 +347,7 @@ mod tests {
         assert_eq!(menu_choice('o', false), Some(MenuChoice::Options));
         assert_eq!(menu_choice('1', false), Some(MenuChoice::Ship(0)));
         assert_eq!(menu_choice('8', false), Some(MenuChoice::Ship(7)));
+        assert_eq!(menu_choice('f', false), Some(MenuChoice::FrameRate));
         assert_eq!(menu_choice('9', false), None, "any other key resumes");
         assert_eq!(menu_choice('x', true), None);
     }

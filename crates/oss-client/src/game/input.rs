@@ -55,10 +55,12 @@ pub enum Action {
     DetachTurrets,
     /// Save a screenshot.
     Screenshot,
+    /// Spectator mode on and off: F11, as in Continuum.
+    Spectate,
 }
 
 impl Action {
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 33] = [
         Action::Forward,
         Action::Backward,
         Action::Left,
@@ -91,6 +93,7 @@ impl Action {
         Action::Attach,
         Action::DetachTurrets,
         Action::Screenshot,
+        Action::Spectate,
     ];
 
     /// Name used in the config file.
@@ -128,6 +131,7 @@ impl Action {
             Action::Attach => "attach",
             Action::DetachTurrets => "detach_turrets",
             Action::Screenshot => "screenshot",
+            Action::Spectate => "spectate",
         }
     }
 
@@ -205,7 +209,10 @@ impl Default for Bindings {
             (Action::Attach, K::F7, None),
             (Action::DetachTurrets, K::F7, Ctrl),
             (Action::Screenshot, K::PrintScreen, Any),
-            (Action::Screenshot, K::F11, Any),
+            // Continuum's F11 is spectator mode. This client had it as a second
+            // screenshot key, so a Continuum player pressing F11 to watch got a
+            // screenshot instead; PrintScreen still takes one.
+            (Action::Spectate, K::F11, Any),
         ];
         let mut b = Bindings {
             map: HashMap::new(),

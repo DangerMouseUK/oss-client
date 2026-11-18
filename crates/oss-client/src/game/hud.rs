@@ -690,15 +690,77 @@ fn draw_messages(s: &Sandbox, c: &Canvas, r: &mut Renderer) {
             msg,
         );
     }
-    if s.show_fps {
-        let line = format!(
-            "{:.0} fps  scale {}x  {:?}  tick {}",
-            s.fps(),
-            c.scale,
-            r.present_mode,
-            s.world.tick
-        );
+    let present = format!("{:?}", r.present_mode);
+    if let Some(line) = fps_line(
+        s.fps_view,
+        s.fps(),
+        s.ping_ms(),
+        c.scale,
+        &present,
+        s.world.tick,
+    ) {
         c.text(r, 4.0, fps_line_y(s.statbox_corner.1), color::WHITE, &line);
+    }
+}
+
+/// What the frame-rate key shows. Each press moves to the next.
+///
+/// The line used to be one thing: `260 fps  scale 1x  Mailbox  tick 842498`.
+/// Two of those four words mean something only to whoever wrote the renderer,
+/// and the lead, reading it as a player, asked what "Mailbox tick" was. So a
+/// first press now shows what a player can act on -- how smooth the game is
+/// running and how far away the zone is -- and the rest waits behind a second
+/// press, where whoever is chasing a fault will look for it. A key rather than
+/// a settings box, because the people who want the detail are the ones who
+/// will press a key twice, and nobody else meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FpsView {
+    /// Nothing on screen.
+    #[default]
+    Off,
+    /// Frames per second, and the ping online.
+    Plain,
+    /// The plain line, then the pixel scale, how frames reach the screen, and
+    /// the game's tick count.
+    Detail,
+}
+
+impl FpsView {
+    /// The view the next press of the key shows.
+    pub fn next(self) -> Self {
+        match self {
+            FpsView::Off => FpsView::Plain,
+            FpsView::Plain => FpsView::Detail,
+            FpsView::Detail => FpsView::Off,
+        }
+    }
+}
+
+/// The frame-rate line for `view`, or `None` when it is off.
+///
+/// `ping_ms` is `None` offline and while no round trip has been measured, and
+/// is then left out rather than shown as a nought that looks like a fast
+/// connection. `present` is how finished frames reach the screen (vsync, or
+/// one of the modes that do not wait for it), which is what decides whether
+/// the frame rate is capped at the display's.
+fn fps_line(
+    view: FpsView,
+    fps: f32,
+    ping_ms: Option<u64>,
+    scale: f32,
+    present: &str,
+    tick: u32,
+) -> Option<String> {
+    let mut line = format!("{fps:.0} fps");
+    if let Some(ms) = ping_ms.filter(|&ms| ms > 0) {
+        line += &format!("  ping {ms} ms");
+    }
+    match view {
+        FpsView::Off => None,
+        FpsView::Plain => Some(line),
+        FpsView::Detail => Some(format!(
+            "{line}  scale {scale}x  present {present}  tick {tick}"
+        )),
     }
 }
 
@@ -981,11 +1043,47 @@ mod tests {
         assert_eq!(hidden[3], (0.0, 0.0), "3 S stat box, hidden");
     }
 
+    /// "260 fps scale 1x Mailbox tick 842498": the lead asked what a mailbox
+    /// tick was. The first press is for a player; the detail is the second.
+    #[test]
+    fn the_frame_rate_line_is_plain_until_pressed_again() {
+        use super::{FpsView, fps_line};
+
+        // A player's first press shows nothing they would have to ask about.
+        let plain = fps_line(FpsView::Plain, 259.6, Some(42), 1.0, "Mailbox", 842_498).expect("on");
+        assert_eq!(plain, "260 fps  ping 42 ms");
+        // The detail is one press further, and still all there.
+        let detail =
+            fps_line(FpsView::Detail, 259.6, Some(42), 1.0, "Mailbox", 842_498).expect("on");
+        for part in [
+            "260 fps",
+            "ping 42 ms",
+            "scale 1x",
+            "Mailbox",
+            "tick 842498",
+        ] {
+            assert!(detail.contains(part), "{part} missing from {detail}");
+        }
+        // Offline, or before a round trip is measured, there is no ping to show.
+        assert_eq!(
+            fps_line(FpsView::Plain, 60.0, None, 2.0, "Fifo", 1).as_deref(),
+            Some("60 fps")
+        );
+        assert_eq!(
+            fps_line(FpsView::Plain, 60.0, Some(0), 2.0, "Fifo", 1).as_deref(),
+            Some("60 fps")
+        );
+        assert_eq!(fps_line(FpsView::Off, 60.0, None, 2.0, "Fifo", 1), None);
+        // Three presses go round to off.
+        assert_eq!(FpsView::Off.next().next().next(), FpsView::Off);
+    }
+
     /// F12 was reported twice as doing nothing. It worked; the line was drawn at
     /// the second row of the player list and the list was drawn on top of it.
     #[test]
     fn the_frame_rate_line_clears_the_player_list() {
         use super::fps_line_y;
+
         // The row pitch the collision came from: statbox's BORDER + HEADER_HEIGHT
         // + 1 + ROW. If any of those move, this is the number to re-measure.
         let second_row = 3.0 + 14.0 + 1.0 + 12.0;

@@ -154,7 +154,9 @@ pub struct Sandbox {
     pub(super) clock: f32,
     pub(super) effects: Vec<Effect>,
     pub(super) menu: bool,
-    pub(super) show_fps: bool,
+    pub(super) fps_view: hud::FpsView,
+    /// The ship F11 goes back to after spectating.
+    last_ship: u8,
     pub(super) big_radar: bool,
     fps: FpsCounter,
     /// The player asked to leave. In SubSpace and Continuum the menu's Q goes back
@@ -227,6 +229,7 @@ impl Sandbox {
         let mut s = Self::build(
             renderer, dir, tileset, world, objects, 0, scale, audio, None,
         )?;
+        s.last_ship = ship.min(7);
         s.message(
             "Welcome to the Open SubSpace sandbox. Type to chat, Esc for the menu.",
             color::GREEN,
@@ -319,6 +322,10 @@ impl Sandbox {
             }
         }
         s.spectating = spectating;
+        s.last_ship = [own_ship, wanted]
+            .into_iter()
+            .find(|&k| k != SPECTATOR)
+            .unwrap_or(0);
         s.spec_cam = (8192.0, 8192.0);
         if s.is_replay() {
             s.message(
@@ -413,7 +420,8 @@ impl Sandbox {
             clock: 0.0,
             effects: Vec::new(),
             menu: false,
-            show_fps: false,
+            fps_view: Default::default(),
+            last_ship: 0,
             big_radar: false,
             fps: FpsCounter::default(),
             leaving: false,
@@ -462,6 +470,12 @@ impl Sandbox {
 
     pub(super) fn fps(&self) -> f32 {
         self.fps.fps
+    }
+
+    /// The measured round trip to the zone, online and not in a replay.
+    pub(super) fn ping_ms(&self) -> Option<u64> {
+        let net = self.net.as_ref().filter(|n| !n.is_replay())?;
+        Some(net.session.rtt_ms())
     }
 
     /// Camera centre (game pixels) for the current frame.
@@ -674,7 +688,13 @@ impl Sandbox {
             })
             .collect();
         self.ui_input(&mut edges, &strokes, mods);
-        input.set_typing(!self.chat.input.is_empty());
+        // While the menu is up the keys that type are the menu's, so they must
+        // not fly the ship -- but the ones that type nothing still do: the
+        // arrows, Shift, Ctrl, Tab and the rest. Continuum's own change log:
+        // "Message history (ESC) displays more chat, and you can fly while it
+        // is on". The chat line's rule already draws exactly that line between
+        // the two kinds of key, so the menu borrows it.
+        input.set_typing(self.menu || !self.chat.input.is_empty());
         // The help shows the player's own keys, so it reads the live table. Copied
         // only while it is open, which is the only time anything looks at it.
         if self.help_open && self.bindings != input.bindings {
@@ -688,7 +708,7 @@ impl Sandbox {
         {
             self.toggle_spec_xradar();
         }
-        if self.spectating && !self.menu && self.chat.input.is_empty() {
+        if self.spectating && self.chat.input.is_empty() {
             let step = SPEC_SPEED * dt.as_secs_f32() * if input.shift() { 3.0 } else { 1.0 };
             let (dx, dy) = (
                 input.action_held(Action::Right) as i32 as f32
@@ -762,7 +782,7 @@ impl Sandbox {
         self.sync_clock();
         let mut ticks = 0;
         while self.acc >= TICK {
-            let mut ship_input = if self.menu || self.spectating {
+            let mut ship_input = if self.spectating {
                 ShipInput::default()
             } else {
                 let mut i = input.ship_input(&edges);
@@ -968,7 +988,7 @@ impl Sandbox {
             return;
         }
         if self.menu {
-            self.menu_input(strokes);
+            self.menu_input(edges, strokes);
             edges.clear();
             return;
         }
@@ -1004,7 +1024,8 @@ impl Sandbox {
         self.run_macros(strokes, shift, ctrl);
         for e in edges.iter() {
             match e {
-                Action::ShowFps => self.show_fps = !self.show_fps,
+                Action::ShowFps => self.fps_view = self.fps_view.next(),
+                Action::Spectate => self.toggle_spectator(),
                 Action::Screenshot => {
                     // Misc:DisableScreenshot: the arena forbids them.
                     let forbidden = self
@@ -1067,6 +1088,11 @@ impl Sandbox {
             })
             .collect();
         let me_name = net.session.me().map(|p| p.name.clone()).unwrap_or_default();
+        let me_squad = net
+            .session
+            .me()
+            .map(|p| p.squad.clone())
+            .unwrap_or_default();
         let ctx = ChatContext {
             players: &players,
             selected: self
@@ -1074,6 +1100,7 @@ impl Sandbox {
                 .selected()
                 .filter(|&pid| pid != self.me_id as i16),
             last_private: self.chat.last_private(),
+            squad: &me_squad,
         };
         let parsed = chat::parse(line, &ctx);
         let Some(net) = self.net.as_mut() else { return };
@@ -1249,7 +1276,24 @@ impl Sandbox {
     /// was literally true wherever the player was offline. The offline arm now
     /// does exactly what the server's own ship change does online: the ship goes
     /// and the camera takes over where it was.
+    /// Spectator mode on and off (F11, as in Continuum). Off goes back to the
+    /// ship last flown.
+    fn toggle_spectator(&mut self) {
+        if self.is_replay() {
+            return;
+        }
+        let kind = if self.spectating {
+            self.last_ship
+        } else {
+            SPECTATOR
+        };
+        self.request_ship(kind);
+    }
+
     fn request_ship(&mut self, kind: u8) {
+        if kind != SPECTATOR {
+            self.last_ship = kind;
+        }
         if let Some(net) = self.net.as_mut() {
             net.session.set_ship(kind);
             net.flush();
@@ -1321,6 +1365,7 @@ impl Sandbox {
                         add_own_ship(&mut self.world, self.me_id, ship, freq as u16);
                         self.spectating = ship == SPECTATOR;
                         if !self.spectating {
+                            self.last_ship = ship;
                             self.spawn_warp_effect();
                         } else {
                             self.spec_cam = self.me().pos.to_f32();

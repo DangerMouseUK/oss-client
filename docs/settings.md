@@ -13,8 +13,8 @@ scale, the directory servers for the zone browser (`[directory] servers = host:p
 the encryption policy (`[network] security`, `[network] identity`).
 
 `known_servers.txt` and `identities.txt` sit beside it (see [encryption.md](encryption.md)),
-Print Screen and F11 save into a `screenshots` folder there, and maps, LVZ files and zone
-news are cached per server. Those two keys print the file they just wrote into the chat log,
+Print Screen saves into a `screenshots` folder there, and maps, LVZ files and zone
+news are cached per server. The key prints the file they just wrote into the chat log,
 so a screenshot taken after another one shows a local path; use `--screenshot` (see
 [testing.md](testing.md)) for anything you intend to publish.
 

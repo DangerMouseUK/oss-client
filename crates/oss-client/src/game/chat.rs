@@ -10,6 +10,7 @@
 //! | `/text`          | private to the player selected in the stat box            |
 //! | `:name:text`     | private (remote private through the biller if `name` isn't in the arena; `:#squad:text` reaches a squad) |
 //! | `::text`         | private reply to whoever last messaged you privately      |
+//! | `#text`          | your own squad, wherever its members are in the zone      |
 //! | `;text`, `;N;text` | chat channel 1 or N (`?chat=a,b` picks channels)        |
 //! | `=N`             | change to team N                                          |
 //! | `?command`, `*command` | public text the server treats as a command          |
@@ -49,6 +50,8 @@ pub struct ChatContext<'a> {
     pub selected: Option<i16>,
     /// Name of the last player who messaged you privately.
     pub last_private: Option<&'a str>,
+    /// Your own squad, empty when you are in none.
+    pub squad: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +114,17 @@ pub fn parse(line: &str, ctx: &ChatContext) -> Line {
         && !name.is_empty()
     {
         return private_to(name, t, ctx);
+    }
+    // Squad chat. Continuum turns `#text` into the squad message `:#squad:text`
+    // for your own squad, which the zone hands to its biller to deliver. Before
+    // this the line fell through to the public case below, so a player who meant
+    // to whisper to their squad told the whole arena.
+    if let Some(t) = line.strip_prefix('#') {
+        return if ctx.squad.is_empty() {
+            Line::Problem("You are not in a squad, so # has nobody to send to.".into())
+        } else {
+            private_to(&format!("#{}", ctx.squad), t, ctx)
+        };
     }
     if let Some(t) = line.strip_prefix(';') {
         // ASSS takes "text" (channel 1) or "N;text".
@@ -606,6 +620,7 @@ mod tests {
             players: &ps,
             selected: Some(3),
             last_private: Some("alfred"),
+            squad: "",
         };
         assert_eq!(sent("hello", &ctx), (chat_type::PUBLIC, 0, "hello".into()));
         assert_eq!(sent("'go", &ctx), (chat_type::FREQ, 0, "go".into()));
@@ -625,6 +640,17 @@ mod tests {
             sent(":#squad:all", &ctx),
             (chat_type::REMOTE_PRIVATE, 0, ":#squad:all".into())
         );
+        // Squad chat is never public: with a squad it is the squad message,
+        // and without one it is refused rather than sent to the arena.
+        let squadded = ChatContext {
+            squad: "Pilots",
+            ..ctx.clone()
+        };
+        assert_eq!(
+            sent("#meet at base", &squadded),
+            (chat_type::REMOTE_PRIVATE, 0, ":#Pilots:meet at base".into())
+        );
+        assert!(matches!(parse("#meet at base", &ctx), Line::Problem(_)));
         assert_eq!(sent(";hi", &ctx), (chat_type::CHANNEL, 0, "hi".into()));
         assert_eq!(sent(";2;hi", &ctx), (chat_type::CHANNEL, 0, "2;hi".into()));
         assert_eq!(parse("=3", &ctx), Line::SetFreq(3));

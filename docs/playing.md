@@ -19,15 +19,16 @@ rather than "the keys".
 | Tab | Bombs |
 | Shift+Tab | Mines |
 | Delete | Multifire |
-| Esc | Menu — 1-8 change ship, S spectate, N zone news, O options, Q quit the game |
+| Esc | Menu — 1-8 change ship, S spectate, N zone news, O options, F frame rate, Q quit the game. F2 and F12 work with it open, and so do the flying keys |
 | Enter | Send what you have typed |
 | F1 | Help pages (F1 turns the page, Esc closes) |
 | F2 | Cycle the stat box views |
 | Page Up / Page Down | Select a player in the stat box (and scroll the chat log while the menu is open) |
 | F3 | Zone browser (on the login screen) |
 | F5 | Offline sandbox (on the login screen) |
-| F11 / Print Screen | Save a screenshot (a `screenshots` folder beside the settings file) |
-| F12 | Frame rate |
+| F11 | Spectator mode on and off, as in Continuum (off goes back to the ship you last flew) |
+| Print Screen | Save a screenshot (a `screenshots` folder beside the settings file) |
+| F12 | Frame rate and ping; press again for the technical detail (pixel scale, how frames reach the screen, tick count), and again to hide it |
 | Ctrl +/- | Pixel scale |
 
 Gamepads: left stick or D-pad steers, RT/LT thrust and reverse, bumpers afterburner, A guns,
@@ -57,6 +58,7 @@ The prefixes are Continuum's:
 | `:name:text` | Private to *name* (Tab completes it) |
 | `::text` | Reply to the last private message |
 | `/text` | Private to the player selected in the stat box |
+| `#text` | Your squad, wherever its members are in the zone (refused, not sent, if you are in none) |
 | `;text` or `;N;text` | Chat channel (the current one, or channel *N*) |
 | `=N` | Change team |
 | `?command` | To the server |

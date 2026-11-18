@@ -292,6 +292,7 @@ const KEY_GROUPS: &[(&str, &[(Action, &str)])] = &[
             (Action::ZoomOut, "Zoom out"),
             (Action::ShowFps, "Frame rate"),
             (Action::Screenshot, "Take screenshot"),
+            (Action::Spectate, "Spectator mode on/off"),
         ],
     ),
 ];
@@ -360,6 +361,7 @@ pub(super) fn help_pages(bindings: &Bindings, online: bool) -> Vec<(&'static str
         Help::Text("                   finishes a name, :: repeats it."),
         Help::Text("  ;channel;msg   = to a chat channel"),
         Help::Text("  \"message       = to the enemy team"),
+        Help::Text("  #message       = to your squad"),
     ];
 
     let commands = vec![

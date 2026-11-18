@@ -150,6 +150,8 @@ impl Config {
         let mut c = Config::default();
         let mut warnings = Vec::new();
         let mut section = String::new();
+        // Whether the file binds `spectate` itself; see [`settle_spectate`].
+        let mut spectate_listed = false;
         for (n, raw) in text.lines().enumerate() {
             let whole = raw.trim();
             if whole.is_empty() || whole.starts_with(';') || whole.starts_with('#') {
@@ -249,7 +251,10 @@ impl Config {
                     None => Err(format!("unknown action `{action}`")),
                 },
                 ("keys", action) => match Action::from_name(action) {
-                    Some(a) => parse_bindings(value).map(|b| c.bindings.set(a, b)),
+                    Some(a) => {
+                        spectate_listed |= a == Action::Spectate;
+                        parse_bindings(value).map(|b| c.bindings.set(a, b))
+                    }
                     None => Err(format!("unknown action `{action}`")),
                 },
                 _ => Err(format!("unknown setting `{key}` in [{section}]")),
@@ -257,6 +262,9 @@ impl Config {
             if let Err(e) = result {
                 warn(e);
             }
+        }
+        if !spectate_listed {
+            settle_spectate(&mut c.bindings);
         }
         (c, warnings)
     }
@@ -365,6 +373,39 @@ fn number(v: &str, min: u32, max: u32) -> Result<u32, String> {
         .ok()
         .filter(|n| (min..=max).contains(n))
         .ok_or_else(|| format!("expected a number {min}-{max}, got `{v}`"))
+}
+
+/// F11 moved from a second screenshot key to spectator mode, which is what it
+/// is in Continuum. Every settings file written before that lists every action
+/// with its keys, so it says `screenshot = PrintScreen, F11` and has no
+/// `spectate` line: read as it stands, F11 would both take a screenshot and
+/// spectate.
+///
+/// So for a file with no `spectate` line: a screenshot binding that is exactly
+/// the old default loses F11, and if F11 is still bound to anything after that
+/// -- the player put it there on purpose -- spectate starts unbound rather than
+/// taking the key away from them.
+fn settle_spectate(bindings: &mut Bindings) {
+    let old_default = [
+        Binding {
+            key: KeyCode::PrintScreen,
+            mods: Mods::Any,
+        },
+        Binding {
+            key: KeyCode::F11,
+            mods: Mods::Any,
+        },
+    ];
+    if bindings.get(Action::Screenshot) == old_default {
+        bindings.set(Action::Screenshot, old_default[..1].to_vec());
+    }
+    let f11_taken = Action::ALL
+        .into_iter()
+        .filter(|&a| a != Action::Spectate)
+        .any(|a| bindings.get(a).iter().any(|b| b.key == KeyCode::F11));
+    if f11_taken {
+        bindings.set(Action::Spectate, Vec::new());
+    }
 }
 
 fn parse_bindings(v: &str) -> Result<Vec<Binding>, String> {
@@ -650,6 +691,52 @@ loud = yes
         );
         assert_eq!(warnings.len(), 4, "{warnings:?}");
         assert!(warnings[0].starts_with("line 3:"));
+    }
+
+    /// A settings file from before F11 became spectator mode keeps working:
+    /// F11 spectates and no longer also takes a screenshot. And a player who
+    /// bound F11 to something themselves keeps it.
+    #[test]
+    fn an_old_settings_file_hands_f11_to_spectator_mode() {
+        let f11 = |mods| Binding {
+            key: KeyCode::F11,
+            mods,
+        };
+        let print = Binding {
+            key: KeyCode::PrintScreen,
+            mods: Mods::Any,
+        };
+        let (c, _) = Config::parse(
+            "[keys]
+screenshot = PrintScreen, F11
+",
+        );
+        assert_eq!(c.bindings.get(Action::Screenshot), &[print]);
+        assert_eq!(c.bindings.get(Action::Spectate), &[f11(Mods::Any)]);
+
+        // Their own use of F11 wins, and spectate waits to be given a key.
+        let (c, _) = Config::parse(
+            "[keys]
+thor = F11
+",
+        );
+        assert_eq!(c.bindings.get(Action::Thor), &[f11(Mods::Any)]);
+        assert!(c.bindings.get(Action::Spectate).is_empty());
+
+        // A file that names spectate is taken at its word.
+        let (c, _) = Config::parse(
+            "[keys]
+screenshot = PrintScreen, F11
+spectate = F10
+",
+        );
+        assert_eq!(c.bindings.get(Action::Screenshot), &[print, f11(Mods::Any)]);
+
+        // And a fresh file round-trips with spectate on F11 alone.
+        let (back, w) = Config::parse(&Config::default().to_text());
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(back.bindings.get(Action::Spectate), &[f11(Mods::Any)]);
+        assert_eq!(back.bindings.get(Action::Screenshot), &[print]);
     }
 
     #[test]
