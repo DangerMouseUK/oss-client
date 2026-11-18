@@ -1,0 +1,71 @@
+# Help: keys (F1 for more)
+%Y %KEsc %WThe menu, with the whole chat log
+%Y %KEnter %WSend what you have typed
+%Y %KF1 %WThe next help page
+%pFlying
+%Y %KB_LEFT %WTurn anticlockwise
+%Y %KB_RIGHT %WTurn clockwise
+%Y %KB_FORWARD %WThrust
+%Y %KB_REVERSE %WThrust backwards
+%Y %KB_AFTERBURNERS %WAfterburners, while held
+%pWeapons
+%Y %KB_BULLET %WGuns
+%Y %KB_BOMB %WBomb
+%Y %KB_MINE %WMine
+%Y %KB_THOR %WThor's hammer
+%Y %KB_BURST %WBurst
+# Help: keys (F1 for more)
+%pEquipment, on and off
+%Y %KB_STEALTH %WStealth
+%Y %KB_CLOAK %WCloak
+%Y %KB_XRADAR %WX-radar
+%Y %KB_ANTIWARP %WAntiwarp
+%Y %KB_MULTI %WGuns fire singly or in a spread
+%pActions
+%Y %KB_REPEL %WRepel
+%Y %KB_WARP %WWarp, or go to your portal
+%Y %KB_PORTAL %WSet a portal
+%Y %KB_DECOY %WDecoy
+%Y %KB_ROCKET %WRocket
+%Y %KB_BRICK %WWall brick
+%Y %KB_ATTACH %WRide as a turret, or stop
+%Y %KB_VIEWMAP %WThe whole map, while held
+%pOther keys
+%Y %KB_CYCLE %WPlayer list: the next view
+%Y %KB_PREV %WPlayer list: previous player
+%Y %KB_NEXT %WPlayer list: next player
+%Y %KB_PLAY %WSpectator mode on and off
+%Y %KB_SHOW_FPS %WFrame rate and ping; again for more
+%Y %KB_ZOOM_IN %WZoom in
+%Y %KB_ZOOM_OUT %WZoom out
+%Y %KB_SCREENSHOT %WScreenshot
+# Help: chat (F1 for more)
+%WThere is no key to start a message. Type, and the
+%Wletters go to the chat line; Enter sends it.
+%pWho reads it
+%Y text           %WEveryone in this arena
+%Y 'text  //text  %WYour team
+%Y "text          %WThe picked player's team
+%Y /text          %WThe picked player only
+%Y :name:text     %WThat player, anywhere in the zone
+%Y ::text         %WWhoever last wrote to you
+%Y #text          %WYour squad
+%Y ;text  ;2;text %WChat channel 1, or channel 2
+%Y =3             %WMove to team 3
+%WThe picked player is the one PgUp and PgDn choose in
+%Wthe player list. Tab finishes a name after the first
+%W:, and pressing : again goes back through the last
+%Wfive players who wrote to you.
+# Help: zone commands (F1 for more)
+%WThese go to the zone, which answers them. Zones
+%Wdiffer: %Y?help%W asks yours what it has.
+%Y ?arena         %WThe arenas here, to pick one from
+%Y ?go name       %WGo to that arena
+%Y ?time          %WTime left in this game
+%Y ?flags         %WWho is holding flags
+%Y ?score         %WThe score, in a ball game
+%Y ?buy           %WWhat you can buy here
+%Y ?buy item      %WBuy it
+%Y ?find name     %WWhere that player is
+%Y ?chat=a,b      %WJoin the chat channels a and b
+%Y ?help message  %WAsk the zone's staff for help

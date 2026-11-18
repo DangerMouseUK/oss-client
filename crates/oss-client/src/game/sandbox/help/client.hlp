@@ -1,0 +1,17 @@
+# Help: this client
+%pCommands it answers itself
+%Y ?go [arena]    %WChange arena (none named: a public one)
+%Y ?namelen x     %WLetters of a name shown in chat
+%Y ?lines x       %WLines of chat shown
+%Y ?status        %WYour ship, and how you are connected
+%Y ?news          %WThe zone's news
+%Y ?quit          %WBack to the login screen
+%pOn the menu (Esc)
+%Y A              %WThe arena list: PgUp, PgDn and Enter
+%Y O              %WOptions: keys, sound, screen, macros
+%Y F              %WFrame rate and ping
+%pIn anything you send
+%Y%%Yselfname %%Ytickname %%Ysquad %%Yfreq %%Ybounty %%Yflags
+%Y%%Yenergy %%Ykiller %%Ykilled %%Ycoord %%Yredname
+%Wbecome what they say: your name, the picked player,
+%Wand so on.

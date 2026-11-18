@@ -408,6 +408,14 @@ impl Lvz {
 
     /// Image definitions whose file has not turned up in any `.lvz` yet. Non-zero
     /// after the last file of an arena means those graphics are genuinely missing.
+    /// One of the files the arena's `.lvz` files carried, by its name in any
+    /// case: a zone's own help file arrives this way.
+    pub fn file(&self, name: &str) -> Option<&[u8]> {
+        self.files
+            .get(&name.to_ascii_lowercase())
+            .map(Vec::as_slice)
+    }
+
     pub fn unresolved_images(&self) -> usize {
         self.unresolved.len()
     }

@@ -21,7 +21,7 @@ rather than "the keys".
 | Delete | Multifire |
 | Esc | Menu — 1-8 change ship, S spectate, A arena list (in a zone), N zone news, O options, F frame rate, Q quit the game. F2 and F12 work with it open, and so do the flying keys |
 | Enter | Send what you have typed |
-| F1 | Help pages (F1 turns the page, Esc closes) |
+| F1 | Help pages (F1 or Page Down turns the page, Page Up goes back, Esc closes). A zone that sends its own help pages, as some do inside their LVZ files, has them shown first, and this client's own page follows |
 | F2 | Cycle the stat box views |
 | Page Up / Page Down | Select a player in the stat box (and scroll the chat log while the menu is open) |
 | F3 | Zone browser (on the login screen) |

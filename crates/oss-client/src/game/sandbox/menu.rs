@@ -292,7 +292,6 @@ fn menu_choice(ch: char, has_news: bool, online: bool) -> Option<MenuChoice> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::help::PanelLines;
     use super::{MenuChoice, may_leave, menu_choice};
 
     #[test]
@@ -314,7 +313,8 @@ mod tests {
         // The box, and the column the ships start at, as `draw_menu` sets them.
         let w = 40.0 * 8.0;
         let half = 26.0 * 8.0;
-        let p = PanelLines::new(w);
+        // Characters of the 8-pixel font that fit from `inset` to the border.
+        let cols = |inset: f32| ((w - inset) / 8.0).floor() as usize;
         let ships = [
             "Ships",
             "1 = Warbird",
@@ -327,7 +327,7 @@ mod tests {
             "8 = Shark",
             "S = Spectator",
         ];
-        let room = p.cols(2.0 + half);
+        let room = cols(2.0 + half);
         for line in ships {
             assert!(
                 line.chars().count() <= room,
@@ -336,7 +336,7 @@ mod tests {
             );
         }
         // And the widest line of the left-hand column.
-        assert!("PgUp/PgDn = Scroll messages".chars().count() <= p.cols(2.0));
+        assert!("PgUp/PgDn = Scroll messages".chars().count() <= cols(2.0));
     }
 
     /// "There's no spectator mode anywhere in the game options menu." Offline,

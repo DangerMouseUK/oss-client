@@ -37,8 +37,6 @@ mod commands;
 mod help;
 mod menu;
 
-use help::help_pages;
-
 const TICK: Duration = Duration::from_millis(10);
 /// Most sim ticks run per frame before we give up catching up (e.g. after a stall).
 const MAX_TICKS_PER_FRAME: u32 = 25;
@@ -118,6 +116,9 @@ pub struct Sandbox {
     /// The F1 help pages are up, and which one.
     help_open: bool,
     help_page: usize,
+    /// How many pages the help came to when it was last drawn, which depends on
+    /// the screen as well as the file: a page too tall goes on over two.
+    help_count: usize,
     /// The key table, for the help page to read the player's own keys out of.
     /// Copied from the live one while the help is open, which is when it is read.
     bindings: super::input::Bindings,
@@ -403,6 +404,7 @@ impl Sandbox {
             news_scroll: 0,
             help_open: false,
             help_page: 0,
+            help_count: 0,
             bindings: Default::default(),
             macros: Vec::new(),
             palette: Default::default(),
@@ -2705,13 +2707,9 @@ impl Sandbox {
             Some(crate::app::StartScreen::Menu) => self.menu = true,
             Some(crate::app::StartScreen::Help(page)) => {
                 self.help_open = true;
-                // A page past the last would draw nothing at all, which reads as a
-                // broken screen rather than as a bad argument.
-                self.help_page = page.min(
-                    help_pages(&self.bindings, self.online())
-                        .len()
-                        .saturating_sub(1),
-                );
+                // A page past the last is shown as the last when it is drawn,
+                // since how many pages there are depends on the screen's size.
+                self.help_page = page;
             }
             None => {}
         }
