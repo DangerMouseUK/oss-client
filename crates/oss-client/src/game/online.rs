@@ -119,11 +119,11 @@ pub struct Online {
     pub attach: Option<String>,
     /// LVZ files received and not yet loaded by the game: (name, bytes).
     pub files: Vec<(String, Vec<u8>)>,
-    /// Transfers started and finished for this arena, so the progress line can say
-    /// where it is in the set. A zone sends a map and anything up to a dozen LVZ
-    /// files, and a bare percentage that restarts at each one reads as a fault.
-    transfers_started: usize,
-    transfers_done: usize,
+    /// This arena's downloads, counted in bytes, for the progress line and bar.
+    downloads: Downloads,
+    /// How far through this arena's downloads we are, 0 to 1, while there are
+    /// any: the connecting screen draws it as a bar.
+    pub progress: Option<f32>,
     /// Chat that arrived before there was a game screen to show it in.
     ///
     /// While the client is still connecting, `pump()` is driven by the connecting
@@ -241,8 +241,8 @@ impl Online {
             attach: opts.attach.clone(),
             files: Vec::new(),
             early_chat: Vec::new(),
-            transfers_started: 0,
-            transfers_done: 0,
+            downloads: Downloads::default(),
+            progress: None,
             known,
             pinned: pin.is_some(),
             server: opts.server.clone(),
@@ -278,8 +278,8 @@ impl Online {
             attach: None,
             files: Vec::new(),
             early_chat: Vec::new(),
-            transfers_started: 0,
-            transfers_done: 0,
+            downloads: Downloads::default(),
+            progress: None,
             known: KnownServers::default(),
             pinned: false,
             server: String::new(),
@@ -378,15 +378,16 @@ impl Online {
                 }
                 SessionEvent::MapNeeded { name, .. } => {
                     // The arena's content starts here, so the count starts here too.
-                    self.transfers_started = 0;
-                    self.transfers_done = 0;
+                    self.downloads = Downloads::default();
+                    self.progress = None;
                     if self
                         .stored_file(name)
                         .is_some_and(|d| self.session.use_cached_map(&d))
                     {
                         log::info!("map {name} from cache");
                     } else {
-                        self.transfers_started += 1;
+                        // The map's size is learnt from its first progress report.
+                        self.downloads.expect(name, 0);
                         self.status = format!("Downloading {name}...");
                         self.session.download_map();
                     }
@@ -396,13 +397,9 @@ impl Online {
                     received,
                     total,
                 } if *total > 0 => {
-                    self.status = progress_line(
-                        name,
-                        *received,
-                        *total,
-                        self.transfers_done,
-                        self.transfers_started,
-                    );
+                    self.downloads.sized(name, *total);
+                    self.status = self.downloads.line(name, *received);
+                    self.progress = Some(self.downloads.fraction(*received));
                 }
                 SessionEvent::MapReady {
                     name,
@@ -410,7 +407,7 @@ impl Online {
                     downloaded,
                 } => {
                     if *downloaded {
-                        self.transfers_done += 1;
+                        self.downloads.finished(name, data.len());
                         if !self.is_replay()
                             && let Err(e) = self.cache.store(name, data)
                         {
@@ -430,7 +427,7 @@ impl Online {
                         if cached.is_some_and(|d| self.session.use_cached_file(&f.name, &d)) {
                             log::info!("{} from cache", f.name);
                         } else {
-                            self.transfers_started += 1;
+                            self.downloads.expect(&f.name, f.size as usize);
                             self.session.download_file(&f.name);
                         }
                     }
@@ -441,7 +438,7 @@ impl Online {
                     downloaded,
                 } => {
                     if *downloaded {
-                        self.transfers_done += 1;
+                        self.downloads.finished(name, data.len());
                         if !self.is_replay()
                             && let Err(e) = self.cache.store(name, data)
                         {
@@ -538,36 +535,92 @@ impl Online {
     }
 }
 
-/// How far through the arena's whole set of transfers we are.
+/// One arena's downloads, counted in bytes.
 ///
-/// Across the set, not within the current file: a zone sends a map and up to a
-/// dozen LVZ files, and a per-file percentage restarts at every one of them. The
-/// first person to watch it reported the figures "rapidly bounce randomly between
-/// 0 and 100 about 20-30 times", which is exactly what a dozen restarts look like.
-/// This rises once and never falls back.
+/// The figure used to be counted in files: a zone sends its map and up to a
+/// dozen LVZ files, and each was one share of the bar however big it was. An
+/// 800 KB map and a 2 KB file were each "one of thirteen", so the bar sat still
+/// through the map, which is most of the wait, and then leapt through the small
+/// files. Counted in bytes, it moves at the speed the data does.
 ///
-/// `done` is the number finished, so `done * 100` is the ground already covered and
-/// the current file contributes its own fraction of one slot.
-fn overall_percent(received: usize, total: usize, done: usize, started: usize) -> usize {
-    let within_file = (received * 100).checked_div(total).unwrap_or(0);
-    match started {
-        // Nothing to average over: the one file's own progress is the honest answer.
-        0 | 1 => within_file,
-        // Clamped because a zone may send a file that was not in the list it gave.
-        n => ((done * 100 + within_file) / n).min(100),
+/// The sizes are the zone's own: it lists each LVZ file's size with the arena,
+/// and the map's comes with its first progress report -- the map always
+/// downloads first, so every size is known before the bar has moved.
+#[derive(Debug, Default)]
+struct Downloads {
+    /// Every file being downloaded for this arena, and its size (0 until known).
+    sizes: Vec<(String, usize)>,
+    /// How many have finished, and the bytes they came to.
+    done: usize,
+    done_bytes: usize,
+}
+
+impl Downloads {
+    /// A file about to be downloaded, `size` bytes (0 if not known yet).
+    fn expect(&mut self, name: &str, size: usize) {
+        self.sizes.push((name.to_string(), size));
+    }
+
+    /// A transfer said how big it is. A file the zone sent without listing it
+    /// is added, so the total still covers it.
+    fn sized(&mut self, name: &str, total: usize) {
+        match self.sizes.iter_mut().find(|(n, _)| n == name) {
+            Some((_, size)) if *size == 0 => *size = total,
+            Some(_) => {}
+            None => self.sizes.push((name.to_string(), total)),
+        }
+    }
+
+    /// A file finished; `len` is what arrived, used where no size was known.
+    fn finished(&mut self, name: &str, len: usize) {
+        let size = self
+            .sizes
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(len, |&(_, s)| if s > 0 { s } else { len });
+        self.done += 1;
+        self.done_bytes += size;
+    }
+
+    fn total(&self) -> usize {
+        self.sizes.iter().map(|(_, s)| s).sum()
+    }
+
+    /// How far through the whole set, 0 to 1, with `received` bytes of the
+    /// current file in. It rises with the data and never falls back.
+    fn fraction(&self, received: usize) -> f32 {
+        match self.total() {
+            0 => 0.0,
+            total => ((self.done_bytes + received) as f32 / total as f32).min(1.0),
+        }
+    }
+
+    /// The line under the bar: which file, where it sits in the set, how much
+    /// of the whole has arrived, and the same as a percentage.
+    fn line(&self, name: &str, received: usize) -> String {
+        let percent = (self.fraction(received) * 100.0).floor() as usize;
+        let n = self.sizes.len();
+        if n <= 1 {
+            return format!("Downloading {name}... {percent}%");
+        }
+        format!(
+            "Downloading {name} ({} of {n})... {} of {}, {percent}%",
+            (self.done + 1).min(n),
+            size_text((self.done_bytes + received).min(self.total())),
+            size_text(self.total()),
+        )
     }
 }
 
-/// The line shown while a zone's content is coming down: what is being fetched,
-/// where it sits in the set, and one percentage for the set as a whole.
-fn progress_line(name: &str, received: usize, total: usize, done: usize, started: usize) -> String {
-    let percent = overall_percent(received, total, done, started);
-    match started {
-        0 | 1 => format!("Downloading {name}... {percent}%"),
-        n => format!(
-            "Downloading {name} ({} of {n})... {percent}%",
-            (done + 1).min(n)
-        ),
+/// A size as a player reads one: kilobytes below a megabyte, megabytes to one
+/// place above.
+fn size_text(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * 1024;
+    if bytes < MB {
+        format!("{} KB", bytes.div_ceil(KB))
+    } else {
+        format!("{:.1} MB", bytes as f32 / MB as f32)
     }
 }
 
@@ -580,7 +633,7 @@ mod tests {
     use oss_session::security::{HandshakeRequest, SecurityMode, SecurityProfile};
     use oss_session::{ClientProfile, LoginForm, Profile, SecurityAnswer, SecurityChallenge};
 
-    use super::{Online, ServerOptions, Supplied, overall_percent, progress_line};
+    use super::{Downloads, Online, ServerOptions, Supplied, size_text};
 
     /// A stand-in for a build outside this repository, supplying both halves. The
     /// handshake it returns is the VIE one and the login form the SubSpace one,
@@ -670,54 +723,69 @@ mod tests {
         drop(net);
     }
 
+    /// An arena as it arrives: a big map, then a handful of small files.
+    fn arena() -> Downloads {
+        let mut d = Downloads::default();
+        d.expect("jun2018.lvl", 0);
+        for i in 0..12 {
+            d.expect(&format!("pack{i}.lvz"), 20 * 1024);
+        }
+        // The map's size comes with its first progress report.
+        d.sized("jun2018.lvl", 800 * 1024);
+        d
+    }
+
+    /// Counted in bytes, the map is most of the bar: halfway through the map is
+    /// about a third of the way, where counting files said under four percent.
     #[test]
-    fn progress_names_the_file_and_its_place_in_the_set() {
-        // Second of fourteen, one finished, this one a tenth in.
+    fn the_bar_moves_with_the_data_not_the_file_count() {
+        let d = arena();
+        let half_map = d.fraction(400 * 1024);
+        assert!((0.3..0.4).contains(&half_map), "{half_map}");
         assert_eq!(
-            progress_line("hz_sb.lvz", 10, 100, 1, 14),
-            "Downloading hz_sb.lvz (2 of 14)... 7%"
-        );
-        // The last one, nearly done.
-        assert_eq!(
-            progress_line("tutorial.lvz", 99, 100, 13, 14),
-            "Downloading tutorial.lvz (14 of 14)... 99%"
-        );
-        // A file beyond the list must not read "15 of 14", nor over 100%.
-        assert_eq!(
-            progress_line("extra.lvz", 50, 100, 14, 14),
-            "Downloading extra.lvz (14 of 14)... 100%"
-        );
-        // A lone transfer reports itself, without a meaningless "1 of 1".
-        assert_eq!(
-            progress_line("smallmap.lvl", 40, 100, 0, 1),
-            "Downloading smallmap.lvl... 40%"
+            d.line("jun2018.lvl", 400 * 1024),
+            "Downloading jun2018.lvl (1 of 13)... 400 KB of 1.0 MB, 38%"
         );
     }
 
-    /// The whole point of the change: the figure must never fall back. Walks a
-    /// fourteen-file set from nothing to finished, the way a real arena arrives.
+    /// The figure never falls back, from nothing to finished, and ends at 100%.
     #[test]
     fn the_percentage_never_goes_backwards_across_a_set() {
-        let files = 14;
-        let mut last = 0;
-        for done in 0..files {
-            for received in (0..=100).step_by(7) {
-                let now = overall_percent(received, 100, done, files);
-                assert!(
-                    now >= last,
-                    "fell from {last}% to {now}% at file {done}, {received}/100"
-                );
-                assert!(now <= 100, "{now}% over 100 at file {done}");
+        let mut d = arena();
+        let mut last = 0.0;
+        let files: Vec<(String, usize)> = d.sizes.clone();
+        for (name, size) in files {
+            for received in (0..=size).step_by(4096) {
+                let now = d.fraction(received);
+                assert!(now >= last, "fell from {last} to {now} in {name}");
+                assert!(now <= 1.0);
                 last = now;
             }
+            d.finished(&name, size);
         }
-        // A set that finishes reads as finished.
-        assert_eq!(overall_percent(100, 100, files - 1, files), 100);
+        assert_eq!(d.fraction(0), 1.0);
     }
 
-    /// A zone that reports a zero-length transfer must not divide by zero.
+    /// A lone file reports itself, without a meaningless "1 of 1"; a file the
+    /// zone did not list is counted rather than pushing past 100%; and a zone
+    /// that reports a zero-length transfer does not divide by zero.
     #[test]
-    fn a_zero_length_transfer_is_survivable() {
-        assert_eq!(overall_percent(0, 0, 3, 14), 21);
+    fn odd_sets_are_survivable() {
+        let mut one = Downloads::default();
+        one.expect("smallmap.lvl", 0);
+        one.sized("smallmap.lvl", 100);
+        assert_eq!(
+            one.line("smallmap.lvl", 40),
+            "Downloading smallmap.lvl... 40%"
+        );
+
+        let mut d = arena();
+        d.sized("extra.lvz", 4096);
+        assert_eq!(d.sizes.len(), 14);
+        assert!(d.fraction(usize::MAX / 2) <= 1.0);
+
+        assert_eq!(Downloads::default().fraction(0), 0.0);
+        assert_eq!(size_text(1), "1 KB");
+        assert_eq!(size_text(3_460_000), "3.3 MB");
     }
 }

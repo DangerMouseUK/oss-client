@@ -1209,6 +1209,22 @@ impl App {
                         line,
                     );
                 }
+                // The bar, in the gap under the status line, filled by how
+                // much of the arena's content has arrived (counted in bytes).
+                if let Some(done) = conn.net.progress {
+                    let w = (c.view_w * 0.5).clamp(80.0, 320.0).floor();
+                    let x = ((c.view_w - w) / 2.0).floor();
+                    let y = (c.view_h / 2.0 - 20.0 + 14.0 + 3.0).floor();
+                    c.rect(&mut run.renderer, x, y, w, 6.0, [0.15, 0.15, 0.2, 1.0]);
+                    c.rect(
+                        &mut run.renderer,
+                        x,
+                        y,
+                        (w * done.clamp(0.0, 1.0)).floor(),
+                        6.0,
+                        [0.25, 0.8, 0.35, 1.0],
+                    );
+                }
                 None
             }
             Screen::Empty => None,

@@ -833,7 +833,7 @@ impl Session {
             y_res: self.cfg.resolution.1 as i16,
             arena_type,
             arena,
-            optional_graphics: self.cfg.want_lvz.then_some(1),
+            optional_graphics: self.optional_graphics(),
         };
         self.send(&go, true);
         self.state = State::EnteringArena;
@@ -1351,10 +1351,28 @@ impl Session {
             y_res: self.cfg.resolution.1 as i16,
             arena_type,
             arena: name,
-            optional_graphics: self.cfg.want_lvz.then_some(1),
+            optional_graphics: self.optional_graphics(),
         };
         self.send(&go, true);
         self.state = State::EnteringArena;
+    }
+
+    /// The arena-entry packet's optional-graphics byte, chosen by the kind of
+    /// connection (see [`SessionConfig::want_lvz`] for what the byte does).
+    ///
+    /// - **Continuum-encrypted**: `0`. The zone already lists a Continuum client
+    ///   every file it needs; the byte would add the ones the arena marks
+    ///   optional, which real Continuum is never sent. A player there downloaded
+    ///   3.3 MB entering one arena, more than Continuum would have.
+    /// - **Any other kind**: `1`, because for a client the zone does not take for
+    ///   Continuum the byte is the only way to be offered any graphics at all.
+    /// - **Not wanted at all** (a bot): no byte, the shorter form of the packet.
+    fn optional_graphics(&self) -> Option<u8> {
+        if !self.cfg.want_lvz {
+            return None;
+        }
+        let continuum = matches!(self.conn.cipher_kind(), Some(CipherKind::Continuum));
+        Some(u8::from(!continuum))
     }
 
     /// Downloads extra file `name`. Transfers run one at a time, after the map.
@@ -2124,6 +2142,26 @@ mod tests {
         assert!(login_succeeded(login_code::OK));
         assert!(login_succeeded(login_code::NO_SCORES));
         assert!(login_succeeded(login_code::SPEC_ONLY));
+    }
+
+    /// The optional-graphics byte, by connection. Off a Continuum-encrypted
+    /// connection the byte is 1, the only way to be offered graphics at all; a
+    /// bot that wants none sends the short packet with no byte. (The Continuum
+    /// case, where the byte is 0, needs Continuum's encryption, which this
+    /// repository does not build; it is one `matches!` in `optional_graphics`.)
+    #[test]
+    fn optional_graphics_are_asked_for_by_connection() {
+        let wanting = Session::new(
+            SessionConfig {
+                want_lvz: true,
+                ..Default::default()
+            },
+            0,
+            1,
+        );
+        assert_eq!(wanting.optional_graphics(), Some(1));
+        let bot = Session::new(SessionConfig::default(), 0, 1);
+        assert_eq!(bot.optional_graphics(), None);
     }
 
     #[test]
