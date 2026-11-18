@@ -89,17 +89,22 @@ pub struct SessionConfig {
     /// `SubspaceServer.NET` does the same thing in
     /// `Modules/MapNewsDownload.cs:155,161`. Both read on 2026-11-17.
     pub want_lvz: bool,
-    /// Register the name on login: the login packet's "new user" byte
-    /// (mervbot `generatePassword`, `clientprot.cpp`).
+    /// Say yes, without asking, when the zone offers to create the name.
     ///
-    /// Subgame refuses a name it does not know with
-    /// [`login_code::NEW_USER`] unless this is set, and its accounts do not survive a
-    /// zone restart, so against a freshly started subgame **every** name is new. ASSS reads the byte only on the billing path
-    /// (`billing_ssc.c` forwards it as `MakeNew`); a billerless ASSS zone ignores it
-    /// and takes any name either way.
+    /// A zone that does not know a name answers the login with
+    /// [`login_code::NEW_USER`]. The real clients then ask the player and, on a
+    /// yes, send the same login again on the same connection with the packet's
+    /// "new user" byte set (mervbot `generatePassword`, `clientprot.cpp`). This
+    /// session does the same: the first login always goes out with the byte
+    /// clear, the offer arrives as [`SessionEvent::NewUserRequired`], and
+    /// [`Session::create_account`] is the yes. With this set, the session gives
+    /// that yes itself, which is what a script or a bot wants.
     ///
-    /// Off by default: it asks the server to create an account, so a mistyped name
-    /// should fail rather than quietly become a new player.
+    /// So this can never create an account the zone did not first say was new.
+    /// Subgame's accounts do not survive a zone restart, so against a freshly
+    /// started subgame **every** name is new and every login takes the extra
+    /// round trip. ASSS reads the byte only on the billing path (`billing_ssc.c`
+    /// forwards it as `MakeNew`); a billerless ASSS zone takes any name either way.
     pub new_user: bool,
     /// Which client to present as on the wire: the login form and the answer to a
     /// security challenge. Defaults to [`VieClient`].
@@ -224,6 +229,18 @@ pub struct OwnPosition {
 pub enum SessionEvent {
     /// The transport handshake finished; logging in.
     Connected,
+    /// The zone does not know this name and offers to create it
+    /// ([`login_code::NEW_USER`]). The connection is still open: answer with
+    /// [`Session::create_account`], or [`Session::disconnect`] to decline.
+    ///
+    /// Show the player `name`. Quoting it back is the guard against a typo
+    /// becoming a permanent account: the player believes they typed their own
+    /// name correctly until they are shown otherwise.
+    NewUserRequired {
+        name: String,
+        /// The zone's own words, when it sent some (S2C `0x33`).
+        zone_text: Option<String>,
+    },
     /// The zone refused the login.
     LoginFailed {
         code: u8,
@@ -484,6 +501,12 @@ pub struct Session {
     replay_clock: Option<(u64, u32)>,
     /// When the server last sent anything (session ms).
     last_data_ms: u64,
+    /// The login on the wire carries the "new user" byte. Set once, by
+    /// [`Session::create_account`]; a second [`login_code::NEW_USER`] after it is
+    /// a refusal, so a zone that keeps answering it cannot loop us.
+    new_user_sent: bool,
+    /// [`SessionEvent::NewUserRequired`] is waiting for an answer.
+    awaiting_new_user: bool,
 }
 
 impl Session {
@@ -545,6 +568,8 @@ impl Session {
             playback: false,
             replay_clock: None,
             last_data_ms: now_ms,
+            new_user_sent: false,
+            awaiting_new_user: false,
         }
     }
 
@@ -724,7 +749,31 @@ impl Session {
     }
 
     pub fn disconnect(&mut self) {
+        self.awaiting_new_user = false;
         self.conn.disconnect();
+    }
+
+    /// The yes to [`SessionEvent::NewUserRequired`]: sends the same login again,
+    /// on the same connection, asking the zone to create the name with the
+    /// password already given.
+    ///
+    /// The same connection, because ASSS (`core.c`: a failed login returns the
+    /// player to `S_CONNECTED`, the one state a login is accepted in) and
+    /// `oss-server` both keep it open for exactly this. Returns `false`, and sends
+    /// nothing, when no offer is waiting.
+    pub fn create_account(&mut self) -> bool {
+        if !std::mem::take(&mut self.awaiting_new_user) {
+            return false;
+        }
+        log::info!("asking the zone to create {:?}", self.cfg.name);
+        self.new_user_sent = true;
+        self.send_login();
+        true
+    }
+
+    /// Whether [`SessionEvent::NewUserRequired`] is waiting for an answer.
+    pub fn new_user_offered(&self) -> bool {
+        self.awaiting_new_user
     }
 
     fn send(&mut self, packet: &impl Packet, reliable: bool) {
@@ -794,7 +843,7 @@ impl Session {
         }
         let login = Login {
             kind: form.kind,
-            flags: u8::from(self.cfg.new_user),
+            flags: u8::from(self.new_user_sent),
             name: FixedStr::new(self.cfg.name.as_bytes()),
             password: FixedStr::new(self.cfg.password.as_bytes()),
             machine_id: self.cfg.machine_id,
@@ -873,6 +922,25 @@ impl Session {
                 // the other two (`AUTH_IS_OK` in its `core.h`), and the player
                 // enters to watch. This client refused it, so such a zone could
                 // not be entered at all.
+                // A zone that does not know the name offers to create it, and the
+                // connection stays up for the answer: see `create_account`. Not
+                // while playing a recording back, which holds the zone's side
+                // only -- its next answer is already in it.
+                if r.code == login_code::NEW_USER && !self.new_user_sent {
+                    if self.playback {
+                        return;
+                    }
+                    self.awaiting_new_user = true;
+                    if self.cfg.new_user {
+                        self.create_account();
+                    } else {
+                        self.events.push_back(SessionEvent::NewUserRequired {
+                            name: self.cfg.name.clone(),
+                            zone_text,
+                        });
+                    }
+                    return;
+                }
                 if login_succeeded(r.code) {
                     self.events.push_back(SessionEvent::LoggedIn);
                     let notice = match r.code {
@@ -1833,9 +1901,12 @@ fn login_succeeded(code: u8) -> bool {
 /// says that first.
 fn login_message(code: u8) -> &'static str {
     match code {
+        // Reached only when the zone answers "unknown name" a second time, to a
+        // login that already asked it to create the name: the first one is an
+        // offer, `SessionEvent::NewUserRequired`.
         login_code::NEW_USER => {
-            "This name is not registered on this zone. Check the spelling; a new name \
-             has to be registered first (start with --new-user)."
+            "The zone would not create an account with this name. Try another name, \
+             or ask the zone's staff how to register one."
         }
         login_code::BAD_PASSWORD => {
             "Wrong password for this name. Check it before trying again: many zones \

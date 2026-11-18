@@ -42,12 +42,30 @@ fn player(pid: i16, name: &str, ship: i8) -> PlayerData {
     }
 }
 
+/// How the zone treats a name it is given.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Names {
+    /// Any name is let in.
+    #[default]
+    Any,
+    /// A name is "unknown" (login code `0x01`) until a login asks for it to be
+    /// created -- the `oss-biller` `Ask` policy.
+    AskFirst,
+    /// "Unknown", whatever the login asks: a broken or hostile zone.
+    NeverCreate,
+}
+
 #[derive(Default)]
 struct Zone {
     settings: Vec<u8>,
+    names: Names,
     got_login: Option<String>,
     /// The login packet's "new user" byte, as the zone received it.
     login_flags: Option<u8>,
+    /// That byte for every login received, in order.
+    logins: Vec<u8>,
+    /// Arena requests received.
+    go_arenas: usize,
     /// The login exactly as it arrived: length, type byte and client version. ASSS
     /// checks the length against the client type the encryption chose, so these are
     /// what decides whether a zone accepts us at all.
@@ -92,10 +110,16 @@ impl Zone {
             C2SPacket::Login(l) => {
                 self.got_login = l.name.to_str().map(str::to_string);
                 self.login_flags = Some(l.flags);
+                self.logins.push(l.flags);
                 self.login_wire = Some((pkt.len(), l.kind, l.client_version));
+                let code = match self.names {
+                    Names::Any => 0,
+                    Names::AskFirst if l.flags == 1 => 0,
+                    Names::AskFirst | Names::NeverCreate => 1,
+                };
                 send(server, &|o| {
                     LoginResponse {
-                        code: 0,
+                        code,
                         server_version: 134,
                         news_checksum: checksum::crc32(NEWS),
                         ..Default::default()
@@ -104,6 +128,7 @@ impl Zone {
                 });
             }
             C2SPacket::GoArena(go) => {
+                self.go_arenas += 1;
                 assert_eq!(go.optional_graphics, Some(1), "asks for LVZ files");
                 let settings = ClientSettings::default();
                 self.settings = settings.to_bytes();
@@ -209,45 +234,189 @@ impl Zone {
     }
 }
 
-/// `SessionConfig::new_user` sets the login packet's "new user" byte, which subgame
-/// requires for a name it does not know — and since its accounts do not survive a
-/// zone restart, that is every name on a freshly started zone. Byte 1 of the login
-/// packet, from mervbot's `generatePassword` (`clientprot.cpp`).
-#[test]
-fn new_user_asks_the_zone_to_register_the_name() {
-    let mut now = 1_000u64;
+/// One 10 ms step of a session talking to a scripted zone, returning what the
+/// session reported.
+fn step(
+    client: &mut Session,
+    server: &mut Server<u32>,
+    zone: &mut Zone,
+    now: &mut u64,
+) -> Vec<SessionEvent> {
+    *now += 10;
+    client.tick(*now);
+    while let Some(d) = client.poll_transmit() {
+        server.handle_datagram(*now, ADDR, &d);
+    }
+    server.tick(*now);
+    while let Some((_, ev)) = server.poll_event() {
+        if let Event::Packet(p) = ev {
+            zone.handle(server, &p);
+        }
+    }
+    while let Some((_, d)) = server.poll_transmit() {
+        client.handle_datagram(*now, &d);
+    }
+    std::iter::from_fn(|| client.poll_event()).collect()
+}
+
+fn vie_server() -> Server<u32> {
     let mut server = Server::new(Config::server());
     server.add_acceptor(Box::new(VieAcceptor::default()));
+    server
+}
+
+/// A zone that does not know the name offers to create it, and the session
+/// asks rather than answering: the first login goes out with the "new user"
+/// byte clear, the offer is reported, and **the connection stays up** for the
+/// answer. The yes is the same login again on the same connection with the
+/// byte set (byte 1 of the packet, mervbot's `generatePassword` in
+/// `clientprot.cpp`), and the zone then lets the player in.
+#[test]
+fn an_unknown_name_is_offered_and_created_on_the_same_connection() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
+    let cfg = SessionConfig {
+        name: "newbie".into(),
+        password: "pw".into(),
+        want_lvz: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone {
+        names: Names::AskFirst,
+        ..Default::default()
+    };
+
+    let mut offered = None;
+    for _ in 0..300 {
+        for ev in step(&mut client, &mut server, &mut zone, &mut now) {
+            assert!(
+                !matches!(ev, SessionEvent::LoginFailed { .. }),
+                "an unknown name is an offer, not a refusal: {ev:?}"
+            );
+            if let SessionEvent::NewUserRequired { name, .. } = ev {
+                offered = Some(name);
+            }
+        }
+        if offered.is_some() {
+            break;
+        }
+    }
+    assert_eq!(
+        offered.as_deref(),
+        Some("newbie"),
+        "the offer quotes the name"
+    );
+    assert_eq!(zone.logins, [0], "the first login does not ask to create");
+    assert!(client.new_user_offered());
+
+    // Nothing more goes out while the player decides, however long that is.
+    for _ in 0..100 {
+        step(&mut client, &mut server, &mut zone, &mut now);
+    }
+    assert_eq!(zone.logins, [0]);
+    assert_eq!(client.state(), State::LoggingIn, "still connected");
+
+    assert!(client.create_account());
+    assert!(!client.create_account(), "one yes per offer");
+    let mut logged_in = false;
+    for _ in 0..300 {
+        logged_in |= step(&mut client, &mut server, &mut zone, &mut now)
+            .iter()
+            .any(|e| matches!(e, SessionEvent::LoggedIn));
+        if logged_in {
+            break;
+        }
+    }
+    assert!(logged_in);
+    assert_eq!(zone.logins, [0, 1], "the same connection, asking to create");
+}
+
+/// `SessionConfig::new_user` answers the offer by itself, for scripts and the
+/// bot. It still waits to be told the name is new: it can never create an
+/// account the zone did not first say was unknown.
+#[test]
+fn new_user_says_yes_by_itself_but_only_when_asked() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
+    let cfg = SessionConfig {
+        name: "newbie".into(),
+        new_user: true,
+        want_lvz: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone {
+        names: Names::AskFirst,
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    for _ in 0..400 {
+        events.extend(step(&mut client, &mut server, &mut zone, &mut now));
+        if events.iter().any(|e| matches!(e, SessionEvent::LoggedIn)) {
+            break;
+        }
+    }
+    assert_eq!(zone.got_login.as_deref(), Some("newbie"));
+    assert_eq!(zone.logins, [0, 1]);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::NewUserRequired { .. })),
+        "nobody is asked"
+    );
+
+    // And a known name is never asked to be created.
+    let mut client = Session::new(
+        SessionConfig {
+            name: "known".into(),
+            new_user: true,
+            want_lvz: true,
+            ..Default::default()
+        },
+        now,
+        0xBEEF,
+    );
+    let mut server = vie_server();
+    let mut zone = Zone::default();
+    for _ in 0..300 {
+        step(&mut client, &mut server, &mut zone, &mut now);
+        if zone.go_arenas > 0 {
+            break;
+        }
+    }
+    assert_eq!(zone.logins, [0]);
+}
+
+/// A zone that answers "unknown name" to the login that asked it to create the
+/// name is refusing, not offering again. Without this guard the session would
+/// resend for as long as the zone kept answering.
+#[test]
+fn a_second_unknown_name_answer_is_a_refusal_not_a_loop() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
     let cfg = SessionConfig {
         name: "newbie".into(),
         new_user: true,
         ..Default::default()
     };
     let mut client = Session::new(cfg, now, 0xBEEF);
-    let mut zone = Zone::default();
-
-    for _ in 0..200 {
-        now += 10;
-        client.tick(now);
-        while let Some(d) = client.poll_transmit() {
-            server.handle_datagram(now, ADDR, &d);
-        }
-        server.tick(now);
-        while let Some((_, ev)) = server.poll_event() {
-            if let Event::Packet(p) = ev {
-                zone.handle(&mut server, &p);
+    let mut zone = Zone {
+        names: Names::NeverCreate,
+        ..Default::default()
+    };
+    let mut failed = None;
+    for _ in 0..600 {
+        for ev in step(&mut client, &mut server, &mut zone, &mut now) {
+            if let SessionEvent::LoginFailed { code, message, .. } = ev {
+                failed = Some((code, message));
             }
         }
-        while let Some((_, d)) = server.poll_transmit() {
-            client.handle_datagram(now, &d);
-        }
-        while client.poll_event().is_some() {}
-        if zone.login_flags.is_some() {
-            break;
-        }
     }
-    assert_eq!(zone.got_login.as_deref(), Some("newbie"));
-    assert_eq!(zone.login_flags, Some(1));
+    let (code, message) = failed.expect("refused");
+    assert_eq!(code, 0x01);
+    assert!(!message.contains("--"), "no command line in it: {message}");
+    assert_eq!(zone.logins, [0, 1], "asked once, and no more");
 }
 
 /// A stand-in for the private Continuum side: it answers in the Continuum *shape*

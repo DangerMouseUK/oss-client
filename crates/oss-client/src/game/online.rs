@@ -111,6 +111,12 @@ pub struct Online {
     pub status: String,
     /// Set when the session failed or closed.
     pub error: Option<String>,
+    /// The zone does not know the name and offers to create it: the name, and
+    /// anything the zone said with the offer. The connection is still open,
+    /// waiting for [`Online::create_account`] or a disconnect. Held here rather
+    /// than in [`Online::error`], which would take the player back to the
+    /// login form and the connection with it.
+    pub new_account: Option<(String, Option<String>)>,
     /// Team requested on the command line.
     pub freq: Option<i16>,
     /// Player to follow (`--follow`), until found.
@@ -236,6 +242,7 @@ impl Online {
             seeds: None,
             status: format!("Connecting to {}...", opts.server),
             error: None,
+            new_account: None,
             freq: opts.freq,
             follow: opts.follow.clone(),
             attach: opts.attach.clone(),
@@ -273,6 +280,7 @@ impl Online {
                 secs % 60
             ),
             error: None,
+            new_account: None,
             freq: None,
             follow: recorder,
             attach: None,
@@ -360,6 +368,14 @@ impl Online {
                     // checksum differs from the copy it kept.
                     let cached = self.stored_file(NEWS_FILE);
                     self.session.request_news_if_new(cached.as_deref());
+                }
+                SessionEvent::NewUserRequired { name, zone_text } => {
+                    log::info!(
+                        "{} does not know {name:?} and offers to create it",
+                        self.server
+                    );
+                    self.status = format!("No account named '{name}' on this zone.");
+                    self.new_account = Some((name.clone(), zone_text.clone()));
                 }
                 SessionEvent::LoginFailed {
                     code,
@@ -514,6 +530,21 @@ impl Online {
     /// during login is lost.
     pub fn take_early_chat(&mut self) -> Vec<SessionEvent> {
         std::mem::take(&mut self.early_chat)
+    }
+
+    /// The yes to the zone's offer to create the name ([`Online::new_account`]):
+    /// the same login again, on the same connection, asking for the account.
+    pub fn create_account(&mut self) {
+        if self.new_account.take().is_some() && self.session.create_account() {
+            self.status = "Creating the account...".into();
+            self.flush();
+        }
+    }
+
+    /// The password the login was sent with, which the player has to type a
+    /// second time before an account is made with it.
+    pub fn password(&self) -> &str {
+        &self.session.config().password
     }
 
     /// Tells the zone we are leaving, and puts it on the wire before we go.

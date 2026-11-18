@@ -13,6 +13,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::audio::Audio;
+use crate::game::account::{Answer, Prompt};
 use crate::game::art::{self, Art};
 use crate::game::input::{InputState, Stroke, char_for, shifted_char};
 use crate::game::login::{Choice, Login};
@@ -245,6 +246,9 @@ struct Connecting {
     atlas: TextureId,
     /// The form to go back to if the connection fails.
     login: Option<Login>,
+    /// A question the zone has asked, drawn over the progress lines while it
+    /// waits for an answer.
+    prompt: Option<Prompt>,
 }
 
 struct LoginScreen {
@@ -542,6 +546,7 @@ impl ApplicationHandler for App {
                     art,
                     atlas,
                     login: None,
+                    prompt: None,
                 }))
             }
             Mode::Replay(path) => {
@@ -558,6 +563,7 @@ impl ApplicationHandler for App {
                     art,
                     atlas,
                     login: None,
+                    prompt: None,
                 }))
             }
             Mode::Login(z) => {
@@ -1039,6 +1045,7 @@ impl App {
                                 art,
                                 atlas,
                                 login: Some(login),
+                                prompt: None,
                             }));
                         }
                         Err(e) => ls.login.error = Some(e),
@@ -1050,14 +1057,49 @@ impl App {
         // Connecting: pump until the arena is ready, then switch to the game.
         if let Screen::Connecting(conn) = &mut run.screen {
             conn.net.pump();
-            let give_up = self
-                .input
-                .take_strokes()
-                .iter()
-                .any(|s| s.first_press() == Some(KeyCode::Escape));
+            // The zone offered to create the name: ask the player, over this
+            // screen, with the connection held open behind the box.
+            if conn.prompt.is_none()
+                && let Some((name, said)) = &conn.net.new_account
+            {
+                conn.prompt = Some(Prompt::new_account(name, said.as_deref()));
+            }
+            let strokes = self.input.take_strokes();
             self.input.take_edges();
+            let clicked = std::mem::take(&mut self.clicked);
+            // Why the player is going back, when they are.
+            let mut give_up = None;
+            if let Some(prompt) = conn.prompt.as_mut() {
+                let password = conn.net.password();
+                let mut answer = prompt.input(&strokes, self.input.shift(), password);
+                if answer.is_none()
+                    && clicked
+                    && let Some((mx, my)) = cursor
+                {
+                    answer = prompt.click(mx, my, password);
+                }
+                match answer {
+                    Some(Answer::Create) => {
+                        conn.prompt = None;
+                        conn.net.create_account();
+                    }
+                    Some(Answer::Cancel) => give_up = Some("No account was created.".to_string()),
+                    None => {}
+                }
+            } else if strokes
+                .iter()
+                .any(|s| s.first_press() == Some(KeyCode::Escape))
+            {
+                give_up = Some("Cancelled".to_string());
+            }
             let failed = conn.net.error.clone();
-            if give_up || failed.is_some() {
+            if give_up.is_some() || failed.is_some() {
+                // Say so to the zone. Dropping the session sends nothing, and a
+                // zone holding a login open for an answer would otherwise wait
+                // out the timeout for one that is not coming.
+                if failed.is_none() {
+                    conn.net.disconnect();
+                }
                 // Back to the form if there was one; otherwise this was the whole run.
                 let Screen::Connecting(conn) = std::mem::replace(&mut run.screen, Screen::Empty)
                 else {
@@ -1068,7 +1110,7 @@ impl App {
                 } = *conn;
                 match (login, failed) {
                     (Some(mut login), err) => {
-                        login.error = Some(err.unwrap_or_else(|| "Cancelled".into()));
+                        login.error = err.or(give_up);
                         run.screen = Screen::Login(Box::new(LoginScreen {
                             login,
                             art,
@@ -1082,6 +1124,9 @@ impl App {
                     }
                     (None, Some(err)) => return self.fail(event_loop, err),
                     (None, None) => {
+                        if let Some(why) = give_up {
+                            log::info!("{why}");
+                        }
                         event_loop.exit();
                         return;
                     }
@@ -1197,33 +1242,10 @@ impl App {
                     run.scale,
                     (0.0, 0.0),
                 );
-                let lines = [conn.net.status.as_str(), "", "Esc to give up"];
-                for (i, line) in lines.iter().enumerate() {
-                    let x = ((c.view_w - line.len() as f32 * 8.0) / 2.0).floor();
-                    let y = (c.view_h / 2.0 - 20.0 + i as f32 * 14.0).floor();
-                    c.text(
-                        &mut run.renderer,
-                        x,
-                        y,
-                        if i == 0 { color::GREEN } else { color::WHITE },
-                        line,
-                    );
-                }
-                // The bar, in the gap under the status line, filled by how
-                // much of the arena's content has arrived (counted in bytes).
-                if let Some(done) = conn.net.progress {
-                    let w = (c.view_w * 0.5).clamp(80.0, 320.0).floor();
-                    let x = ((c.view_w - w) / 2.0).floor();
-                    let y = (c.view_h / 2.0 - 20.0 + 14.0 + 3.0).floor();
-                    c.rect(&mut run.renderer, x, y, w, 6.0, [0.15, 0.15, 0.2, 1.0]);
-                    c.rect(
-                        &mut run.renderer,
-                        x,
-                        y,
-                        (w * done.clamp(0.0, 1.0)).floor(),
-                        6.0,
-                        [0.25, 0.8, 0.35, 1.0],
-                    );
+                if let Some(prompt) = conn.prompt.as_mut() {
+                    prompt.draw(&c, &mut run.renderer, cursor);
+                } else {
+                    draw_progress(&c, &mut run.renderer, &conn.net);
                 }
                 None
             }
@@ -1800,6 +1822,39 @@ fn draw_start_screen(
         .enumerate()
     {
         c.text(r, x + 4.0, foot + 18.0 + i as f32 * 12.0, colour, line);
+    }
+}
+
+/// The connecting screen while nothing is being asked: where the connection has
+/// got to, how to give up, and a bar for the arena's downloads.
+fn draw_progress(c: &Canvas, r: &mut Renderer, net: &Online) {
+    let lines = [net.status.as_str(), "", "Esc to give up"];
+    for (i, line) in lines.iter().enumerate() {
+        let x = ((c.view_w - line.len() as f32 * 8.0) / 2.0).floor();
+        let y = (c.view_h / 2.0 - 20.0 + i as f32 * 14.0).floor();
+        c.text(
+            r,
+            x,
+            y,
+            if i == 0 { color::GREEN } else { color::WHITE },
+            line,
+        );
+    }
+    // The bar, in the gap under the status line, filled by how much of the
+    // arena's content has arrived (counted in bytes).
+    if let Some(done) = net.progress {
+        let w = (c.view_w * 0.5).clamp(80.0, 320.0).floor();
+        let x = ((c.view_w - w) / 2.0).floor();
+        let y = (c.view_h / 2.0 - 20.0 + 14.0 + 3.0).floor();
+        c.rect(r, x, y, w, 6.0, [0.15, 0.15, 0.2, 1.0]);
+        c.rect(
+            r,
+            x,
+            y,
+            (w * done.clamp(0.0, 1.0)).floor(),
+            6.0,
+            [0.25, 0.8, 0.35, 1.0],
+        );
     }
 }
 

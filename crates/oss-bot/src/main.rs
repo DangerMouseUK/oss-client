@@ -163,6 +163,15 @@ impl Bot {
                     let why = zone_text.as_deref().unwrap_or(message);
                     log::warn!("[{}] login failed: {why}", self.label)
                 }
+                // Only reached without --new-user: with it the session says yes
+                // by itself. A bot has nobody to ask, so it declines.
+                SessionEvent::NewUserRequired { name, .. } => {
+                    log::warn!(
+                        "[{}] the zone does not know {name:?}; pass --new-user to create it",
+                        self.label
+                    );
+                    self.session.disconnect();
+                }
                 SessionEvent::LoggedIn => self.log("logged in"),
                 SessionEvent::EnteredArena { pid } => {
                     self.log(format_args!("entering arena as pid {pid}"))
