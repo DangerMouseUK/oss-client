@@ -92,7 +92,10 @@ impl Sandbox {
     /// inside the menu is still a miss, not "any other key", because a pointer
     /// that dismisses the menu wherever it lands would make the ships
     /// unclickable at the edges.
-    pub fn click(&self, x: f32, y: f32) -> Option<Stroke> {
+    pub fn click(&mut self, x: f32, y: f32) -> Option<Stroke> {
+        if self.click_arena_list(x, y) {
+            return None;
+        }
         if !self.menu {
             return None;
         }
@@ -104,7 +107,7 @@ impl Sandbox {
 
     /// One of the menu's own keys, or `false` for "any other key".
     fn menu_key(&mut self, ch: char) -> bool {
-        let Some(choice) = menu_choice(ch, !self.news.is_empty()) else {
+        let Some(choice) = menu_choice(ch, !self.news.is_empty(), self.online()) else {
             return false;
         };
         match choice {
@@ -117,6 +120,7 @@ impl Sandbox {
             }
             MenuChoice::Ship(kind) => self.request_ship(kind),
             MenuChoice::FrameRate => self.fps_view = self.fps_view.next(),
+            MenuChoice::Arenas => self.ask_for_arenas(),
         }
         true
     }
@@ -164,6 +168,9 @@ impl Sandbox {
             ("F1 = Help", Stroke::press(KeyCode::F1)),
             ("F2 = Stat box", Stroke::press(KeyCode::F2)),
         ];
+        if self.online() {
+            keys.push((" A = Arena list", Stroke::press(KeyCode::KeyA).typing('a')));
+        }
         if !self.news.is_empty() {
             keys.push((" N = Zone news", Stroke::press(KeyCode::KeyN).typing('n')));
         }
@@ -258,6 +265,8 @@ enum MenuChoice {
     Ship(u8),
     /// Esc then F: Continuum's frame-rate key, which its menu does not list.
     FrameRate,
+    /// Esc then A: the zone's arena list.
+    Arenas,
 }
 
 /// What a character typed on the menu does, or `None` for "any other key to
@@ -268,13 +277,14 @@ enum MenuChoice {
 /// news row, which is there when the zone sent any news: spectator used to vary
 /// too -- it was answered only when there was a zone -- and that is what left
 /// the offline sandbox's menu with no spectator on it at all.
-fn menu_choice(ch: char, has_news: bool) -> Option<MenuChoice> {
+fn menu_choice(ch: char, has_news: bool, online: bool) -> Option<MenuChoice> {
     match ch.to_ascii_lowercase() {
         'q' => Some(MenuChoice::Quit),
         'o' => Some(MenuChoice::Options),
         's' => Some(MenuChoice::Spectate),
         'n' if has_news => Some(MenuChoice::News),
         'f' => Some(MenuChoice::FrameRate),
+        'a' if online => Some(MenuChoice::Arenas),
         d @ '1'..='8' => Some(MenuChoice::Ship(d as u8 - b'1')),
         _ => None,
     }
@@ -337,18 +347,27 @@ mod tests {
     fn the_menu_offers_spectator_with_or_without_a_zone() {
         // `false` here is "no news", which offline always is. S used to be
         // answered only when there was a zone, so this is the case that failed.
-        assert_eq!(menu_choice('s', false), Some(MenuChoice::Spectate));
-        assert_eq!(menu_choice('S', true), Some(MenuChoice::Spectate));
+        assert_eq!(menu_choice('s', false, false), Some(MenuChoice::Spectate));
+        assert_eq!(menu_choice('S', true, false), Some(MenuChoice::Spectate));
         // The news row is the one that genuinely varies, and still does.
-        assert_eq!(menu_choice('n', false), None, "no news, no row");
-        assert_eq!(menu_choice('n', true), Some(MenuChoice::News));
+        assert_eq!(menu_choice('n', false, false), None, "no news, no row");
+        assert_eq!(menu_choice('n', true, false), Some(MenuChoice::News));
         // The rest of the menu, so that pulling this out changed nothing else.
-        assert_eq!(menu_choice('q', false), Some(MenuChoice::Quit));
-        assert_eq!(menu_choice('o', false), Some(MenuChoice::Options));
-        assert_eq!(menu_choice('1', false), Some(MenuChoice::Ship(0)));
-        assert_eq!(menu_choice('8', false), Some(MenuChoice::Ship(7)));
-        assert_eq!(menu_choice('f', false), Some(MenuChoice::FrameRate));
-        assert_eq!(menu_choice('9', false), None, "any other key resumes");
-        assert_eq!(menu_choice('x', true), None);
+        assert_eq!(menu_choice('q', false, false), Some(MenuChoice::Quit));
+        assert_eq!(menu_choice('o', false, false), Some(MenuChoice::Options));
+        assert_eq!(menu_choice('1', false, false), Some(MenuChoice::Ship(0)));
+        assert_eq!(menu_choice('8', false, false), Some(MenuChoice::Ship(7)));
+        assert_eq!(menu_choice('f', false, false), Some(MenuChoice::FrameRate));
+        assert_eq!(
+            menu_choice('9', false, false),
+            None,
+            "any other key resumes"
+        );
+        assert_eq!(menu_choice('x', true, false), None);
+        // The arena list is the zone's, so the row is there only in a zone;
+        // offline, A is any other key.
+        assert_eq!(menu_choice('a', false, true), Some(MenuChoice::Arenas));
+        assert_eq!(menu_choice('A', false, true), Some(MenuChoice::Arenas));
+        assert_eq!(menu_choice('a', false, false), None);
     }
 }

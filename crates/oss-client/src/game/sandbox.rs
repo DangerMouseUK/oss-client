@@ -32,6 +32,7 @@ use super::view::{self, Canvas, color};
 use crate::audio::Audio;
 use crate::gfx::{Renderer, StarParams, TextureId};
 
+mod arenas;
 mod commands;
 mod help;
 mod menu;
@@ -155,6 +156,8 @@ pub struct Sandbox {
     pub(super) effects: Vec<Effect>,
     pub(super) menu: bool,
     pub(super) fps_view: hud::FpsView,
+    /// The zone's arena list, while it is on screen (Esc then A, or `?arena`).
+    arena_list: Option<arenas::ArenaList>,
     /// The ship F11 goes back to after spectating.
     last_ship: u8,
     pub(super) big_radar: bool,
@@ -421,6 +424,7 @@ impl Sandbox {
             effects: Vec::new(),
             menu: false,
             fps_view: Default::default(),
+            arena_list: None,
             last_ship: 0,
             big_radar: false,
             fps: FpsCounter::default(),
@@ -977,6 +981,8 @@ impl Sandbox {
             edges.clear();
             return;
         }
+        let kept = self.arena_list_input(edges, strokes);
+        let strokes = kept.as_slice();
         if edges.contains(&Action::Menu) {
             self.menu = !self.menu;
             // Continuum shows the whole chat buffer while the menu is open
@@ -1668,6 +1674,7 @@ impl Sandbox {
                         self.world.apply_prize(i, prize as i32, &mut sim_events);
                     }
                 }
+                SessionEvent::ArenaList(arenas) => self.arenas_arrived(arenas),
                 SessionEvent::Closed(_) => {
                     let msg = self
                         .net
@@ -2050,6 +2057,8 @@ impl Sandbox {
     /// is rebuilt around them. The atlas is left to [`Sandbox::rebuild_art`] on the
     /// next frame, which is where this has a renderer to hand.
     fn enter_arena(&mut self) {
+        // A list of the arenas seen from the last one is stale in this one.
+        self.arena_list = None;
         let Some(net) = self.net.as_ref() else { return };
         let (Some((_, map_bytes)), Some(settings)) =
             (net.map.clone(), net.session.settings().cloned())
@@ -2481,6 +2490,7 @@ impl Sandbox {
         self.draw_log(&ui, r);
         self.lvz.draw(layer::AFTER_CHAT, &c, &ui, r, clock, &refs);
         self.lvz.draw(layer::TOP_MOST, &c, &ui, r, clock, &refs);
+        self.draw_arena_list(&ui, r);
         if self.menu {
             self.draw_menu(&ui, r);
         }
@@ -2615,6 +2625,11 @@ impl Sandbox {
             let x = 4.0 + line.prefix.chars().count() as f32 * 8.0;
             c.text(r, x, y, line.color, &line.text);
             y -= 12.0;
+        }
+        // The spectator line sits where the arena list's box does; the list is
+        // what the player has just asked for, so it has the place to itself.
+        if self.arena_list.is_some() {
+            return;
         }
         if self.spectating
             && let Some(ship) = self.followed()

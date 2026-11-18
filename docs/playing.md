@@ -19,7 +19,7 @@ rather than "the keys".
 | Tab | Bombs |
 | Shift+Tab | Mines |
 | Delete | Multifire |
-| Esc | Menu — 1-8 change ship, S spectate, N zone news, O options, F frame rate, Q quit the game. F2 and F12 work with it open, and so do the flying keys |
+| Esc | Menu — 1-8 change ship, S spectate, A arena list (in a zone), N zone news, O options, F frame rate, Q quit the game. F2 and F12 work with it open, and so do the flying keys |
 | Enter | Send what you have typed |
 | F1 | Help pages (F1 turns the page, Esc closes) |
 | F2 | Cycle the stat box views |
@@ -35,6 +35,11 @@ Gamepads: left stick or D-pad steers, RT/LT thrust and reverse, bumpers afterbur
 B bombs, X mines, Y multifire. Every key and button is rebindable in the settings file.
 
 While the menu is open the whole chat log is on screen, and Page Up/Down scroll it.
+
+Esc then A, or typing `?arena`, shows the zone's arenas in a box at the top of the screen,
+yours first and marked `>`, each with how many are playing in it. Page Up and Page Down
+choose one, Enter goes there, and a click on a row goes there too. Esc puts the list away.
+The game carries on underneath, so you can still fly and type while it is up.
 
 ## Chat
 

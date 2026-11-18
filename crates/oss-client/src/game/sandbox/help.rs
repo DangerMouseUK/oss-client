@@ -367,6 +367,8 @@ pub(super) fn help_pages(bindings: &Bindings, online: bool) -> Vec<(&'static str
     let commands = vec![
         Help::Heading("This client answers these itself"),
         Help::Text("  ?go [arena]  = Switch arena (blank: next public)"),
+        Help::Text("  ?arena       = Arena list, as Esc then A shows it:"),
+        Help::Text("                 PgUp/PgDn choose, Enter goes"),
         Help::Text("  ?namelen x   = Letters shown of a name (=x works)"),
         Help::Text("  ?lines x     = Message lines shown (=x also works)"),
         Help::Text("  ?status      = Your ship's status"),

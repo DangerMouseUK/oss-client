@@ -393,8 +393,22 @@ pub enum SessionEvent {
         prize: i16,
     },
     Closed(DisconnectReason),
+    /// The zone's arenas, in the order it sent them, as (name, players, whether
+    /// it is the arena you are in) (S2C `0x2F`). Zones send it in answer to
+    /// `?arena`; the wire marks your own arena by sending its count negated.
+    ArenaList(Vec<ArenaListed>),
     /// Any packet the session doesn't interpret itself.
     Other(Box<S2CPacket>),
+}
+
+/// One arena on the list a zone sends in answer to `?arena`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArenaListed {
+    pub name: String,
+    /// How many players are in it.
+    pub players: u16,
+    /// The arena you are in. Continuum shows it first, marked `>`.
+    pub yours: bool,
 }
 
 /// The map the arena uses.
@@ -1161,6 +1175,18 @@ impl Session {
                 prize: g.prize,
             }),
             S2CPacket::KeepAlive(_) => {}
+            S2CPacket::ArenaList(list) => {
+                let arenas = list
+                    .arenas
+                    .iter()
+                    .map(|a| ArenaListed {
+                        name: fixed_to_string(&a.name),
+                        players: a.population.unsigned_abs(),
+                        yours: a.population < 0,
+                    })
+                    .collect();
+                self.events.push_back(SessionEvent::ArenaList(arenas));
+            }
             other => self.events.push_back(SessionEvent::Other(Box::new(other))),
         }
     }
@@ -1892,6 +1918,48 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The arena list used to reach the game as "some other packet", which the
+    /// game ignores, so `?arena` answered and nothing appeared. It is its own
+    /// event now, with your own arena -- sent with its count negated -- said
+    /// in words rather than in a sign.
+    #[test]
+    fn the_arena_list_arrives_as_its_own_event() {
+        let list = s2c::ArenaList {
+            arenas: vec![
+                s2c::ArenaEntry {
+                    name: b"duel".to_vec(),
+                    population: 2,
+                },
+                s2c::ArenaEntry {
+                    name: b"0".to_vec(),
+                    population: -9,
+                },
+                s2c::ArenaEntry {
+                    name: b"empty".to_vec(),
+                    population: 0,
+                },
+            ],
+        };
+        let mut data = Vec::new();
+        list.encode(&mut data);
+        let mut s = Session::new(SessionConfig::default(), 0, 1);
+        s.handle_packet(0, &data);
+        let got: Vec<_> = s.events.into_iter().collect();
+        let listed = |name: &str, players, yours| ArenaListed {
+            name: name.into(),
+            players,
+            yours,
+        };
+        assert_eq!(
+            got,
+            vec![SessionEvent::ArenaList(vec![
+                listed("duel", 2, false),
+                listed("0", 9, true),
+                listed("empty", 0, false),
+            ])]
+        );
     }
 
     #[test]

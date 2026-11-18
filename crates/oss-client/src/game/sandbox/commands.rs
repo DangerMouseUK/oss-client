@@ -8,6 +8,23 @@ use super::Sandbox;
 use crate::game::view::color;
 
 impl Sandbox {
+    /// Asks the zone to move us to `arena` (blank: the next public one). `?go`
+    /// and the arena list both come here.
+    pub(super) fn go_to_arena(&mut self, arena: &str) {
+        if let Some(net) = self.net.as_mut() {
+            net.session.change_arena(arena);
+            net.flush();
+        }
+        self.message(
+            if arena.is_empty() {
+                "Entering a public arena...".to_string()
+            } else {
+                format!("Entering arena {arena}...")
+            },
+            color::GREEN,
+        );
+    }
+
     /// Commands Continuum answers itself instead of sending on (nullspace
     /// `ChatController::HandleInputCommands`): `?go`, `?namelen`, `?lines` and
     /// `?status`.
@@ -31,18 +48,7 @@ impl Sandbox {
             // Offline there is no arena and no ship to report on, so these fall
             // through to the sandbox's own command list instead of being swallowed.
             "?go" if self.online() => {
-                if let Some(net) = self.net.as_mut() {
-                    net.session.change_arena(rest);
-                    net.flush();
-                }
-                self.message(
-                    if rest.is_empty() {
-                        "Entering a public arena...".to_string()
-                    } else {
-                        format!("Entering arena {rest}...")
-                    },
-                    color::GREEN,
-                );
+                self.go_to_arena(rest);
                 true
             }
             "?namelen" if !rest.is_empty() => {
