@@ -20,7 +20,9 @@
 //! Log lines name the entry (`pilot@zone:5000`) and never the password.
 
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use oss_credstore::{OsStore, PasswordStore, account};
@@ -100,43 +102,80 @@ impl Vault {
     }
 }
 
-/// Runs `job` with the store on a thread of its own, so the screen never waits.
+/// A job for the store, run off the drawing thread.
+type Job = Box<dyn FnOnce() + Send>;
+
+/// The one thread every store job runs on, in the order they were asked for.
+///
+/// One queue rather than a thread per job, because order matters: untick
+/// (delete), then tick again and play (save), must not end with the delete
+/// arriving last and the password gone. On Linux, where each call is a question
+/// to the desktop's keyring that may take a while, two threads could finish
+/// either way round.
+fn queue() -> Option<&'static Mutex<Sender<Job>>> {
+    static QUEUE: OnceLock<Option<Mutex<Sender<Job>>>> = OnceLock::new();
+    QUEUE
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("password-store".into())
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        job();
+                    }
+                })
+                .map_err(|e| log::warn!("couldn't start the password store's thread: {e}"))
+                .ok()?;
+            Some(Mutex::new(tx))
+        })
+        .as_ref()
+}
+
+/// Runs `job` with the store on the store's own thread, after any job asked for
+/// before it, so the screen never waits. The answer says when it has finished:
+/// the screen ignores it, and a test waits on it.
 fn in_background(
     store: &Arc<dyn PasswordStore>,
     job: impl FnOnce(&dyn PasswordStore) + Send + 'static,
-) {
+) -> Receiver<()> {
+    let (done, finished) = mpsc::channel();
     let store = Arc::clone(store);
-    if let Err(e) = std::thread::Builder::new()
-        .name("password-store".into())
-        .spawn(move || job(store.as_ref()))
-    {
-        log::warn!("couldn't reach the password store: {e}");
+    let job: Job = Box::new(move || {
+        job(store.as_ref());
+        let _ = done.send(());
+    });
+    match queue().map(|q| q.lock().map(|tx| tx.send(job))) {
+        Some(Ok(Ok(()))) => {}
+        _ => log::warn!("couldn't reach the password store"),
     }
+    finished
 }
 
 /// Deletes the saved password for `who`, as unticking Remember asks.
-pub fn forget(store: &Arc<dyn PasswordStore>, who: String) {
+pub fn forget(store: &Arc<dyn PasswordStore>, who: String) -> Receiver<()> {
     in_background(store, move |s| match s.forget(&who) {
         Ok(()) => log::info!("forgot the saved password for {who}"),
         Err(e) => log::warn!("couldn't forget the saved password for {who}: {e}"),
-    });
+    })
 }
 
 /// The zone has accepted the login made from `login`: keep the password if
 /// Remember is ticked, and delete any kept one if it is not.
-pub fn settle(store: &Arc<dyn PasswordStore>, login: &Login) {
+pub fn settle(store: &Arc<dyn PasswordStore>, login: &Login) -> Option<Receiver<()>> {
     if !login.vault_shown() || login.name.trim().is_empty() {
-        return;
+        return None;
     }
     let who = account(&login.name, &login.server);
     if login.remember && !login.password.is_empty() {
         let password = login.password.clone();
-        in_background(store, move |s| match s.save(&who, &password) {
-            Ok(()) => log::info!("saved the password for {who}"),
-            Err(e) => log::warn!("couldn't save the password for {who}: {e}"),
-        });
+        Some(in_background(store, move |s| {
+            match s.save(&who, &password) {
+                Ok(()) => log::info!("saved the password for {who}"),
+                Err(e) => log::warn!("couldn't save the password for {who}: {e}"),
+            }
+        }))
     } else {
-        forget(store, who);
+        Some(forget(store, who))
     }
 }
 
@@ -254,14 +293,15 @@ mod tests {
         }
     }
 
-    fn wait_for(store: &MemoryStore, who: &str, want: Option<&str>) {
-        let start = Instant::now();
-        while store.load(who).ok().flatten().as_deref() != want
-            && start.elapsed() < Duration::from_secs(5)
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(store.load(who).ok().flatten().as_deref(), want);
+    /// Waits for a background job to finish.
+    fn join(job: Option<Receiver<()>>) {
+        job.expect("a job was asked for")
+            .recv_timeout(Duration::from_secs(5))
+            .expect("and finished");
+    }
+
+    fn kept(store: &MemoryStore, who: &str) -> Option<String> {
+        store.load(who).expect("readable")
     }
 
     /// Ticked and accepted: saved. Unticked and accepted: deleted. And `settle`
@@ -276,16 +316,16 @@ mod tests {
         let mut l = form(true);
         l.password = SECRET.into();
         assert!(!l.remember, "unticked to begin with");
-        settle(&store, &l);
-        wait_for(&mem, &who, None);
+        join(settle(&store, &l));
+        assert_eq!(kept(&mem, &who), None);
 
         l.remember = true;
-        settle(&store, &l);
-        wait_for(&mem, &who, Some(SECRET));
+        join(settle(&store, &l));
+        assert_eq!(kept(&mem, &who).as_deref(), Some(SECRET));
 
         l.remember = false;
-        settle(&store, &l);
-        wait_for(&mem, &who, None);
+        join(settle(&store, &l));
+        assert_eq!(kept(&mem, &who), None);
     }
 
     /// Unticking deletes the saved password at once, without waiting to play.
@@ -300,8 +340,8 @@ mod tests {
         l.toggle_remember();
         let asked = l.take_forget().expect("asked to forget");
         assert_eq!(asked, who);
-        forget(&store, asked);
-        wait_for(&mem, &who, None);
+        join(Some(forget(&store, asked)));
+        assert_eq!(kept(&mem, &who), None);
     }
 
     /// A saved password fills an empty box and ticks Remember; it never writes
