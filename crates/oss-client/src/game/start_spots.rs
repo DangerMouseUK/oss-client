@@ -73,6 +73,9 @@ impl Spot {
         match self {
             Spot::Field(Field::Name) => "Your name in the zone.",
             Spot::Field(Field::Password) => "Your password, if the zone knows you.",
+            Spot::Field(Field::Remember) => {
+                "Keep the password in this computer's own password store."
+            }
             Spot::Field(Field::Arena) => "Arena to enter, or blank for any public one.",
             Spot::Field(Field::Server) => "The zone's address, as host:port.",
             Spot::Field(Field::Ship) => "The ship you will fly, or spectator.",

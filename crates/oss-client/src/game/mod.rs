@@ -11,6 +11,7 @@ pub mod login;
 pub mod lvz;
 pub mod online;
 pub mod palette;
+pub mod remember;
 pub mod sandbox;
 pub mod settings_ui;
 pub mod start_spots;

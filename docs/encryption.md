@@ -59,6 +59,21 @@ The keys are kept in `identities.txt` beside the settings file. Keep it private:
 a copy can present your identity at those zones. `[network] identity = false` turns the
 offer off entirely.
 
+## Remembered passwords
+
+The start-up screen has a **Remember** line under the password. It starts unticked. Tick it,
+and once the zone has accepted the password it is kept in your operating system's own
+password store: **Windows Credential Manager** on Windows, the **Keychain** on macOS. Each
+entry is filed under `Open SubSpace` as `name@zone:port`, so you can see it and delete it there
+with the tools you already have. Next time, the same name and zone fill the password in for
+you. Untick the line to delete the saved password straight away. The password is never written
+to the settings file, `login.ini` or any file of the client's own, and never to a log.
+
+**On Linux** the password goes to your desktop's own keyring through the Secret Service (GNOME
+Keyring, or KWallet), encrypted on its way there. A system with no such keyring, such as a
+server or a minimal desktop, has nowhere safe to keep it, so the password is not stored at
+all and the Remember line is not shown.
+
 ## Continuum's encryption
 
 Continuum's key expansion is not public and this repository does not carry it. That is

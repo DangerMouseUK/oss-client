@@ -13,6 +13,10 @@
 //! directories again, F5 flies the offline sandbox and Esc quits. The last zone, name,
 //! arena and ship (never the password) are remembered in `login.ini` beside the
 //! settings.
+//!
+//! The password is remembered only if the player ticks "Remember", and then only
+//! in the operating system's own password store (see `oss-credstore`). The line
+//! is not drawn at all on a machine with no such store.
 
 use std::fmt;
 use std::path::Path;
@@ -30,6 +34,9 @@ const MAX_FIELD: usize = 64;
 pub enum Field {
     Name,
     Password,
+    /// "Remember password", a tickbox. On the form only when this machine has a
+    /// password store to remember it in.
+    Remember,
     Arena,
     Server,
     Ship,
@@ -50,12 +57,24 @@ const FIELDS: [Field; 6] = [
     Field::Zones,
 ];
 
+/// The same, with the Remember tickbox under the password.
+const FIELDS_WITH_REMEMBER: [Field; 7] = [
+    Field::Name,
+    Field::Password,
+    Field::Remember,
+    Field::Arena,
+    Field::Server,
+    Field::Ship,
+    Field::Zones,
+];
+
 impl Field {
     pub fn label(self) -> &'static str {
         match self {
             Field::Server => "Zone",
             Field::Name => "Name",
             Field::Password => "Password",
+            Field::Remember => "Remember",
             Field::Arena => "Arena",
             Field::Ship => "Ship",
             Field::Zones => "Zones",
@@ -88,6 +107,14 @@ pub struct Login {
     pub focus: usize,
     /// Shown under the form (a failed connection, a missing field).
     pub error: Option<String>,
+    /// "Remember password" is ticked. Unticked to begin with: remembering a
+    /// password is the player's choice (`D34`).
+    pub remember: bool,
+    /// This machine has a password store, so the Remember line is on the form.
+    vault: bool,
+    /// The account whose saved password the player has just unticked, for the
+    /// screen to delete at once.
+    forget: Option<String>,
     /// Everything the command line asked for that this form does not own.
     ///
     /// [`Self::submit`] lays its own five fields over this rather than building a
@@ -111,6 +138,9 @@ impl fmt::Debug for Login {
             .field("ship", &self.ship)
             .field("focus", &self.focus)
             .field("error", &self.error)
+            .field("remember", &self.remember)
+            .field("vault", &self.vault)
+            .field("forget", &self.forget)
             .field("base", &self.base)
             .finish()
     }
@@ -132,6 +162,9 @@ impl Default for Login {
             ship: SPECTATOR,
             focus: 0,
             error: None,
+            remember: false,
+            vault: false,
+            forget: None,
             base: Box::new(ServerOptions {
                 server: String::new(),
                 name: String::new(),
@@ -229,7 +262,7 @@ impl Login {
 
     /// Puts the cursor on the zone list (`--zones`).
     pub fn focus_zones(&mut self) {
-        self.focus = FIELDS.len() - 1;
+        self.focus = self.fields().len() - 1;
     }
 
     /// Puts the cursor on a field outright, as a click on it does.
@@ -239,7 +272,7 @@ impl Login {
     /// which is what keeps "the tabbing does work well enough" true after the
     /// pointer arrives.
     pub fn focus_on(&mut self, field: Field) {
-        if let Some(i) = FIELDS.iter().position(|f| *f == field) {
+        if let Some(i) = self.fields().iter().position(|f| *f == field) {
             self.focus = i;
         }
     }
@@ -297,7 +330,8 @@ impl Login {
     }
 
     pub fn focused(&self) -> Field {
-        FIELDS[self.focus % FIELDS.len()]
+        let fields = self.fields();
+        fields[self.focus % fields.len()]
     }
 
     /// The text shown for `field` (password masked).
@@ -306,6 +340,8 @@ impl Login {
             Field::Server => self.server.clone(),
             Field::Name => self.name.clone(),
             Field::Password => "*".repeat(self.password.chars().count()),
+            Field::Remember if self.remember => "[x] password".into(),
+            Field::Remember => "[ ] password".into(),
             Field::Arena if self.arena.is_empty() => "(any public arena)".into(),
             Field::Arena => self.arena.clone(),
             Field::Ship => ship_name(self.ship),
@@ -313,8 +349,58 @@ impl Login {
         }
     }
 
-    pub fn fields() -> &'static [Field] {
-        &FIELDS
+    /// The form's lines, in order: with the Remember line only where there is a
+    /// password store.
+    pub fn fields(&self) -> &'static [Field] {
+        if self.vault {
+            &FIELDS_WITH_REMEMBER
+        } else {
+            &FIELDS
+        }
+    }
+
+    /// Whether this machine has a password store, which the screen learns a
+    /// moment after it opens. The cursor stays on the line it was on, though
+    /// the lines under the password move down one when the Remember line
+    /// appears.
+    pub fn set_vault(&mut self, vault: bool) {
+        if vault == self.vault {
+            return;
+        }
+        let on = self.focused();
+        self.vault = vault;
+        if !vault {
+            self.remember = false;
+        }
+        // Remember has no place on a form without a store: the line above it.
+        self.focus_on(if on == Field::Remember {
+            Field::Password
+        } else {
+            on
+        });
+    }
+
+    /// Ticks or unticks Remember. Unticking asks for the saved password to be
+    /// deleted at once, which [`Login::take_forget`] hands to the screen.
+    pub fn toggle_remember(&mut self) {
+        if !self.vault {
+            return;
+        }
+        self.remember = !self.remember;
+        if !self.remember && !self.name.trim().is_empty() {
+            self.forget = Some(oss_credstore::account(&self.name, &self.server));
+        }
+    }
+
+    /// Whether the Remember line is on the form, which is whether this machine
+    /// has a password store.
+    pub fn vault_shown(&self) -> bool {
+        self.vault
+    }
+
+    /// The account whose saved password should be deleted now, once.
+    pub fn take_forget(&mut self) -> Option<String> {
+        self.forget.take()
     }
 
     fn text_mut(&mut self) -> Option<&mut String> {
@@ -323,7 +409,7 @@ impl Login {
             Field::Name => Some(&mut self.name),
             Field::Password => Some(&mut self.password),
             Field::Arena => Some(&mut self.arena),
-            Field::Ship | Field::Zones => None,
+            Field::Remember | Field::Ship | Field::Zones => None,
         }
     }
 
@@ -339,6 +425,7 @@ impl Login {
     /// long they are held.
     pub fn input(&mut self, strokes: &[Stroke], shift: bool) -> Option<Choice> {
         for stroke in strokes {
+            let count = self.fields().len();
             // While the list has the focus it owns Up and Down, so they walk
             // zones instead of moving on to the next field. Read per stroke:
             // the stroke before this one may have moved the focus.
@@ -352,8 +439,8 @@ impl Login {
             }
             // Keys a person holds on purpose, repeats and all.
             match stroke.key {
-                Some(KeyCode::Tab) if !shift => self.focus = (self.focus + 1) % FIELDS.len(),
-                Some(KeyCode::Tab) => self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len(),
+                Some(KeyCode::Tab) if !shift => self.focus = (self.focus + 1) % count,
+                Some(KeyCode::Tab) => self.focus = (self.focus + count - 1) % count,
                 // The ships are drawn as a grid -- four across, two rows of
                 // them, and spectator on a row under those -- so while the ship
                 // has the focus, Up and Down walk that grid instead of stepping
@@ -370,18 +457,14 @@ impl Login {
                         // else on the form. Nothing can trap the cursor, and
                         // nothing in the grid is reachable only by Tab.
                         self.focus = if down {
-                            (self.focus + 1) % FIELDS.len()
+                            (self.focus + 1) % count
                         } else {
-                            (self.focus + FIELDS.len() - 1) % FIELDS.len()
+                            (self.focus + count - 1) % count
                         };
                     }
                 }
-                Some(KeyCode::ArrowDown) if !on_list => {
-                    self.focus = (self.focus + 1) % FIELDS.len()
-                }
-                Some(KeyCode::ArrowUp) if !on_list => {
-                    self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len()
-                }
+                Some(KeyCode::ArrowDown) if !on_list => self.focus = (self.focus + 1) % count,
+                Some(KeyCode::ArrowUp) if !on_list => self.focus = (self.focus + count - 1) % count,
                 Some(key @ (KeyCode::ArrowLeft | KeyCode::ArrowRight))
                     if self.focused() == Field::Ship =>
                 {
@@ -413,6 +496,13 @@ impl Login {
                 Some(KeyCode::KeyS) if self.focused() == Field::Ship => {
                     self.ship = SPECTATOR;
                 }
+                // The tickbox: Space, as any tickbox, or Left/Right as the ship
+                // line changes. Enter still plays, as it does on every line.
+                Some(KeyCode::Space | KeyCode::ArrowLeft | KeyCode::ArrowRight)
+                    if self.focused() == Field::Remember =>
+                {
+                    self.toggle_remember();
+                }
                 Some(KeyCode::Escape) => return Some(Choice::Quit),
                 Some(KeyCode::F2) => return Some(Choice::Options),
                 Some(KeyCode::F3) => return Some(Choice::RefreshZones),
@@ -428,12 +518,12 @@ impl Login {
         let server = self.server.trim();
         if !server.contains(':') {
             self.error = Some("Zone must be host:port".into());
-            self.focus = 3;
+            self.focus_on(Field::Server);
             return None;
         }
         if self.name.trim().is_empty() {
             self.error = Some("Enter a name".into());
-            self.focus = 0;
+            self.focus_on(Field::Name);
             return None;
         }
         self.error = None;

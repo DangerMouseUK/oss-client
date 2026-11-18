@@ -247,6 +247,8 @@ struct LoginScreen {
     /// Filled by [`draw_start_screen`] as it draws; see
     /// [`crate::game::start_spots`].
     spots: Spots,
+    /// Fills in a saved password when the name and zone have one.
+    recall: crate::game::remember::Recall,
 }
 
 enum Screen {
@@ -294,6 +296,8 @@ struct App {
     /// rather than acted on in the event, so a click is read against the same
     /// regions, in the same place in the frame, as a key is.
     clicked: bool,
+    /// This machine's password store, if it has one, for "Remember password".
+    vault: crate::game::remember::Vault,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -365,6 +369,7 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         pointed: 0,
         clicked: false,
         cursor: None,
+        vault: crate::game::remember::Vault::probe(),
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
@@ -435,6 +440,7 @@ impl App {
             atlas,
             browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
             spots: Spots::default(),
+            recall: Default::default(),
         }));
         run.window.set_title("Open SubSpace");
         self.settings = None;
@@ -563,6 +569,7 @@ impl ApplicationHandler for App {
                     atlas,
                     browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
                     spots: Spots::default(),
+                    recall: Default::default(),
                 }))
             }
         };
@@ -872,6 +879,16 @@ impl App {
         // Login: wait for a choice.
         if let Screen::Login(ls) = &mut run.screen {
             ls.browser.pump();
+            // The Remember line appears once the store has said it is there.
+            self.vault.poll();
+            ls.login.set_vault(self.vault.store().is_some());
+            if let Some(store) = self.vault.store() {
+                ls.recall
+                    .tick(&mut ls.login, &store, std::time::Instant::now());
+                if let Some(who) = ls.login.take_forget() {
+                    crate::game::remember::forget(&store, who);
+                }
+            }
             // While the options are up they have the keyboard; the screen underneath
             // would otherwise take every character into whichever field has focus.
             let strokes = if self.settings.is_some() {
@@ -905,7 +922,12 @@ impl App {
             if clicked && self.settings.is_none() {
                 pointed = cursor.and_then(|(mx, my)| ls.spots.at(mx, my));
                 match pointed {
-                    Some(Spot::Field(field)) => ls.login.focus_on(field),
+                    Some(Spot::Field(field)) => {
+                        ls.login.focus_on(field);
+                        if field == crate::game::login::Field::Remember {
+                            ls.login.toggle_remember();
+                        }
+                    }
                     // Picking a ship takes the focus with it, so that choosing
                     // the one you already have still shows something: the
                     // heading's name turns yellow and its line lights up.
@@ -1045,6 +1067,7 @@ impl App {
                                 &self.options.directories,
                             ),
                             spots: Spots::default(),
+                            recall: Default::default(),
                         }));
                     }
                     (None, Some(err)) => return self.fail(event_loop, err),
@@ -1063,6 +1086,13 @@ impl App {
             };
             // Kept for the way back: leaving the game returns to this form.
             let conn = *conn;
+            // The zone has let us in, so the password was right: now, and only
+            // now, it is remembered (or a remembered one forgotten).
+            if let Some(login) = &conn.login
+                && let Some(store) = self.vault.store()
+            {
+                crate::game::remember::settle(&store, login);
+            }
             run.front_end = conn.login;
             let audio = if audio_wanted {
                 Audio::new(&self.dir, self.options.volume)
@@ -1504,9 +1534,15 @@ fn draw_start_screen(
     // Tall enough for whichever column needs more, and for a list worth reading.
     let rows = b.zones.len().clamp(8, 14);
     let list_h = 14.0 + rows as f32 * 12.0;
-    // Heading, four profile lines, the gap, the ship heading, and the ship grid:
-    // three rows of forty, the third of them spectator's own cell.
-    let left_h = 14.0 + 4.0 * 14.0 + 10.0 + 14.0 + 3.0 * 40.0;
+    // Heading, the profile lines (four, or five with Remember), the gap, the
+    // ship heading, and the ship grid: three rows of forty, the third of them
+    // spectator's own cell.
+    let profile_lines = login
+        .fields()
+        .iter()
+        .filter(|f| profile_label(**f).is_some())
+        .count() as f32;
+    let left_h = 14.0 + profile_lines * 14.0 + 10.0 + 14.0 + 3.0 * 40.0;
     let body_h = list_h.max(left_h);
     // The foot carries the zone's blurb, two lines for anything that went wrong,
     // and the two key lines.
@@ -1529,7 +1565,7 @@ fn draw_start_screen(
     c.text(r, x + 4.0, y, color::DARK_RED, "Profile");
     y += 14.0;
     let value_x = x + 4.0 + 10.0 * 8.0;
-    for &field in Login::fields() {
+    for &field in login.fields() {
         let Some(label) = profile_label(field) else {
             continue;
         };
@@ -1540,7 +1576,7 @@ fn draw_start_screen(
         }
         c.text(r, x + 4.0, y, color::GREEN, label);
         let mut value = login.value(field);
-        if focus == field {
+        if focus == field && field != crate::game::login::Field::Remember {
             value.push('_');
         }
         let max = ((left_w - 4.0 - (value_x - x)) / 8.0).max(1.0) as usize;
@@ -1760,7 +1796,9 @@ fn draw_start_screen(
 fn profile_label(field: crate::game::login::Field) -> Option<&'static str> {
     use crate::game::login::Field;
     match field {
-        Field::Name | Field::Password | Field::Arena | Field::Server => Some(field.label()),
+        Field::Name | Field::Password | Field::Remember | Field::Arena | Field::Server => {
+            Some(field.label())
+        }
         Field::Ship | Field::Zones => None,
     }
 }

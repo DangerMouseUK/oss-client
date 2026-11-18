@@ -185,6 +185,7 @@ Run `oss-client --help` for every flag.
 | `oss-client` | The game | GPL-2.0-or-later |
 | `oss-session` | The client side of a game session over `oss-net`: login, arena entry, settings, map download and cache, security answers, players, positions, chat. Sans-IO, with a UDP driver | GPL-2.0-or-later |
 | `oss-bot` | Headless client and load swarm, on `oss-session` | GPL-2.0-or-later |
+| `oss-credstore` | "Remember password": keeps it in the operating system's own password store and nowhere else (see [docs/encryption.md](docs/encryption.md)) | GPL-2.0-or-later |
 | `oss-assets` | `.bm2`/`.bmp`/`.png`/`.jpg`/`.gif` and `.wa2`/`.wav` decoders, and the asset search path | MIT |
 
 The simulation (`oss-sim`, MIT) lives in
