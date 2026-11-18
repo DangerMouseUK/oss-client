@@ -22,7 +22,7 @@ use crate::game::sandbox::Sandbox;
 use crate::game::settings_ui::{SettingsUi, UiAction};
 use crate::game::start_spots::{Rect, Spot, Spots};
 use crate::game::view::{Canvas, color, ui_color};
-use crate::gfx::{FrameError, Renderer, TextureId, UiFrame};
+use crate::gfx::{FrameError, Renderer, TextureId};
 
 /// An in-game screen `--screen` can put up at start, so that a screenshot can
 /// catch one without a key being pressed.
@@ -83,8 +83,9 @@ pub const REPEAT_RATE: u32 = 30;
 ///
 /// `--click` is a press and a release at the same instant, which is all a
 /// click-sensed thing looks at. `--drag` puts a move between them and spreads
-/// the three over separate frames, because a slider is drag-sensed: a press and
-/// release in one frame is a click, and a click is not an answer it has.
+/// the three over separate frames, so a press in one place leaves the pointer
+/// in another. Nothing the client draws is dragged today; the flag stays so
+/// that a screen that grows something to drag can be tested without one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScriptedPoint {
     /// Seconds after the window opened.
@@ -109,6 +110,9 @@ pub enum PointerEdge {
 /// reads as one gesture where a run is being watched. Expanded at parse time so
 /// the frame loop stays a walk down one sorted list.
 pub const DRAG_STEP: f32 = 0.05;
+
+/// How many lines of the settings window's lists one notch of the wheel moves.
+const WHEEL_LINES: i32 = 3;
 
 /// The events `--hold <at>:<key>:<secs>` arrives as: down, then repeats, then up.
 ///
@@ -162,10 +166,8 @@ pub struct Options {
     /// This presses its keys, so the path from the form to an arena can be driven
     /// and photographed rather than described.
     ///
-    /// **Not the settings screen.** These go into the client's own input, which
-    /// that screen does not read; only the pointer takes the other road into
-    /// egui (see `App::egui_pointer`). A scripted run drives it by clicking
-    /// and dragging, and cannot type into it at all.
+    /// The settings window reads the same input, so these drive it too: its
+    /// sections, its lines, a rebind and a save can all be pressed.
     pub press: Vec<ScriptedKey>,
     /// `--click` and `--drag`, expanded into pointer edges at the given times
     /// and places, soonest first (testing).
@@ -174,10 +176,8 @@ pub struct Options {
     /// that it is -- the same hole `--press` was, one screen along. Positions
     /// are in UI pixels (game pixels from the top-left), which is what every
     /// position in the drawing code is in, so a click can be aimed at what a
-    /// screenshot shows.
-    ///
-    /// While the settings screen is up these go to it instead, in the same
-    /// units; see `App::egui_pointer` for why that one takes a different road.
+    /// screenshot shows. The settings window is drawn in the same units, so a
+    /// click on it is aimed the same way.
     pub pointer: Vec<ScriptedPoint>,
     /// `--send`: lines to type in game at the given times, for scripted smoke tests
     /// (a live `?go`, say). Sorted soonest-last, so the game screen pops them off the
@@ -295,9 +295,7 @@ struct App {
     running: Option<Running>,
     input: InputState,
     gilrs: Option<gilrs::Gilrs>,
-    /// egui (the settings screen).
-    egui_ctx: egui::Context,
-    egui_state: Option<egui_winit::State>,
+    /// The settings window, while it is open over whichever screen opened it.
     settings: Option<SettingsUi>,
     error: Option<String>,
     /// How far through [`Options::press`] the clock has got.
@@ -375,8 +373,6 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         running: None,
         input,
         gilrs,
-        egui_ctx: egui::Context::default(),
-        egui_state: None,
         settings: None,
         error: None,
         pressed: 0,
@@ -637,37 +633,10 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if self.settings.is_some() => {
-                // The settings screen has the keyboard (and may be capturing a key).
-                let down = event.state == ElementState::Pressed;
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if down
-                        && let Some(ui) = self.settings.as_mut()
-                        && ui.capturing()
-                    {
-                        ui.capture(code, self.input.shift(), self.input.ctrl());
-                    } else if down && code == KeyCode::Escape {
-                        self.settings = None;
-                    }
-                    // Track modifiers for captures. Only the modifier: the screen
-                    // underneath is not reading the keyboard, so nothing would
-                    // drain a keystroke queued here.
-                    if matches!(
-                        code,
-                        KeyCode::ShiftLeft
-                            | KeyCode::ShiftRight
-                            | KeyCode::ControlLeft
-                            | KeyCode::ControlRight
-                    ) {
-                        self.input.modifier(code, down);
-                    }
-                }
-                self.egui_event(&WindowEvent::KeyboardInput {
-                    device_id: winit::event::DeviceId::dummy(),
-                    event,
-                    is_synthetic: false,
-                });
-            }
+            // Every key goes into the client's own input, the settings window's
+            // included: it reads the keystrokes from there in `frame`, which is
+            // what lets a scripted `--press` reach it as it reaches every other
+            // screen.
             WindowEvent::KeyboardInput { event, .. } => {
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
@@ -703,48 +672,25 @@ impl ApplicationHandler for App {
             // is a gap rather than a shortfall. Kept to that screen for now --
             // the game underneath has no pointer of its own yet.
             WindowEvent::CursorMoved { position, .. } => {
-                // While the settings are up they own the pointer as well as the
-                // keyboard; these arms sit in front of the one that feeds egui,
-                // so they have to hand it on themselves.
-                if self.settings.is_some() {
-                    self.egui_event(&event);
-                    return;
-                }
                 let Some(run) = self.running.as_mut() else {
                     return;
                 };
                 let scale = run.scale.max(1) as f64;
                 let at = ((position.x / scale) as f32, (position.y / scale) as f32);
                 self.cursor = Some(at);
-                if matches!(run.screen, Screen::Login(_)) {
+                if matches!(run.screen, Screen::Login(_)) || self.settings.is_some() {
                     run.window.request_redraw();
                 }
             }
-            WindowEvent::CursorLeft { .. } => {
-                if self.settings.is_some() {
-                    self.egui_event(&event);
-                    return;
-                }
-                self.cursor = None;
-            }
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
+            // A click is held for `frame`, which hands it to the settings window
+            // when that is open and to the screen underneath when it is not.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.settings.is_some() {
-                    // The settings screen has the pointer, as it has the
-                    // keyboard.
-                    self.egui_event(&event);
-                    return;
-                }
-                self.clicked = true;
-            }
+            } => self.clicked = true,
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.settings.is_some() {
-                    self.egui_event(&event);
-                    return;
-                }
                 // `zoneup`/`zonedown` in the skin format are buttons beside the
                 // list. The wheel over the list is where a pointer looks for
                 // them now.
@@ -761,6 +707,12 @@ impl ApplicationHandler for App {
                 } else {
                     0
                 };
+                // The settings window's long lists (a line for every action)
+                // scroll under the wheel wherever the pointer is.
+                if let Some(ui) = self.settings.as_mut() {
+                    ui.scroll(rows * WHEEL_LINES);
+                    return;
+                }
                 let Some(run) = self.running.as_mut() else {
                     return;
                 };
@@ -779,11 +731,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop, true),
-            other => {
-                if self.settings.is_some() {
-                    self.egui_event(&other);
-                }
-            }
+            _ => {}
         }
     }
 
@@ -820,31 +768,17 @@ impl App {
             return;
         };
         let elapsed = since_start.as_secs_f32();
-        // A scripted click arrives in UI pixels. The settings screen is egui's and
-        // wants points; both of those are physical pixels over a factor, and the
-        // window that holds the factors is borrowed further down.
-        let ui_scale = self.running.as_ref().map_or(1.0, |r| r.scale.max(1) as f32);
-        let egui_ppp = self
-            .running
-            .as_ref()
-            .map_or(1.0, |r| r.window.scale_factor() as f32)
-            * self.egui_ctx.zoom_factor();
         // Scripted pointer events: put the pointer there, then press, which is
         // the order a real pointer does it in and the order the hover highlight
-        // needs. Run before the window is borrowed so the pointer stays where it
-        // was put, the way a real one does.
+        // needs. Every screen, the settings window included, keeps the same
+        // pointer in the same units, which has a place and a click and nothing
+        // else yet: a release is theirs to ignore, and a drag is a press in one
+        // place and a pointer that ends up in another.
         while let Some(p) = self.options.pointer.get(self.pointed).copied() {
             if p.at > elapsed {
                 break;
             }
             log::info!("pointer: {:?} at {},{}", p.what, p.x, p.y);
-            if self.settings.is_some() {
-                self.egui_pointer(p, ui_scale, egui_ppp);
-                self.pointed += 1;
-                continue;
-            }
-            // The screens below keep a pointer of their own, which has a place
-            // and a click and nothing else yet: a release is theirs to ignore.
             self.cursor = Some((p.x, p.y));
             self.clicked |= p.what == PointerEdge::Press;
             self.pointed += 1;
@@ -852,13 +786,10 @@ impl App {
         // Taken before the run is borrowed, because the screens underneath want
         // it and it lives on the app rather than on any one of them.
         let cursor = self.cursor;
-        let Some(run) = self.running.as_mut() else {
-            return;
-        };
         // Scripted keys, before anything reads the input. A key carries the
         // character it types, the way a window keyboard event does, or it drives
-        // nothing that reads text -- which is the menu, the chat line and every
-        // form field.
+        // nothing that reads text -- which is the menu, the chat line, every
+        // form field and a macro's line in the settings.
         while let Some(k) = self.options.press.get(self.pressed).copied() {
             if k.at > elapsed {
                 break;
@@ -888,6 +819,29 @@ impl App {
             }
             self.pressed += 1;
         }
+        // The settings window, while it is open, has the keyboard and the
+        // pointer: it takes this frame's keystrokes and click before the screen
+        // underneath can, and the key table's actions are dropped so nothing
+        // fires in the game when the window closes.
+        if let Some(ui) = self.settings.as_mut() {
+            let strokes = self.input.take_strokes();
+            self.input.take_edges();
+            let mut action = ui.input(&strokes, self.input.shift(), self.input.ctrl());
+            if std::mem::take(&mut self.clicked)
+                && action == UiAction::None
+                && let Some((mx, my)) = cursor
+            {
+                action = ui.click(mx, my);
+            }
+            match action {
+                UiAction::None => {}
+                UiAction::Close => self.settings = None,
+                UiAction::Save => self.save_settings(),
+            }
+        }
+        let Some(run) = self.running.as_mut() else {
+            return;
+        };
         if self.options.autopilot {
             self.input.autopilot(run.started.elapsed().as_secs_f32());
         }
@@ -1274,11 +1228,10 @@ impl App {
             run.renderer.capture = self.options.screenshot.clone();
             run.captured = true;
         }
-        let ui_frame = self.settings_frame();
-        let Some(run) = self.running.as_mut() else {
-            return;
-        };
-        match run.renderer.render(stars, 0.0, ui_frame) {
+        if let Some(ui) = self.settings.as_mut() {
+            draw_settings(ui, &run.screen, &mut run.renderer, run.scale, cursor);
+        }
+        match run.renderer.render(stars, 0.0, None) {
             Ok(()) | Err(FrameError::Skip) => {}
             Err(FrameError::Fatal(e)) => return self.fail(event_loop, e),
         }
@@ -1307,56 +1260,26 @@ fn load_art(dir: &AssetDirs, renderer: &mut Renderer) -> Result<(Art, TextureId)
     Ok((art, atlas))
 }
 
-impl App {
-    fn egui_event(&mut self, event: &WindowEvent) {
-        if let (Some(state), Some(run)) = (self.egui_state.as_mut(), self.running.as_ref()) {
-            let _ = state.on_window_event(&run.window, event);
-        }
-    }
-
-    /// One scripted pointer edge aimed at the settings screen. That screen is
-    /// egui's, and egui reads its own queue rather than the pointer the screens
-    /// below keep, so anything meant for it has to be put where it will look.
-    ///
-    /// Deliberately not a synthesised `WindowEvent`: that would mean fabricating
-    /// a winit `DeviceId`, which is an unsafe call on a type winit owns, and
-    /// `egui-winit` would unpack the event into these same ones a line later.
-    /// Going straight to egui's queue fakes nothing and borrows nothing.
-    ///
-    /// `--click` and `--drag` stay in UI pixels here, as everywhere else, rather
-    /// than growing a second rule for one screen -- so at a game scale of 2 a
-    /// point read off a screenshot of this screen is halved, even though egui
-    /// drew that screen the same size either way. The resolved point is logged
-    /// for exactly that reason: a click landing elsewhere should say so.
-    fn egui_pointer(&mut self, p: ScriptedPoint, ui_scale: f32, pixels_per_point: f32) {
-        let Some(state) = self.egui_state.as_mut() else {
-            // Only before the settings screen's first frame, since that is what
-            // builds the state. Said out loud rather than dropped, because a
-            // click that quietly does nothing is what this flag used to do here.
-            log::warn!("pointer: the settings screen has not drawn yet; ignored");
-            return;
-        };
-        let pos = egui::pos2(
-            egui_point(p.x, ui_scale, pixels_per_point),
-            egui_point(p.y, ui_scale, pixels_per_point),
-        );
-        log::info!("pointer: the settings screen, at {:.0},{:.0}", pos.x, pos.y);
-        let input = state.egui_input_mut();
-        // No modifiers: scripted keys go to the client's own input, which the
-        // settings screen does not share, so nothing here can be holding one.
-        let modifiers = egui::Modifiers::default();
-        // The move first, always: egui reads a drag from where the pointer is
-        // while the button is down, so a button event on its own moves nothing.
-        input.events.push(egui::Event::PointerMoved(pos));
-        if let PointerEdge::Press | PointerEdge::Release = p.what {
-            input.events.push(egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: p.what == PointerEdge::Press,
-                modifiers,
-            });
-        }
-    }
+/// Draws the settings window over whichever screen opened it, with that
+/// screen's artwork, at the pixel scale the pointer is measured in.
+fn draw_settings(
+    ui: &mut SettingsUi,
+    screen: &Screen,
+    r: &mut Renderer,
+    scale: u32,
+    cursor: Option<(f32, f32)>,
+) {
+    let (art, atlas) = match screen {
+        Screen::Login(ls) => (&ls.art, ls.atlas),
+        Screen::Connecting(conn) => (&conn.art, conn.atlas),
+        Screen::Game(game) => game.artwork(),
+        Screen::Empty => return,
+    };
+    let mut c = Canvas::new(art, atlas, r.size(), scale, (0.0, 0.0));
+    // In the palette being chosen, so a player picking one for their eyes sees
+    // it before saving it rather than after.
+    c.tints = ui.cfg.palette.text_tints();
+    ui.draw(&c, r, cursor);
 }
 
 /// The settings as they stand now, for the settings screen.
@@ -1367,40 +1290,6 @@ fn current_config(o: &Options) -> crate::config::Config {
 }
 
 impl App {
-    /// Runs the settings screen for this frame, applies a save, and returns what to
-    /// draw.
-    fn settings_frame(&mut self) -> Option<UiFrame> {
-        let run = self.running.as_ref()?;
-        let ui = self.settings.as_mut()?;
-        let state = self.egui_state.get_or_insert_with(|| {
-            egui_winit::State::new(
-                self.egui_ctx.clone(),
-                egui::ViewportId::ROOT,
-                &run.window,
-                Some(run.window.scale_factor() as f32),
-                None,
-                Some(run.renderer.max_texture_side()),
-            )
-        });
-        let raw = state.take_egui_input(&run.window);
-        let mut action = UiAction::None;
-        let out = self.egui_ctx.run_ui(raw, |ui_ctx| action = ui.show(ui_ctx));
-        state.handle_platform_output(&run.window, out.platform_output);
-        let pixels_per_point = out.pixels_per_point;
-        let primitives = self.egui_ctx.tessellate(out.shapes, pixels_per_point);
-        let frame = UiFrame {
-            primitives,
-            textures: out.textures_delta,
-            pixels_per_point,
-        };
-        match action {
-            UiAction::None => {}
-            UiAction::Close => self.settings = None,
-            UiAction::Save => self.save_settings(),
-        }
-        Some(frame)
-    }
-
     fn save_settings(&mut self) {
         let Some(ui) = self.settings.as_mut() else {
             return;
@@ -1410,10 +1299,16 @@ impl App {
         let path = self.options.settings_path.clone();
         ui.status = Some(match &path {
             Some(p) => match std::fs::write(p, cfg.to_text()) {
-                Ok(()) => format!("Saved to {}", p.display()),
+                Ok(()) => {
+                    ui.mark_saved();
+                    format!("Saved to {}", p.display())
+                }
                 Err(e) => format!("Couldn't save: {e}"),
             },
-            None => "No settings folder; applied for this session only".into(),
+            None => {
+                ui.mark_saved();
+                "No settings folder; applied for this session only".into()
+            }
         });
         // Apply what can change now.
         let o = &mut self.options;
@@ -1436,7 +1331,7 @@ impl App {
                         .then_some(winit::window::Fullscreen::Borderless(None)),
                 );
             }
-            // 0 on the slider means "take it from the display", which is a value
+            // "From display" means take it from the display, which is a value
             // to work out now, not a setting to skip. Skipping it is what made
             // choosing 0 look as though it did nothing: the old scale stayed
             // until the next start. The same function the first frame used, so
@@ -1469,15 +1364,6 @@ fn wanted_scale(chosen: Option<u32>, display_factor: f64) -> u32 {
     chosen
         .unwrap_or_else(|| display_factor.round().max(1.0) as u32)
         .clamp(1, 8)
-}
-
-/// One axis of a scripted click, crossing from the flag's units into egui's.
-///
-/// `--click` is in UI pixels -- screen pixels over the pixel scale -- and egui
-/// works in points, which are screen pixels over its own factor. Both sides meet
-/// at screen pixels, so neither screen has to know the other's units.
-fn egui_point(ui: f32, ui_scale: f32, pixels_per_point: f32) -> f32 {
-    ui * ui_scale / pixels_per_point
 }
 
 /// A new screenshot file: `screenshots/oss-YYYY-MM-DD-HHMMSS.png` beside the
@@ -1987,22 +1873,6 @@ scale = 3
         assert_eq!(wanted_scale(Some(3), 1.0), 3);
         assert_eq!(wanted_scale(Some(99), 1.0), 8);
         assert_eq!(wanted_scale(Some(0), 2.0), 1, "0 as a value, not as None");
-    }
-
-    /// The settings screen is egui's and is drawn the same size whatever the
-    /// pixel scale is, so the flag's one unit has to be converted rather than
-    /// assumed. Getting this wrong is a click that lands somewhere else and
-    /// says nothing, which is why it is pinned here and logged at run time.
-    #[test]
-    fn a_scripted_click_reaches_egui_through_screen_pixels() {
-        // Scale 1 on an unscaled display: the flag's numbers are egui's numbers.
-        assert_eq!(egui_point(441.0, 1.0, 1.0), 441.0);
-        // At a pixel scale of 2, a point read off a screenshot of the settings
-        // screen is halved for the flag, and lands back where it was read.
-        assert_eq!(egui_point(220.5, 2.0, 1.0), 441.0);
-        // A display at 150%: egui draws larger, so the same screen pixel is
-        // fewer points in.
-        assert_eq!(egui_point(441.0, 1.0, 1.5), 294.0);
     }
 
     #[test]

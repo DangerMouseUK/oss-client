@@ -623,11 +623,6 @@ impl Renderer {
     }
 
     /// Surface size in physical pixels.
-    /// The device's largest texture side (for egui).
-    pub fn max_texture_side(&self) -> usize {
-        self.device.limits().max_texture_dimension_2d as usize
-    }
-
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
     }

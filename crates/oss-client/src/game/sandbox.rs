@@ -540,6 +540,12 @@ impl Sandbox {
         ));
     }
 
+    /// The artwork this screen draws with, for a window drawn over it (the
+    /// settings).
+    pub fn artwork(&self) -> (&Art, TextureId) {
+        (&self.art, self.atlas)
+    }
+
     /// The window got the focus back: `Misc:ActivateAppShutdownTime` shuts your
     /// engine down for a moment, so switching back in can't be used to dodge.
     pub fn refocused(&mut self) {

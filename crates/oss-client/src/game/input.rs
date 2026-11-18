@@ -841,19 +841,6 @@ impl InputState {
         }
     }
 
-    /// Tracks a modifier without queueing a keystroke.
-    ///
-    /// The settings screen has the keyboard to itself, so nothing drains the
-    /// queue while it is up; it still needs Shift and Ctrl held so that a
-    /// captured binding reads correctly.
-    pub fn modifier(&mut self, code: KeyCode, down: bool) {
-        if down {
-            self.held.insert(code);
-        } else {
-            self.held.remove(&code);
-        }
-    }
-
     /// Releases everything (window lost focus).
     pub fn clear(&mut self) {
         self.held.clear();
