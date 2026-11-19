@@ -1,7 +1,7 @@
 //! Runs the minimal relay zone for local client/bot testing:
 //!
 //! ```text
-//! cargo run -p oss-session --example test_zone -- [--bind 127.0.0.1:5000] [--ask-registration] [--redirect host:port[:arena]] [--keep-first-handshake] <map.lvl>
+//! cargo run -p oss-session --example test_zone -- [--bind 127.0.0.1:5000] [--ask-registration] [--redirect host:port[:arena]] [--keep-first-handshake] [--lenient-requests] <map.lvl>
 //! ```
 //!
 //! Serves the map with stock settings and relays positions and chat. Not a real
@@ -19,6 +19,10 @@
 //! `--keep-first-handshake` behaves as a zone that keeps a connection's first
 //! handshake until it is closed: a second connection request from the same
 //! address is answered, but the connection keeps what it was opened with.
+//!
+//! `--lenient-requests` reads any connection request by its first eight bytes,
+//! whatever its length, as a lenient zone does: it can take another
+//! mechanism's opening for its own request and answer it.
 
 fn main() {
     env_logger_init();
@@ -27,12 +31,14 @@ fn main() {
     let mut ask_registration = false;
     let mut redirect = None;
     let mut keep_first_handshake = false;
+    let mut lenient_requests = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bind" => bind = args.next().unwrap_or(bind),
             "--ask-registration" => ask_registration = true,
             "--keep-first-handshake" => keep_first_handshake = true,
+            "--lenient-requests" => lenient_requests = true,
             "--redirect" => {
                 let value = args.next().unwrap_or_default();
                 let (addr, arena) = match value.splitn(3, ':').collect::<Vec<_>>()[..] {
@@ -53,7 +59,7 @@ fn main() {
     }
     let Some(map) = map else {
         eprintln!(
-            "usage: test_zone [--bind host:port] [--ask-registration] [--redirect host:port[:arena]] [--keep-first-handshake] <map.lvl>"
+            "usage: test_zone [--bind host:port] [--ask-registration] [--redirect host:port[:arena]] [--keep-first-handshake] [--lenient-requests] <map.lvl>"
         );
         std::process::exit(2);
     };
@@ -80,6 +86,7 @@ fn main() {
     zone.ask_for_registration(ask_registration);
     zone.redirect_to(redirect);
     zone.keep_first_handshake(keep_first_handshake);
+    zone.lenient_requests(lenient_requests);
     eprintln!(
         "test zone on {} serving {name}",
         zone.local_addr().map(|a| a.to_string()).unwrap_or(bind)

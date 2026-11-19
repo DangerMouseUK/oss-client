@@ -774,6 +774,18 @@ impl Session {
         self.conn.poll_transmit()
     }
 
+    /// Whether the connection has stepped down to its next encryption
+    /// mechanism and wants that one to start from a fresh local endpoint (true
+    /// once per step down). A driver sends what [`Session::poll_transmit`]
+    /// holds first, then rebinds to a new local port and reports it with
+    /// [`Session::set_local_endpoint`], before the next tick. [`UdpDriver`]
+    /// does this itself.
+    ///
+    /// [`UdpDriver`]: crate::udp::UdpDriver
+    pub fn take_fresh_endpoint(&mut self) -> bool {
+        self.conn.take_fresh_endpoint()
+    }
+
     pub fn poll_event(&mut self) -> Option<SessionEvent> {
         self.events.pop_front()
     }

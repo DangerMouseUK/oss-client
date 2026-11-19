@@ -56,6 +56,9 @@ pub struct TestZone {
     /// Keep each connection's first handshake until the connection is closed.
     /// See [`TestZone::keep_first_handshake`].
     keep_first_handshake: bool,
+    /// Read any connection request by its first eight bytes. See
+    /// [`TestZone::lenient_requests`].
+    lenient_requests: bool,
 }
 
 impl TestZone {
@@ -94,6 +97,7 @@ impl TestZone {
             registrations: Vec::new(),
             redirect: None,
             keep_first_handshake: false,
+            lenient_requests: false,
         })
     }
 
@@ -121,10 +125,21 @@ impl TestZone {
     /// up waiting and asks again another way from the same address is then
     /// talking past the zone: everything it sends after that is read with the
     /// first handshake's keys, and the zone drops it without a word. This zone
-    /// shows that locally. Off by default, which re-keys on a second request
-    /// the way `oss-server` does.
+    /// shows that locally. Off by default: a second request then opens a new
+    /// connection in place of the first, the way `oss-server` does.
     pub fn keep_first_handshake(&mut self, keep: bool) {
         self.keep_first_handshake = keep;
+    }
+
+    /// Behaves as a lenient zone that reads any connection request by its first
+    /// eight bytes, whatever its length. A strict zone ignores a request of the
+    /// wrong length; a lenient one can take another mechanism's opening for its
+    /// own request, answer it, and hold a connection for it. With
+    /// [`TestZone::keep_first_handshake`], that connection is then in the way of
+    /// the client's next attempt, unless the client closes it or moves to a
+    /// fresh local port.
+    pub fn lenient_requests(&mut self, lenient: bool) {
+        self.lenient_requests = lenient;
     }
 
     /// The registration forms received, in order: (name, real name, e-mail).
@@ -154,7 +169,10 @@ impl TestZone {
             match self.socket.recv_from(&mut self.buf) {
                 Ok((n, from)) => {
                     let now = self.now();
-                    let data = self.buf[..n].to_vec();
+                    let mut data = self.buf[..n].to_vec();
+                    if self.lenient_requests && data.len() > 8 && data[..2] == [0, 1] {
+                        data.truncate(8);
+                    }
                     if self.keep_first_handshake && self.answered_as_new(from, &data) {
                         continue;
                     }

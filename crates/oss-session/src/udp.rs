@@ -17,21 +17,27 @@ pub struct UdpDriver {
     buf: Vec<u8>,
 }
 
+/// A non-blocking socket on any local port, connected to `server`.
+fn open_socket(server: SocketAddr) -> std::io::Result<UdpSocket> {
+    let bind: SocketAddr = if server.is_ipv4() {
+        "0.0.0.0:0".parse()
+    } else {
+        "[::]:0".parse()
+    }
+    .map_err(|_| std::io::Error::other("bind address"))?;
+    let socket = UdpSocket::bind(bind)?;
+    socket.connect(server)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
 impl UdpDriver {
     /// Opens a socket for `server` ("host:port").
     pub fn connect(server: &str) -> std::io::Result<Self> {
         let server = server.to_socket_addrs()?.next().ok_or_else(|| {
             std::io::Error::new(ErrorKind::NotFound, "server address did not resolve")
         })?;
-        let bind: SocketAddr = if server.is_ipv4() {
-            "0.0.0.0:0".parse()
-        } else {
-            "[::]:0".parse()
-        }
-        .map_err(|_| std::io::Error::other("bind address"))?;
-        let socket = UdpSocket::bind(bind)?;
-        socket.connect(server)?;
-        socket.set_nonblocking(true)?;
+        let socket = open_socket(server)?;
         Ok(Self {
             socket,
             server,
@@ -96,7 +102,13 @@ impl UdpDriver {
         self.send_pending(session)
     }
 
-    /// Sends every datagram the session has queued.
+    /// Sends every datagram the session has queued, then, if the connection has
+    /// stepped down to its next encryption mechanism, moves to a fresh local
+    /// port for it (see [`Session::take_fresh_endpoint`]).
+    ///
+    /// The server then meets the next attempt as a client it has never seen:
+    /// whatever it kept from the last one, including a goodbye it sends later,
+    /// goes to the old port, which is closed. The login reports the new port.
     pub fn send_pending(&mut self, session: &mut Session) -> std::io::Result<()> {
         while let Some(d) = session.poll_transmit() {
             match self.socket.send(&d) {
@@ -108,6 +120,15 @@ impl UdpDriver {
                     ) => {}
                 Err(e) => return Err(e),
             }
+        }
+        if session.take_fresh_endpoint() {
+            let old = self.bound_port();
+            self.socket = open_socket(self.server)?;
+            session.set_local_endpoint(self.server_ip(), self.bound_port());
+            log::info!(
+                "security: stepping down to the next mechanism from a new local port ({old} -> {})",
+                self.bound_port()
+            );
         }
         Ok(())
     }
