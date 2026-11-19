@@ -18,6 +18,43 @@ news are cached per server. The key prints the file they just wrote into the cha
 so a screenshot taken after another one shows a local path; use `--screenshot` (see
 [testing.md](testing.md)) for anything you intend to publish.
 
+## The settings window
+
+Most of the file can be changed from inside the client. Press **F2** (or click **Options**) on
+the start-up screen, or **Esc then O** in the game. The window is drawn in the game's own box:
+the sections down the left — Video, Audio, Accessibility, Keys, Gamepad, Macros — and the
+picked section's settings on the right.
+
+| Section | Holds |
+|---|---|
+| Video | Pixel scale (or "from display"), fullscreen, vsync |
+| Audio | Mute, volume |
+| Accessibility | Colour palette, interface size |
+| Keys | The keys for every action: Change, Add or Clear each one, or restore Continuum's defaults |
+| Gamepad | The button for every action: Change or Clear each one, or restore the default layout |
+| Macros | Keys that send a line of chat: add one, type its line, or remove it |
+
+It works fully from the keyboard and fully from the pointer:
+
+| Key | Does | With the pointer |
+|---|---|---|
+| Tab / Shift+Tab | Next or previous section | Click a section |
+| Up / Down (PgUp, PgDn, Home, End) | Move between lines | Click a line; the wheel, or `^` `v` beside the heading, scrolls a long list |
+| Left / Right | Change a number or a choice, flip a switch, or move along a line's buttons | Click `<` or `>`, a switch, or a button |
+| Enter | Change the picked line or press the picked button | Click it |
+| Ctrl+S | Save to the settings file | Click `Ctrl+S = Save` |
+| Esc | Close. With changes not yet saved, the first Esc says so and the second closes without saving | Click `Esc = Close` |
+
+Change or Add on a key waits for the next key you press, with Shift or Ctrl if held; Esc
+cancels the wait, and so does a click. On a macro, typing goes into the line it sends.
+The line at the foot says what the picked line, or the one under the pointer, does.
+
+Save writes the file and applies at once everything that can change while playing: keys,
+buttons, macros, volume, pixel scale, fullscreen, palette and interface size. Vsync and
+mute take effect at the next start. The window shows the palette you are picking as you
+pick it, so you see it before you save it. It does not have a player name: that is set on
+the start-up screen.
+
 ## Accessibility and scaling
 
 `[accessibility] palette` picks a colour-blind or high-contrast palette; `ui_scale` draws the

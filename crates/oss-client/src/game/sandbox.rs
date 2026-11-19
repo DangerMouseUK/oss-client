@@ -169,7 +169,7 @@ pub struct Sandbox {
     leaving: bool,
     /// The wait is over: the app takes you back to the front end.
     pub leave: bool,
-    /// The player chose Options in the menu; the app opens the settings screen.
+    /// The player chose Options in the menu; the app opens the settings window.
     pub open_settings: bool,
     /// The player asked for a screenshot; the app saves the next frame.
     pub screenshot_request: bool,

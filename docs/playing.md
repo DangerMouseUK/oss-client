@@ -3,7 +3,7 @@
 Everything the client does at the keyboard, for someone who knows SubSpace and for someone
 who does not. The defaults are Continuum's, so a veteran should not have to read this.
 
-**The keys below are those defaults.** Change one on the settings screen and this page
+**The keys below are those defaults.** Change one on the settings window and this page
 cannot know: **F1 in the game is the one place that shows the keys you actually have**,
 because it reads them out of the table rather than having them written down beside it.
 That is how Continuum's own help works, and it is why this page says "the defaults"
@@ -32,7 +32,9 @@ rather than "the keys".
 | Ctrl +/- | Pixel scale |
 
 Gamepads: left stick or D-pad steers, RT/LT thrust and reverse, bumpers afterburner, A guns,
-B bombs, X mines, Y multifire. Every key and button is rebindable in the settings file.
+B bombs, X mines, Y multifire. Every key and button is rebindable on the settings window
+(Esc then O in the game, or F2 on the start-up screen; see [settings.md](settings.md)) or in
+the settings file.
 
 While the menu is open the whole chat log is on screen, and Page Up/Down scroll it.
 

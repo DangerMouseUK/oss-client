@@ -782,7 +782,7 @@ impl Default for InputState {
 }
 
 impl InputState {
-    /// Replaces the key table (from the settings screen).
+    /// Replaces the key table (from the settings window).
     pub fn set_bindings(&mut self, bindings: Bindings) {
         self.bindings = bindings;
         self.clear();

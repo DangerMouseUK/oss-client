@@ -52,23 +52,27 @@ Options:
   --vsync                   Cap frame rate to the display refresh
   --fullscreen              Borderless fullscreen
   --mute                    No sound
-  --settings                Open the settings screen at start (sandbox)
+  --settings                Open the settings window at start (sandbox). It
+                            reads --press and --click like every other screen:
+                            Tab, the arrows, Enter, Ctrl+S (--hold ControlLeft
+                            with --press KeyS) and Esc
   --screen <menu|helpN>     Open the menu, or help page N, at start (testing)
   --press <secs>:<key>      Press this key <secs> in, by its settings-file name
                             (Enter, Tab, KeyQ, ArrowDown...; a key that types a
                             character types it, so this drives the menu, the chat
-                            line and the form; repeatable; testing)
+                            line, the form and the settings window; repeatable;
+                            testing)
   --hold <secs>:<key>:<for> Hold that key for <for> seconds, repeating it the way
                             a keyboard does (thrust, guns; repeatable; testing)
   --click <secs>:<x>,<y>    Click at that point <secs> in, in UI pixels (screen
                             pixels over the pixel scale) from the top-left: the
                             start-up screen, a box the zone asks you to answer,
-                            or the settings screen while it is up (repeatable;
+                            the Esc menu or the settings window (repeatable;
                             testing)
   --drag <secs>:<x>,<y>:<x>,<y>
-                            Drag from the first point to the second, <secs> in,
-                            in the same units -- what a slider answers to, where
-                            a click is not enough (repeatable; testing)
+                            Press at the first point, move to the second and
+                            let go, <secs> in, in the same units (repeatable;
+                            testing)
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
@@ -310,8 +314,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
                 let (x1, y1) = point(from)?;
                 let (x2, y2) = point(to)?;
                 // Three frames apart, which is what makes this a drag rather
-                // than a click: a slider is drag-sensed, and reads the pointer
-                // where it is while the button is down.
+                // than a click: something drag-sensed reads the pointer where
+                // it is while the button is down.
                 pointer.push(app::ScriptedPoint {
                     at,
                     x: x1,
@@ -626,10 +630,9 @@ mod tests {
         assert!(parse("--press 3:Nonesuch").is_err(), "no such key");
     }
 
-    /// `--drag` is to `--click` what `--hold` is to `--press`. A slider is
-    /// drag-sensed: it reads the pointer where it is while the button is down,
-    /// so a press and a release at one instant -- a click -- moves it nowhere.
-    /// That is what stopped the pixel scale being set from a scripted run.
+    /// `--drag` is to `--click` what `--hold` is to `--press`. Something
+    /// drag-sensed reads the pointer where it is while the button is down, so
+    /// a press and a release at one instant -- a click -- moves it nowhere.
     #[test]
     fn a_scripted_drag_presses_moves_and_lets_go() {
         use app::PointerEdge::{Move, Press, Release};

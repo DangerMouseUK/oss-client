@@ -190,9 +190,9 @@ pub struct Options {
     /// already; only the default one is written when it is missing.
     pub config: Option<PathBuf>,
     pub bindings: crate::game::input::Bindings,
-    /// Where the settings file lives (for the settings screen's Save).
+    /// Where the settings file lives (for the settings window's Save).
     pub settings_path: Option<PathBuf>,
-    /// `--settings`: open the settings screen at start.
+    /// `--settings`: open the settings window at start.
     pub open_settings: bool,
     /// An in-game screen to open as soon as the game starts (testing).
     pub open_screen: Option<StartScreen>,
@@ -1282,8 +1282,7 @@ fn draw_settings(
     ui.draw(&c, r, cursor);
 }
 
-/// The settings as they stand now, for the settings screen.
-/// What the settings screen opens on: the settings file's own values, never the
+/// What the settings window opens on: the settings file's own values, never the
 /// command line's (see [`Options::saved`]).
 fn current_config(o: &Options) -> crate::config::Config {
     o.saved.clone()
@@ -1355,9 +1354,10 @@ impl App {
 /// The pixel scale to run at: the one that was chosen, or the display's own
 /// where nothing was.
 ///
-/// `None` is the settings slider's 0, "from the display". It is a value to
-/// resolve, not a setting to leave alone -- treating it as the latter is what
-/// made choosing 0 appear to do nothing, because the old scale simply stayed.
+/// `None` is the settings window's "from display" (0 in the file). It is a
+/// value to resolve, not a setting to leave alone -- treating it as the latter
+/// is what made choosing 0 appear to do nothing, because the old scale simply
+/// stayed.
 /// Used both for the first frame and when the settings are saved, so the two
 /// cannot disagree.
 fn wanted_scale(chosen: Option<u32>, display_factor: f64) -> u32 {
@@ -1863,7 +1863,7 @@ scale = 3
     /// second half of that was choosing 0, which resolved to nothing at all.
     #[test]
     fn zero_means_the_display_rather_than_no_change() {
-        // 0 on the slider reaches here as `None`, and must come back as a real
+        // "From display" reaches here as `None`, and must come back as a real
         // scale. Returning the old one is what made the setting look dead.
         assert_eq!(wanted_scale(None, 1.0), 1, "an ordinary display");
         assert_eq!(wanted_scale(None, 2.0), 2, "a high-DPI one");
