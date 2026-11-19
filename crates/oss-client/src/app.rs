@@ -1014,9 +1014,9 @@ impl App {
             // The zone offered to create the name: ask the player, over this
             // screen, with the connection held open behind the box.
             if conn.prompt.is_none()
-                && let Some((name, said)) = &conn.net.new_account
+                && let Some((_, said)) = &conn.net.new_account
             {
-                conn.prompt = Some(Prompt::new_account(name, said.as_deref()));
+                conn.prompt = Some(Prompt::new_account(said.as_deref()));
             }
             // The zone let us in and asks for its registration form: the same
             // box, and the arena waits behind it.
@@ -1029,13 +1029,12 @@ impl App {
             // Why the player is going back, when they are.
             let mut give_up = None;
             if let Some(prompt) = conn.prompt.as_mut() {
-                let password = conn.net.password();
-                let mut answer = prompt.input(&strokes, self.input.shift(), password);
+                let mut answer = prompt.input(&strokes, self.input.shift());
                 if answer.is_none()
                     && clicked
                     && let Some((mx, my)) = cursor
                 {
-                    answer = prompt.click(mx, my, password);
+                    answer = prompt.click(mx, my);
                 }
                 match answer {
                     Some(Answer::Create) => {

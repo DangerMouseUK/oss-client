@@ -242,9 +242,10 @@ pub enum SessionEvent {
     /// ([`login_code::NEW_USER`]). The connection is still open: answer with
     /// [`Session::create_account`], or [`Session::disconnect`] to decline.
     ///
-    /// Show the player `name`. Quoting it back is the guard against a typo
-    /// becoming a permanent account: the player believes they typed their own
-    /// name correctly until they are shown otherwise.
+    /// `name` is the name the zone does not know. Continuum asks only "Unknown
+    /// name. Would you like to create a new user...?", and the graphical
+    /// client asks the same; the name is here for a caller that wants to say
+    /// more, as `oss-bot` does in its log.
     NewUserRequired {
         name: String,
         /// The zone's own words, when it sent some (S2C `0x33`).

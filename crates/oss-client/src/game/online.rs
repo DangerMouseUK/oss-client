@@ -679,12 +679,6 @@ impl Online {
         }
     }
 
-    /// The password the login was sent with, which the player has to type a
-    /// second time before an account is made with it.
-    pub fn password(&self) -> &str {
-        &self.session.config().password
-    }
-
     /// Tells the zone we are leaving, and puts it on the wire before we go.
     ///
     /// Nothing sends this on drop, so without it every quit reached the server as a

@@ -320,7 +320,7 @@ fn an_unknown_name_is_offered_and_created_on_the_same_connection() {
     assert_eq!(
         offered.as_deref(),
         Some("newbie"),
-        "the offer quotes the name"
+        "the offer carries the name"
     );
     assert_eq!(zone.logins, [0], "the first login does not ask to create");
     assert!(client.new_user_offered());

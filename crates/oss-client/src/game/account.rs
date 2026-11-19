@@ -3,14 +3,11 @@
 //! A zone that does not know the name it was given offers to create it
 //! ([`oss_session::SessionEvent::NewUserRequired`]). The real clients ask the
 //! player before saying yes, and so does this one: a box over the connecting
-//! screen, drawn the way the start-up screen is, that quotes the name back and
-//! asks for the password a second time.
-//!
-//! Both halves of that are the guard against a typo becoming an account for
-//! good. The name is quoted because a player who mistyped it believes they typed
-//! it correctly until they are shown otherwise; the password is asked again
-//! because a mistyped one is invisible -- the account would be made with it and
-//! the player let in, and nothing would look wrong until the next visit.
+//! screen, drawn the way the start-up screen is, asking Continuum's own
+//! question in Continuum's own words, with Yes and No. Yes creates the account
+//! with the name and password the login was sent with, as Continuum does; the
+//! password is not asked for a second time, so a mistyped one becomes the
+//! account's, as it does in Continuum.
 //!
 //! A zone whose billing server wants a registration form says so in its login
 //! reply ([`oss_session::SessionEvent::RegistrationWanted`]). That form, from
@@ -36,7 +33,7 @@ use crate::gfx::Renderer;
 /// What the player answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
-    /// Create the account: the password was typed the same twice.
+    /// Create the account.
     Create,
     /// Do not create it; go back.
     Cancel,
@@ -75,15 +72,21 @@ struct Entry {
     max: usize,
 }
 
-/// The longest password a login carries: a 32-byte field with its NUL.
-const PASSWORD_MAX: usize = 31;
+/// Continuum's question, word for word.
+const NEW_USER_QUESTION: &str =
+    "Unknown name. Would you like to create a new user and enter the game using this name?";
+
+/// How wide the new-account box is, in characters: Continuum's question on two
+/// lines.
+const NEW_USER_COLUMNS: usize = 50;
+
 /// The registration form's real name and e-mail fields, less their NULs.
 const REAL_NAME_MAX: usize = 31;
 const EMAIL_MAX: usize = 63;
 
 /// The box, its fields and where the pointer can find them.
 ///
-/// `Debug` is written out rather than derived so a password typed into it
+/// `Debug` is written out rather than derived so what a player typed into it
 /// cannot be printed.
 pub struct Prompt {
     kind: Kind,
@@ -115,34 +118,26 @@ impl fmt::Debug for Prompt {
 }
 
 impl Prompt {
-    /// The offer to create `name`, which the zone said it does not know.
-    /// `zone_text` is anything the zone said with the offer.
-    pub fn new_account(name: &str, zone_text: Option<&str>) -> Self {
-        let mut lines = vec![
-            format!("No account named '{name}' on this zone."),
-            "Create it, with the password you typed?".to_string(),
-        ];
+    /// The offer to create the name the zone said it does not know, asked as
+    /// Continuum asks it. `zone_text` is anything the zone said with the
+    /// offer, shown under the question when there is some.
+    pub fn new_account(zone_text: Option<&str>) -> Self {
+        let wrap = |text: &str| super::chat::wrap(text, NEW_USER_COLUMNS, true);
+        let mut lines = wrap(NEW_USER_QUESTION);
         if let Some(text) = zone_text.filter(|t| !t.trim().is_empty()) {
             lines.push(String::new());
-            lines.push(format!("The zone says: {}", text.trim()));
+            lines.extend(wrap(&format!("The zone says: {}", text.trim())));
         }
-        lines.push(String::new());
-        lines.push("Type the password again, to be sure of it.".to_string());
         Self {
             kind: Kind::NewAccount,
-            title: "-= New Account =-",
-            heading: "Unknown name",
+            title: "-= Information =-",
+            heading: "",
             lines,
-            shown: vec![("Name", name.to_string())],
-            fields: vec![Entry {
-                label: "Password",
-                value: String::new(),
-                secret: true,
-                max: PASSWORD_MAX,
-            }],
+            shown: Vec::new(),
+            fields: Vec::new(),
             focus: 0,
-            yes: "Enter = Create",
-            no: "Esc = Cancel",
+            yes: "Enter = Yes",
+            no: "Esc = No",
             error: None,
             spots: Vec::new(),
         }
@@ -180,14 +175,21 @@ impl Prompt {
         }
     }
 
-    /// Applies one frame of keystrokes. `password` is the one the login was
-    /// sent with, which a new account's second typing has to match (the
-    /// registration form ignores it).
+    /// Applies one frame of keystrokes.
     ///
     /// Typing goes into the focused line, Backspace (held or not) takes from it,
-    /// Tab and the arrows move between lines, Enter answers yes and Esc no.
-    pub fn input(&mut self, strokes: &[Stroke], shift: bool, password: &str) -> Option<Answer> {
+    /// Tab and the arrows move between lines, Enter answers yes and Esc no. The
+    /// new-account question, which has nothing to type in, also takes Y and N,
+    /// as the buttons of the Windows message box it copies do.
+    pub fn input(&mut self, strokes: &[Stroke], shift: bool) -> Option<Answer> {
         for stroke in strokes {
+            if self.kind == Kind::NewAccount && !stroke.repeat {
+                match stroke.text.map(|c| c.to_ascii_lowercase()) {
+                    Some('y') => return self.yes(),
+                    Some('n') => return Some(self.no()),
+                    _ => {}
+                }
+            }
             let count = self.fields.len().max(1);
             if let Some(c) = stroke.text
                 && !c.is_control()
@@ -211,7 +213,7 @@ impl Prompt {
             }
             match stroke.first_press() {
                 Some(KeyCode::Enter | KeyCode::NumpadEnter) => {
-                    if let Some(answer) = self.yes(password) {
+                    if let Some(answer) = self.yes() {
                         return Some(answer);
                     }
                 }
@@ -223,13 +225,13 @@ impl Prompt {
     }
 
     /// A click at (`x`, `y`) in UI pixels, against what the last frame drew.
-    pub fn click(&mut self, x: f32, y: f32, password: &str) -> Option<Answer> {
+    pub fn click(&mut self, x: f32, y: f32) -> Option<Answer> {
         match self.spot_at(x, y)? {
             Spot::Field(i) => {
                 self.focus = i;
                 None
             }
-            Spot::Yes => self.yes(password),
+            Spot::Yes => self.yes(),
             Spot::No => Some(self.no()),
         }
     }
@@ -242,24 +244,11 @@ impl Prompt {
     }
 
     /// The yes, if the box's fields allow it; otherwise says why not.
-    fn yes(&mut self, password: &str) -> Option<Answer> {
-        if self.kind == Kind::Registration {
-            return self.send();
+    fn yes(&mut self) -> Option<Answer> {
+        match self.kind {
+            Kind::NewAccount => Some(Answer::Create),
+            Kind::Registration => self.send(),
         }
-        let again = self.fields.first().map_or("", |e| e.value.as_str());
-        if again != password {
-            // Cleared, so the second try starts from nothing rather than from
-            // whatever was wrong, which the stars do not show.
-            if let Some(e) = self.fields.first_mut() {
-                e.value.clear();
-            }
-            self.focus = 0;
-            self.error =
-                Some("That is not the password you typed first. Type it again.".to_string());
-            return None;
-        }
-        self.error = None;
-        Some(Answer::Create)
     }
 
     /// The registration form's yes: an e-mail address is the one thing a zone
@@ -332,9 +321,12 @@ impl Prompt {
             .columns()
             .min(((c.view_w - 16.0) / 8.0).max(20.0) as usize);
         let w = cols as f32 * 8.0;
-        let rows = self.lines.len() + self.shown.len() + self.fields.len();
-        // Title, rule, heading, the rows, a gap, two error lines, a rule, the keys.
-        let h = 20.0 + 14.0 + rows as f32 * 14.0 + 8.0 + 2.0 * ERROR_PITCH + 8.0 + 16.0;
+        let rows = usize::from(!self.heading.is_empty())
+            + self.lines.len()
+            + self.shown.len()
+            + self.fields.len();
+        // Title, rule, the heading and rows, a gap, two error lines, a rule, the keys.
+        let h = 20.0 + rows as f32 * 14.0 + 8.0 + 2.0 * ERROR_PITCH + 8.0 + 16.0;
         let x = ((c.view_w - w) / 2.0).floor();
         let top = ((c.view_h - h) / 2.0).floor().max(4.0);
         c.panel(r, x, top, w, h);
@@ -342,8 +334,10 @@ impl Prompt {
         c.separator(r, x, top + 13.0, w);
 
         let mut y = top + 20.0;
-        c.text(r, x + 4.0, y, color::DARK_RED, self.heading);
-        y += 14.0;
+        if !self.heading.is_empty() {
+            c.text(r, x + 4.0, y, color::DARK_RED, self.heading);
+            y += 14.0;
+        }
         let width = cols.saturating_sub(1);
         for line in &self.lines {
             let shown: String = line.chars().take(width).collect();
@@ -449,80 +443,57 @@ mod tests {
         k.iter().copied().map(Stroke::press).collect()
     }
 
-    /// The box quotes the name back. That line is the guard against a typo in
-    /// the name: without it the player has no reason to think the name is wrong.
+    /// The offer is Continuum's question, word for word, and nothing to type:
+    /// the account is made with the password the login was sent with.
     #[test]
-    fn the_offer_quotes_the_name_back() {
-        let p = Prompt::new_account("Acee", None);
-        assert!(
-            p.lines.iter().any(|l| l.contains("'Acee'")),
-            "{:?}",
-            p.lines
-        );
-        assert!(p.shown.iter().any(|(_, v)| v == "Acee"));
+    fn the_offer_asks_continuums_question_and_nothing_else() {
+        let p = Prompt::new_account(None);
+        assert_eq!(p.lines.join(" "), NEW_USER_QUESTION);
+        assert!(p.fields.is_empty(), "no second password");
+        assert!(p.shown.is_empty());
+        assert_eq!((p.yes, p.no), ("Enter = Yes", "Esc = No"));
+
+        let p = Prompt::new_account(Some("  Welcome!  "));
+        assert!(p.lines.iter().any(|l| l == "The zone says: Welcome!"));
     }
 
-    /// The same password twice creates; a different one is refused, said, and
-    /// cleared for another go -- the second typing is what stops a mistyped
-    /// password becoming the account's.
+    /// Enter or Y says yes; Esc or N says no. Nothing typed gets in the way.
     #[test]
-    fn a_mistyped_second_password_is_refused_and_a_matching_one_creates() {
-        let mut p = Prompt::new_account("Acee", None);
-        assert_eq!(p.input(&typed("hunter3"), false, "hunter2"), None);
-        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false, "hunter2"), None);
-        assert!(p.error.is_some(), "a mismatch says so");
-        assert_eq!(p.fields[0].value, "", "and starts the field again");
-
-        p.input(&typed("hunter2"), false, "hunter2");
-        assert_eq!(
-            p.input(&keys(&[KeyCode::Enter]), false, "hunter2"),
-            Some(Answer::Create)
-        );
-        assert_eq!(p.error, None);
+    fn the_keys_answer_yes_or_no() {
+        for (k, want) in [
+            (KeyCode::Enter, Answer::Create),
+            (KeyCode::NumpadEnter, Answer::Create),
+            (KeyCode::Escape, Answer::Cancel),
+        ] {
+            let mut p = Prompt::new_account(None);
+            assert_eq!(p.input(&keys(&[k]), false), Some(want));
+        }
+        for (s, want) in [
+            ("y", Answer::Create),
+            ("Y", Answer::Create),
+            ("n", Answer::Cancel),
+            ("N", Answer::Cancel),
+        ] {
+            let mut p = Prompt::new_account(None);
+            assert_eq!(p.input(&typed(s), false), Some(want), "{s}");
+        }
+        let mut p = Prompt::new_account(None);
+        assert_eq!(p.input(&typed("q"), false), None, "any other key waits");
     }
 
-    /// Esc is no, whatever has been typed; Backspace edits.
-    #[test]
-    fn escape_cancels_and_backspace_edits() {
-        let mut p = Prompt::new_account("Acee", None);
-        p.input(&typed("abx"), false, "ab");
-        p.input(&keys(&[KeyCode::Backspace]), false, "ab");
-        assert_eq!(p.fields[0].value, "ab");
-        assert_eq!(
-            p.input(&keys(&[KeyCode::Escape]), false, "ab"),
-            Some(Answer::Cancel)
-        );
-    }
-
-    /// A zone that keeps passwords empty has to be answerable too: an empty
-    /// first password is matched by an empty second one.
-    #[test]
-    fn an_empty_password_is_matched_by_an_empty_one() {
-        let mut p = Prompt::new_account("Acee", None);
-        assert_eq!(
-            p.input(&keys(&[KeyCode::Enter]), false, ""),
-            Some(Answer::Create)
-        );
-    }
-
-    /// Everything the keys do, a click does: the field takes the focus and the
-    /// two words on the foot line answer. The regions are the ones the box
-    /// records as it draws, set here by hand because drawing needs a window.
+    /// Everything the keys do, a click does: the two words on the foot line
+    /// answer. The regions are the ones the box records as it draws, set here
+    /// by hand because drawing needs a window.
     #[test]
     fn the_pointer_can_answer_both_ways() {
-        let mut p = Prompt::new_account("Acee", None);
+        let mut p = Prompt::new_account(None);
         p.spots = vec![
-            (Rect::new(0.0, 0.0, 100.0, 13.0), Spot::Field(0)),
             (Rect::new(0.0, 20.0, 40.0, 13.0), Spot::Yes),
             (Rect::new(50.0, 20.0, 40.0, 13.0), Spot::No),
         ];
-        assert_eq!(p.click(10.0, 5.0, "pw"), None, "a field only takes focus");
-        assert_eq!(p.click(10.0, 25.0, "pw"), None, "nothing typed yet");
-        assert!(p.error.is_some());
-        p.input(&typed("pw"), false, "pw");
-        assert_eq!(p.click(10.0, 25.0, "pw"), Some(Answer::Create));
-        assert_eq!(p.click(60.0, 25.0, "pw"), Some(Answer::Cancel));
-        assert_eq!(p.click(200.0, 200.0, "pw"), None, "outside everything");
+        assert_eq!(p.click(10.0, 25.0), Some(Answer::Create));
+        assert_eq!(p.click(60.0, 25.0), Some(Answer::Cancel));
+        assert_eq!(p.click(200.0, 200.0), None, "outside everything");
     }
 
     /// The form takes a real name and an e-mail, Tab moves between them, and
@@ -530,11 +501,11 @@ mod tests {
     #[test]
     fn the_form_sends_a_real_name_and_an_email() {
         let mut p = Prompt::registration();
-        p.input(&typed("Ada Lovelace "), false, "");
-        p.input(&keys(&[KeyCode::Tab]), false, "");
-        p.input(&typed("ada@example.org"), false, "");
+        p.input(&typed("Ada Lovelace "), false);
+        p.input(&keys(&[KeyCode::Tab]), false);
+        p.input(&typed("ada@example.org"), false);
         assert_eq!(
-            p.input(&keys(&[KeyCode::Enter]), false, ""),
+            p.input(&keys(&[KeyCode::Enter]), false),
             Some(Answer::Send {
                 real_name: "Ada Lovelace".into(),
                 email: "ada@example.org".into(),
@@ -547,18 +518,18 @@ mod tests {
     #[test]
     fn the_form_wants_an_email_or_a_skip() {
         let mut p = Prompt::registration();
-        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false, ""), None);
+        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
         assert!(p.error.as_deref().is_some_and(|e| e.contains("Esc")));
         assert_eq!(p.focus, 1);
-        p.input(&typed("Ada Lovelace"), false, "");
-        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false, ""), None);
+        p.input(&typed("Ada Lovelace"), false);
+        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
         assert!(
             p.error
                 .as_deref()
                 .is_some_and(|e| e.contains("does not look"))
         );
         assert_eq!(
-            p.input(&keys(&[KeyCode::Escape]), false, ""),
+            p.input(&keys(&[KeyCode::Escape]), false),
             Some(Answer::Skip)
         );
     }
@@ -568,10 +539,10 @@ mod tests {
     #[test]
     fn the_form_fields_stop_at_the_wire_lengths() {
         let mut p = Prompt::registration();
-        p.input(&typed(&"x".repeat(80)), false, "");
+        p.input(&typed(&"x".repeat(80)), false);
         assert_eq!(p.fields[0].value.len(), REAL_NAME_MAX);
-        p.input(&keys(&[KeyCode::ArrowDown]), false, "");
-        p.input(&typed(&"y".repeat(80)), false, "");
+        p.input(&keys(&[KeyCode::ArrowDown]), false);
+        p.input(&typed(&"y".repeat(80)), false);
         assert_eq!(p.fields[1].value.len(), EMAIL_MAX);
     }
 
@@ -585,11 +556,11 @@ mod tests {
             (Rect::new(0.0, 30.0, 40.0, 13.0), Spot::Yes),
             (Rect::new(50.0, 30.0, 40.0, 13.0), Spot::No),
         ];
-        assert_eq!(p.click(10.0, 20.0, ""), None);
+        assert_eq!(p.click(10.0, 20.0), None);
         assert_eq!(p.focus, 1, "clicking a line focuses it");
-        p.input(&typed("a@b.co"), false, "");
-        assert!(matches!(p.click(10.0, 35.0, ""), Some(Answer::Send { .. })));
-        assert_eq!(p.click(60.0, 35.0, ""), Some(Answer::Skip));
+        p.input(&typed("a@b.co"), false);
+        assert!(matches!(p.click(10.0, 35.0), Some(Answer::Send { .. })));
+        assert_eq!(p.click(60.0, 35.0), Some(Answer::Skip));
     }
 
     #[test]
@@ -604,11 +575,11 @@ mod tests {
         }
     }
 
-    /// A password typed into the box is never printed by a log line.
+    /// What a player types into the form is never printed by a log line.
     #[test]
     fn the_box_cannot_print_what_was_typed_into_it() {
-        let mut p = Prompt::new_account("Acee", None);
-        p.input(&typed("hunter2"), false, "x");
-        assert!(!format!("{p:?}").contains("hunter2"));
+        let mut p = Prompt::registration();
+        p.input(&typed("Ada Lovelace"), false);
+        assert!(!format!("{p:?}").contains("Lovelace"));
     }
 }
