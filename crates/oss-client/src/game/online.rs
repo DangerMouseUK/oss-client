@@ -602,7 +602,8 @@ impl Online {
                 self.redirects + 1
             );
             self.error = Some(format!(
-                "The zone kept sending the connection on to another zone                  ({} times in a row), so the client stopped following.",
+                "The zone kept sending the connection on to another zone \
+                 ({} times in a row), so the client stopped following.",
                 self.redirects + 1
             ));
             return;
