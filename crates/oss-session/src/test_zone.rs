@@ -53,6 +53,9 @@ pub struct TestZone {
     /// Answer every arena request with a redirect here, and the arena to enter
     /// there (`None`: any public arena), instead of letting the player in.
     redirect: Option<(SocketAddrV4, Option<String>)>,
+    /// Keep each connection's first handshake until the connection is closed.
+    /// See [`TestZone::keep_first_handshake`].
+    keep_first_handshake: bool,
 }
 
 impl TestZone {
@@ -90,6 +93,7 @@ impl TestZone {
             ask_registration: false,
             registrations: Vec::new(),
             redirect: None,
+            keep_first_handshake: false,
         })
     }
 
@@ -105,6 +109,22 @@ impl TestZone {
     /// players elsewhere does. `None` lets players in again.
     pub fn redirect_to(&mut self, to: Option<(SocketAddrV4, Option<String>)>) {
         self.redirect = to;
+    }
+
+    /// Behaves as a zone that keeps a connection's first handshake until it is
+    /// closed: a second connection request from an address that already has a
+    /// connection is answered as if it were new, but the connection keeps the
+    /// keys and the kind of client it was opened with. Only a disconnect from
+    /// that address (or the connection timing out) lets a new handshake in.
+    ///
+    /// Some live zones do this. A client that opens a connection one way, gives
+    /// up waiting and asks again another way from the same address is then
+    /// talking past the zone: everything it sends after that is read with the
+    /// first handshake's keys, and the zone drops it without a word. This zone
+    /// shows that locally. Off by default, which re-keys on a second request
+    /// the way `oss-server` does.
+    pub fn keep_first_handshake(&mut self, keep: bool) {
+        self.keep_first_handshake = keep;
     }
 
     /// The registration forms received, in order: (name, real name, e-mail).
@@ -135,6 +155,9 @@ impl TestZone {
                 Ok((n, from)) => {
                     let now = self.now();
                     let data = self.buf[..n].to_vec();
+                    if self.keep_first_handshake && self.answered_as_new(from, &data) {
+                        continue;
+                    }
                     self.net.handle_datagram(now, from, &data);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -164,6 +187,26 @@ impl TestZone {
         while let Some((to, d)) = self.net.poll_transmit() {
             let _ = self.socket.send_to(&d, to);
         }
+    }
+
+    /// For [`TestZone::keep_first_handshake`]: a connection request from an
+    /// address that already has a connection is answered as a new one would be,
+    /// and goes no further, so the connection keeps its first handshake.
+    /// Returns whether `data` was such a request.
+    fn answered_as_new(&mut self, from: SocketAddr, data: &[u8]) -> bool {
+        let Some((key, _)) = oss_net::cipher::parse_connect(data) else {
+            return false;
+        };
+        // Closed counts as gone, even before the server sweeps it away: the
+        // request then opens a new connection, as it would on a zone that has
+        // finished with the old one.
+        if self.net.connection_mut(&from).is_none_or(|c| c.is_closed()) {
+            return false;
+        }
+        let mut reply = vec![0, 2];
+        reply.extend_from_slice(&oss_net::vie::server_key_for(key).to_le_bytes());
+        let _ = self.socket.send_to(&reply, from);
+        true
     }
 
     fn send(&mut self, to: SocketAddr, p: &impl Packet, reliable: bool) {
