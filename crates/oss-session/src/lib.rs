@@ -299,7 +299,10 @@ pub enum SessionEvent {
     },
     /// The zone let the player in and asks for its registration form (the login
     /// reply's demographics byte). The session waits, short of the arena, until
-    /// [`Session::send_registration`] or [`Session::skip_registration`].
+    /// [`Session::send_registration`], [`Session::skip_registration`] or
+    /// [`Session::disconnect`]. The graphical client offers a player only the
+    /// first and the last, as Continuum does; skipping is for a bot, which has
+    /// nobody to ask.
     RegistrationWanted,
     /// The zone refused the login.
     LoginFailed {

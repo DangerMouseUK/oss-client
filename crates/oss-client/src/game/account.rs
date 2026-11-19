@@ -18,6 +18,11 @@
 //! original clients sent a description of the computer with it. This one does
 //! not, and the box says plainly that only what is typed into it is sent.
 //!
+//! The form has Continuum's two ways out and no third: Submit Information, or
+//! Disconnect from server, which closes the connection and goes back to the
+//! start-up screen. There is no way into the zone without answering, as there
+//! was none in Continuum or in SubSpace before it.
+//!
 //! Both boxes work fully from the keyboard and fully from the pointer: every
 //! line can be clicked, every tick box and round button can be clicked, and
 //! each key on the foot line is a button as well, as the start-up screen's
@@ -42,8 +47,8 @@ pub enum Answer {
     Cancel,
     /// Send the registration form with these answers.
     Send(RegistrationForm),
-    /// Do not send the form; enter the zone anyway.
-    Skip,
+    /// Do not send the form: leave the zone.
+    Disconnect,
 }
 
 /// Which question the box is asking.
@@ -300,7 +305,7 @@ impl Prompt {
             lines,
             focus: 0,
             yes: "Enter = Submit Information",
-            no: "Esc = Skip",
+            no: "Esc = Disconnect from server",
             error: None,
             spots: Vec::new(),
         };
@@ -450,7 +455,7 @@ impl Prompt {
     fn no(&self) -> Answer {
         match self.kind {
             Kind::NewAccount => Answer::Cancel,
-            Kind::Registration => Answer::Skip,
+            Kind::Registration => Answer::Disconnect,
         }
     }
 
@@ -479,7 +484,7 @@ impl Prompt {
         if email.is_empty() {
             return self.refuse(
                 EMAIL,
-                "E-Mail is required. Enter one, or press Esc to skip the form.",
+                "E-Mail is required. Enter one, or press Esc to disconnect.",
             );
         }
         if !looks_like_email(&email) {
@@ -997,14 +1002,16 @@ mod tests {
         }
     }
 
-    /// Esc leaves the form whatever is in it.
+    /// Esc disconnects, whatever is in the form, and the foot line says so in
+    /// Continuum's words. There is no third way out.
     #[test]
-    fn escape_leaves_the_form() {
+    fn escape_disconnects() {
         let mut p = Prompt::registration();
+        assert_eq!(p.no, "Esc = Disconnect from server");
         p.input(&typed("a@b.co"), false);
         assert_eq!(
             p.input(&keys(&[KeyCode::Escape]), false),
-            Some(Answer::Skip)
+            Some(Answer::Disconnect)
         );
     }
 
@@ -1046,7 +1053,7 @@ mod tests {
                 ..
             }))
         ));
-        assert_eq!(p.click(60.0, 65.0), Some(Answer::Skip));
+        assert_eq!(p.click(60.0, 65.0), Some(Answer::Disconnect));
     }
 
     #[test]

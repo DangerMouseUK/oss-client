@@ -70,6 +70,8 @@ struct Zone {
     demo_data: u8,
     /// The registration form, when one arrived, and how long it was.
     registration: Option<(oss_proto::c2s::Registration, usize)>,
+    /// The client's connection closed.
+    disconnected: bool,
     /// The login exactly as it arrived: length, type byte and client version. ASSS
     /// checks the length against the client type the encryption chose, so these are
     /// what decides whether a zone accepts us at all.
@@ -264,8 +266,10 @@ fn step(
     }
     server.tick(*now);
     while let Some((_, ev)) = server.poll_event() {
-        if let Event::Packet(p) = ev {
-            zone.handle(server, &p);
+        match ev {
+            Event::Packet(p) => zone.handle(server, &p),
+            Event::Disconnected(_) => zone.disconnected = true,
+            _ => {}
         }
     }
     while let Some((_, d)) = server.poll_transmit() {
@@ -508,6 +512,44 @@ fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
             .all(|h| h.to_str().is_none_or(str::is_empty))
     );
     assert_eq!(zone.go_arenas, 1, "then the arena");
+}
+
+/// Disconnecting at the form -- the graphical client's other way out of it,
+/// as Continuum's -- tells the zone, and sends neither the form nor an arena
+/// request.
+#[test]
+fn disconnecting_at_the_form_sends_nothing_more() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
+    let cfg = SessionConfig {
+        want_lvz: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone {
+        demo_data: 1,
+        ..Default::default()
+    };
+    for _ in 0..300 {
+        if step(&mut client, &mut server, &mut zone, &mut now)
+            .iter()
+            .any(|e| matches!(e, SessionEvent::RegistrationWanted))
+        {
+            break;
+        }
+    }
+    assert!(client.registration_wanted());
+    client.disconnect();
+    assert!(!client.registration_wanted(), "nothing is waiting any more");
+    for _ in 0..300 {
+        step(&mut client, &mut server, &mut zone, &mut now);
+        if zone.disconnected {
+            break;
+        }
+    }
+    assert!(zone.disconnected, "the zone was told");
+    assert!(zone.registration.is_none(), "no form sent");
+    assert_eq!(zone.go_arenas, 0, "and no arena asked for");
 }
 
 /// Skipping sends no form and still enters; a zone that does not ask is never

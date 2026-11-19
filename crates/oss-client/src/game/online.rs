@@ -133,7 +133,7 @@ pub struct Online {
     /// login form and the connection with it.
     pub new_account: Option<(String, Option<String>)>,
     /// The zone let us in and asks for its registration form. The arena waits
-    /// for [`Online::send_registration`] or [`Online::skip_registration`].
+    /// for [`Online::send_registration`] or a disconnect.
     pub registration: bool,
     /// Team requested on the command line.
     pub freq: Option<i16>,
@@ -663,15 +663,6 @@ impl Online {
     pub fn send_registration(&mut self, form: &RegistrationForm) {
         if std::mem::take(&mut self.registration) && self.session.send_registration(form) {
             log::info!("sent the registration form to {}", self.server);
-            self.status = "Entering arena...".into();
-            self.flush();
-        }
-    }
-
-    /// Goes on into the arena without sending the registration form.
-    pub fn skip_registration(&mut self) {
-        if std::mem::take(&mut self.registration) && self.session.skip_registration() {
-            log::info!("skipped {}'s registration form", self.server);
             self.status = "Entering arena...".into();
             self.flush();
         }

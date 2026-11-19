@@ -1046,9 +1046,9 @@ impl App {
                         conn.prompt = None;
                         conn.net.send_registration(&form);
                     }
-                    Some(Answer::Skip) => {
-                        conn.prompt = None;
-                        conn.net.skip_registration();
+                    // Continuum's other way out of its form: leave the zone.
+                    Some(Answer::Disconnect) => {
+                        give_up = Some("Disconnected from the zone.".to_string());
                     }
                     None => {}
                 }
