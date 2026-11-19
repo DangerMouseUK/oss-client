@@ -35,6 +35,20 @@ pub struct Supplied {
 /// The zone's news, cached beside its maps under Continuum's name for it.
 const NEWS_FILE: &str = "news.txt";
 
+/// How many redirects in a row are followed before the client stops and says
+/// so. A zone that sends players on does it once; two zones pointing at each
+/// other would otherwise bounce the player between them for ever. The count
+/// starts again once an arena is entered.
+const MAX_REDIRECTS: u8 = 4;
+
+/// What it took to reach the zone, kept so a redirect can reach the next one
+/// the same way: the same name, password, security and supplied client.
+struct Reach {
+    opts: ServerOptions,
+    resolution: (u16, u16),
+    supplied: Supplied,
+}
+
 /// Where packets come from.
 enum Source {
     Live(UdpDriver),
@@ -146,6 +160,10 @@ pub struct Online {
     known: KnownServers,
     pinned: bool,
     server: String,
+    /// How this zone was reached; `None` when playing a recording back.
+    reach: Option<Reach>,
+    /// Redirects followed since an arena was last entered.
+    redirects: u8,
 }
 
 impl Online {
@@ -170,6 +188,16 @@ impl Online {
         resolution: (u16, u16),
         supplied: &Supplied,
     ) -> Result<Self, String> {
+        Self::open(opts, resolution, supplied, 0)
+    }
+
+    /// [`Online::connect`], with the login id a redirect handed over (0 for none).
+    fn open(
+        opts: &ServerOptions,
+        resolution: (u16, u16),
+        supplied: &Supplied,
+        redirect_id: u32,
+    ) -> Result<Self, String> {
         let driver =
             UdpDriver::connect(&opts.server).map_err(|e| format!("{}: {e}", opts.server))?;
         let cfg = SessionConfig {
@@ -184,6 +212,7 @@ impl Online {
                 .client
                 .clone()
                 .unwrap_or_else(|| SessionConfig::default().client),
+            redirect_id,
             ..Default::default()
         };
         let seed = std::time::SystemTime::now()
@@ -258,6 +287,12 @@ impl Online {
             known,
             pinned: pin.is_some(),
             server: opts.server.clone(),
+            reach: Some(Reach {
+                opts: opts.clone(),
+                resolution,
+                supplied: supplied.clone(),
+            }),
+            redirects: 0,
         })
     }
 
@@ -297,6 +332,8 @@ impl Online {
             known: KnownServers::default(),
             pinned: false,
             server: String::new(),
+            reach: None,
+            redirects: 0,
         })
     }
 
@@ -350,8 +387,24 @@ impl Online {
             }
         }
         let mut out = Vec::new();
+        let mut redirect = None;
         while let Some(ev) = self.session.poll_event() {
             match &ev {
+                // The zone has sent the player on, and the session has hung up
+                // on it: whatever else it reported goes with it. Followed once
+                // this loop is done, since following it replaces the session.
+                SessionEvent::Redirected {
+                    server,
+                    arena,
+                    login_id,
+                } if self.reach.is_some() => {
+                    redirect = Some((server.clone(), arena.clone(), *login_id));
+                    break;
+                }
+                SessionEvent::Redirected { server, .. } => {
+                    self.status = format!("The zone sent the player on to {server}.");
+                }
+                SessionEvent::Playing => self.redirects = 0,
                 SessionEvent::Connected => {
                     let cipher = self.session.cipher_name().unwrap_or("?");
                     self.status = format!("Logging in ({cipher})...");
@@ -519,10 +572,62 @@ impl Online {
             }
             out.push(ev);
         }
+        if let Some((server, arena, login_id)) = redirect {
+            self.follow_redirect(server, arena, login_id);
+            return out;
+        }
         if let Source::Live(d) = &mut self.source {
             let _ = d.send_pending(&mut self.session);
         }
         out
+    }
+
+    /// Connects to the zone a redirect named, as the player who reached this one,
+    /// and replaces this connection with it. Continuum does the same: a zone
+    /// that sends players on is left, and the one it names is joined with the
+    /// same name and password, into the arena the redirect asked for.
+    ///
+    /// The new zone gets its own address's map cache, OpenSec key and identity,
+    /// exactly as if it had been picked from the zone list. A recording carries
+    /// on in a second file beside the first (`visit.ossr`, then
+    /// `visit-redirect1.ossr`), since the new connection keeps its own clock.
+    fn follow_redirect(&mut self, server: String, arena: Option<String>, login_id: u32) {
+        let Some(reach) = self.reach.as_ref() else {
+            return;
+        };
+        if self.redirects >= MAX_REDIRECTS {
+            log::warn!(
+                "{} redirects to {server}: {} redirects in a row, not following",
+                self.server,
+                self.redirects + 1
+            );
+            self.error = Some(format!(
+                "The zone kept sending the connection on to another zone                  ({} times in a row), so the client stopped following.",
+                self.redirects + 1
+            ));
+            return;
+        }
+        let count = self.redirects + 1;
+        let mut opts = reach.opts.clone();
+        opts.server = server.clone();
+        opts.arena = arena;
+        opts.record = opts.record.as_deref().map(|p| redirect_recording(p, count));
+        log::info!("following the redirect from {} to {server}", self.server);
+        let (resolution, supplied) = (reach.resolution, reach.supplied.clone());
+        match Online::open(&opts, resolution, &supplied, login_id) {
+            Ok(mut next) => {
+                next.redirects = count;
+                next.early_chat = std::mem::take(&mut self.early_chat);
+                next.status = format!("The zone sent you on to {server}. Connecting...");
+                *self = next;
+            }
+            Err(e) => {
+                log::warn!("couldn't follow the redirect to {server}: {e}");
+                self.error = Some(format!(
+                    "The zone sent you on to {server}, which couldn't be reached: {e}"
+                ));
+            }
+        }
     }
 
     /// Whether the arena is ready to play (entered, settings and map loaded).
@@ -677,6 +782,19 @@ impl Downloads {
 
 /// A size as a player reads one: kilobytes below a megabyte, megabytes to one
 /// place above.
+/// Where a recording carries on after the `n`th redirect: beside the first,
+/// with `-redirect<n>` added to its name (`visit.ossr` → `visit-redirect1.ossr`).
+fn redirect_recording(path: &Path, n: u8) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map_or_else(|| "recording".into(), |s| s.to_string_lossy().into_owned());
+    let name = match path.extension() {
+        Some(ext) => format!("{stem}-redirect{n}.{}", ext.to_string_lossy()),
+        None => format!("{stem}-redirect{n}"),
+    };
+    path.with_file_name(name)
+}
+
 fn size_text(bytes: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = 1024 * 1024;
@@ -696,7 +814,21 @@ mod tests {
     use oss_session::security::{HandshakeRequest, SecurityMode, SecurityProfile};
     use oss_session::{ClientProfile, LoginForm, Profile, SecurityAnswer, SecurityChallenge};
 
-    use super::{Downloads, Online, ServerOptions, Supplied, size_text};
+    use super::{Downloads, Online, ServerOptions, Supplied, redirect_recording, size_text};
+
+    /// A recording carries on beside the first after a redirect, never over it.
+    #[test]
+    fn a_redirect_records_beside_the_first_file() {
+        let dir = std::path::Path::new("captures");
+        assert_eq!(
+            redirect_recording(&dir.join("visit.ossr"), 1),
+            dir.join("visit-redirect1.ossr")
+        );
+        assert_eq!(
+            redirect_recording(std::path::Path::new("visit"), 2),
+            std::path::Path::new("visit-redirect2")
+        );
+    }
 
     /// A stand-in for a build outside this repository, supplying both halves. The
     /// handshake it returns is the VIE one and the login form the SubSpace one,

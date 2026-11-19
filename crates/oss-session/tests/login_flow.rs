@@ -84,6 +84,10 @@ struct Zone {
     requests: Vec<u16>,
     /// Whether the client asked for the news file (C2S `0x0D`).
     asked_for_news: bool,
+    /// Answer the arena request with this redirect instead of the arena.
+    redirect: Option<oss_proto::s2c::Redirect>,
+    /// The login's redirect id, as the zone received it.
+    redirect_id: Option<u32>,
 }
 
 /// Stand-in LVZ contents (the session doesn't parse them).
@@ -116,6 +120,7 @@ impl Zone {
                 self.login_flags = Some(l.flags);
                 self.logins.push(l.flags);
                 self.login_wire = Some((pkt.len(), l.kind, l.client_version));
+                self.redirect_id = Some(l.redirect_id);
                 let code = match self.names {
                     Names::Any => 0,
                     Names::AskFirst if l.flags == 1 => 0,
@@ -135,6 +140,10 @@ impl Zone {
             C2SPacket::Registration(r) => self.registration = Some((*r, pkt.len())),
             C2SPacket::GoArena(go) => {
                 self.go_arenas += 1;
+                if let Some(r) = self.redirect.clone() {
+                    send(server, &|o| r.encode(o));
+                    return;
+                }
                 assert_eq!(go.optional_graphics, Some(1), "asks for LVZ files");
                 let settings = ClientSettings::default();
                 self.settings = settings.to_bytes();
@@ -911,4 +920,87 @@ fn rejected_login_is_reported() {
         failed.is_some_and(|m| m.starts_with("Wrong password")),
         "{failed:?}"
     );
+}
+
+/// A zone that answers the arena request with a redirect (S2C `0x3B`), as some
+/// zones in the live list do: the session reports where to go and hangs up on
+/// the first zone, instead of waiting for an arena that never comes. The login
+/// to the zone it points at then carries the login id the redirect handed over,
+/// and that one enters the arena as usual.
+#[test]
+fn a_redirect_is_followed_to_the_zone_it_names() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
+    let cfg = SessionConfig {
+        name: "tester".into(),
+        password: "pw".into(),
+        want_lvz: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg.clone(), now, 0xBEEF);
+    let mut zone = Zone {
+        // 127.0.0.1 port 5001, arena "duel"; the address is written reversed.
+        redirect: Some(oss_proto::s2c::Redirect {
+            ip: [1, 0, 0, 127],
+            port: 5001,
+            arena_type: -3,
+            arena: FixedStr::new(b"duel"),
+            login_id: 0x55,
+        }),
+        ..Default::default()
+    };
+
+    let mut redirected = None;
+    let mut playing = false;
+    for _ in 0..300 {
+        for ev in step(&mut client, &mut server, &mut zone, &mut now) {
+            match ev {
+                SessionEvent::Redirected { .. } => redirected = Some(ev),
+                SessionEvent::Playing => playing = true,
+                _ => {}
+            }
+        }
+        if client.state() == State::Closed {
+            break;
+        }
+    }
+    assert_eq!(
+        redirected,
+        Some(SessionEvent::Redirected {
+            server: "127.0.0.1:5001".into(),
+            arena: Some("duel".into()),
+            login_id: 0x55,
+        })
+    );
+    assert!(!playing, "the first zone has no arena to play in");
+    assert_eq!(zone.go_arenas, 1);
+    assert_eq!(client.state(), State::Closed, "hung up on the first zone");
+
+    // The zone it names: an ordinary one, logged in with the id handed over.
+    let mut server = vie_server();
+    let mut zone = Zone::default();
+    let mut client = Session::new(
+        SessionConfig {
+            redirect_id: 0x55,
+            arena: Some("duel".into()),
+            ..cfg
+        },
+        now,
+        0xF00D,
+    );
+    let mut playing = false;
+    for _ in 0..300 {
+        for ev in step(&mut client, &mut server, &mut zone, &mut now) {
+            match ev {
+                SessionEvent::MapNeeded { .. } => client.download_map(),
+                SessionEvent::Playing => playing = true,
+                _ => {}
+            }
+        }
+        if playing {
+            break;
+        }
+    }
+    assert_eq!(zone.redirect_id, Some(0x55));
+    assert!(playing, "the second zone's arena is entered");
 }

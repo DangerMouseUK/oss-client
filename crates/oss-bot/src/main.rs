@@ -255,6 +255,13 @@ impl Bot {
                 SessionEvent::Closed(reason) => {
                     log::warn!("[{}] disconnected: {reason:?}", self.label)
                 }
+                // The session has already hung up. A bot is pointed at one zone
+                // on purpose, so it says where it was sent rather than going.
+                SessionEvent::Redirected { server, arena, .. } => log::warn!(
+                    "[{}] the zone redirects to {server}{}; run again with --server {server}",
+                    self.label,
+                    arena.map(|a| format!(", arena {a:?}")).unwrap_or_default()
+                ),
                 _ => {}
             }
         }

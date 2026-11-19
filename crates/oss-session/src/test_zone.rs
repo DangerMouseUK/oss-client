@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Write};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Instant;
 
 use oss_net::{Config, Event, Server, VieAcceptor};
@@ -16,7 +16,7 @@ use oss_proto::c2s::GoArena;
 use oss_proto::common::PlayerData;
 use oss_proto::s2c::{
     ChatBody, EnteringArena, Kill, LoginResponse, MapData, MapFilename, PlayerEntering, PlayerId,
-    PlayerLeaving, S2CChat, Security, ShipChange,
+    PlayerLeaving, Redirect, S2CChat, Security, ShipChange,
 };
 use oss_proto::{
     C2SPacket, C2SPosition, ClientSettings, FixedStr, Packet, PositionTail, S2CPosition, S2CWeapon,
@@ -50,6 +50,9 @@ pub struct TestZone {
     ask_registration: bool,
     /// The forms received: (name, real name, e-mail).
     registrations: Vec<(String, String, String)>,
+    /// Answer every arena request with a redirect here, and the arena to enter
+    /// there (`None`: any public arena), instead of letting the player in.
+    redirect: Option<(SocketAddrV4, Option<String>)>,
 }
 
 impl TestZone {
@@ -86,6 +89,7 @@ impl TestZone {
             buf: vec![0; 2048],
             ask_registration: false,
             registrations: Vec::new(),
+            redirect: None,
         })
     }
 
@@ -94,6 +98,13 @@ impl TestZone {
     /// is the local way to see a client answer it.
     pub fn ask_for_registration(&mut self, ask: bool) {
         self.ask_registration = ask;
+    }
+
+    /// Sends everyone who asks for an arena from now on to `to` instead, and to
+    /// `arena` there (`None`: any public arena), as a zone that only forwards
+    /// players elsewhere does. `None` lets players in again.
+    pub fn redirect_to(&mut self, to: Option<(SocketAddrV4, Option<String>)>) {
+        self.redirect = to;
     }
 
     /// The registration forms received, in order: (name, real name, e-mail).
@@ -309,6 +320,22 @@ impl TestZone {
     }
 
     fn enter(&mut self, from: SocketAddr, go: &GoArena) {
+        if let Some((to, arena)) = self.redirect.clone() {
+            log::info!("test zone: redirecting {from} to {to}");
+            // The address goes out with its bytes reversed, as the live servers
+            // send it (see `redirect_target` in this crate).
+            let mut ip = to.ip().octets();
+            ip.reverse();
+            let packet = Redirect {
+                ip,
+                port: to.port(),
+                arena_type: if arena.is_some() { -3 } else { -1 },
+                arena: FixedStr::new(arena.unwrap_or_default().as_bytes()),
+                login_id: 0,
+            };
+            self.send(from, &packet, true);
+            return;
+        }
         let Some(me) = self.players.get_mut(&from) else {
             return;
         };

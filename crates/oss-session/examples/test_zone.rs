@@ -1,7 +1,7 @@
 //! Runs the minimal relay zone for local client/bot testing:
 //!
 //! ```text
-//! cargo run -p oss-session --example test_zone -- [--bind 127.0.0.1:5000] [--ask-registration] <map.lvl>
+//! cargo run -p oss-session --example test_zone -- [--bind 127.0.0.1:5000] [--ask-registration] [--redirect host:port[:arena]] <map.lvl>
 //! ```
 //!
 //! Serves the map with stock settings and relays positions and chat. Not a real
@@ -10,22 +10,45 @@
 //! `--ask-registration` asks every player for the registration form, as a zone
 //! whose billing server wants one does, and logs the real name and e-mail of
 //! each form that arrives.
+//!
+//! `--redirect` answers every arena request with a redirect (S2C `0x3B`) to
+//! that zone, and that arena there when one is given, as a zone that only
+//! forwards players elsewhere does. Run a second test zone at that address to
+//! see a client follow it.
 
 fn main() {
     env_logger_init();
     let mut bind = "127.0.0.1:5000".to_string();
     let mut map = None;
     let mut ask_registration = false;
+    let mut redirect = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bind" => bind = args.next().unwrap_or(bind),
             "--ask-registration" => ask_registration = true,
+            "--redirect" => {
+                let value = args.next().unwrap_or_default();
+                let (addr, arena) = match value.splitn(3, ':').collect::<Vec<_>>()[..] {
+                    [host, port] => (format!("{host}:{port}"), None),
+                    [host, port, arena] => (format!("{host}:{port}"), Some(arena.to_string())),
+                    _ => (value.clone(), None),
+                };
+                match addr.parse::<std::net::SocketAddrV4>() {
+                    Ok(a) => redirect = Some((a, arena)),
+                    Err(e) => {
+                        eprintln!("--redirect {value}: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             _ => map = Some(std::path::PathBuf::from(a)),
         }
     }
     let Some(map) = map else {
-        eprintln!("usage: test_zone [--bind host:port] [--ask-registration] <map.lvl>");
+        eprintln!(
+            "usage: test_zone [--bind host:port] [--ask-registration] [--redirect host:port[:arena]] <map.lvl>"
+        );
         std::process::exit(2);
     };
     let data = match std::fs::read(&map) {
@@ -49,6 +72,7 @@ fn main() {
         }
     };
     zone.ask_for_registration(ask_registration);
+    zone.redirect_to(redirect);
     eprintln!(
         "test zone on {} serving {name}",
         zone.local_addr().map(|a| a.to_string()).unwrap_or(bind)

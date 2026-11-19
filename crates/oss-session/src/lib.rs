@@ -115,6 +115,11 @@ pub struct SessionConfig {
     /// which it expects from the encryption, not from the packet's type byte, and
     /// drops a mismatched login without saying so. See [`mod@client`].
     pub client: Profile,
+    /// The login id a redirect handed over ([`SessionEvent::Redirected`]),
+    /// carried in the login packet to the zone it pointed at. Zero for an
+    /// ordinary login, and zero in every redirect seen so far: both servers
+    /// whose source we have always send it as zero.
+    pub redirect_id: u32,
 }
 
 /// Everything but the password, which prints as `<redacted>`.
@@ -136,6 +141,7 @@ impl fmt::Debug for SessionConfig {
             .field("want_lvz", &self.want_lvz)
             .field("new_user", &self.new_user)
             .field("client", &self.client)
+            .field("redirect_id", &self.redirect_id)
             .finish()
     }
 }
@@ -153,6 +159,7 @@ impl Default for SessionConfig {
             want_lvz: false,
             new_user: false,
             client: client::vie(),
+            redirect_id: 0,
         }
     }
 }
@@ -424,6 +431,20 @@ pub enum SessionEvent {
         prize: i16,
     },
     Closed(DisconnectReason),
+    /// The zone sent the player on to another zone (S2C `0x3B`), and this
+    /// session has hung up on the first. Connect to `server` with the same name
+    /// and password, put `login_id` in [`SessionConfig::redirect_id`], and enter
+    /// `arena` (`None`: any public arena).
+    ///
+    /// Some zones in the live list are only this: the zone takes the login and
+    /// answers the arena request with a redirect to where the game really is.
+    /// A client that ignores it waits for an arena that never comes.
+    Redirected {
+        /// `a.b.c.d:port`.
+        server: String,
+        arena: Option<String>,
+        login_id: u32,
+    },
     /// The zone's arenas, in the order it sent them, as (name, players, whether
     /// it is the arena you are in) (S2C `0x2F`). Zones send it in answer to
     /// `?arena`; the wire marks your own arena by sending its count negated.
@@ -913,7 +934,7 @@ impl Session {
             permission_id: 0,
             server_ip: self.endpoint.0,
             bound_port: self.endpoint.1,
-            redirect_id: 0,
+            redirect_id: self.cfg.redirect_id,
             using_proxy: 0,
             unused: 0,
             cont_id: form.continuum_id,
@@ -1345,6 +1366,7 @@ impl Session {
                     .collect();
                 self.events.push_back(SessionEvent::ArenaList(arenas));
             }
+            S2CPacket::Redirect(r) => self.on_redirect(&r),
             other => self.events.push_back(SessionEvent::Other(Box::new(other))),
         }
     }
@@ -1372,6 +1394,39 @@ impl Session {
             self.state = State::Playing;
             self.events.push_back(SessionEvent::Playing);
         }
+    }
+
+    /// S2C `0x3B`: the zone sends the player on to another zone. Hang up on this
+    /// one and say where to go; the caller connects (see
+    /// [`SessionEvent::Redirected`]). A recording played back reports it and
+    /// carries on, since what came after is already in the recording.
+    fn on_redirect(&mut self, r: &s2c::Redirect) {
+        let Some((addr, arena)) = redirect_target(r) else {
+            log::warn!(
+                "the zone sent a redirect with no usable address ({}.{}.{}.{} port {}); ignored",
+                r.ip[0],
+                r.ip[1],
+                r.ip[2],
+                r.ip[3],
+                r.port
+            );
+            return;
+        };
+        log::info!(
+            "the zone redirects to {addr}, {}",
+            arena.as_deref().map_or_else(
+                || "any public arena".to_string(),
+                |a| format!("arena {a:?}")
+            )
+        );
+        if !self.playback {
+            self.disconnect();
+        }
+        self.events.push_back(SessionEvent::Redirected {
+            server: addr.to_string(),
+            arena,
+            login_id: r.login_id,
+        });
     }
 
     /// Offers a cached copy of the map named in [`SessionEvent::MapNeeded`]. Returns
@@ -1889,6 +1944,39 @@ fn extend_ticks(now: u32, low: u16) -> u32 {
     }
 }
 
+/// Where an S2C `0x3B` points: the zone's address and the arena to enter there
+/// (`None` for any public arena). `None` when there is no address to go to.
+///
+/// **The address is the four bytes reversed**, `d c b a` on the wire for
+/// `a.b.c.d`: the dotted address read as a big-endian number and written
+/// little-endian. That is what Subspace Server .NET sends
+/// (`Packets/Game/S2C_Redirect.cs` with `Modules/Redirect.cs` `TryGetIPv4`),
+/// and what a live zone was seen to send, checked against the address the
+/// directory servers list for the zone it pointed at. It is also the order the
+/// login packet's own server address goes out in (see `udp.rs`). ASSS 1.4.4's
+/// `core/redirect.c` writes `s_addr` instead, which is network order, the other
+/// way round; the live zone settles it.
+///
+/// The arena follows the arena-entry packet's types: a name when one is sent, a
+/// public arena's number when the type is one (0 and up), otherwise any public
+/// arena.
+fn redirect_target(r: &s2c::Redirect) -> Option<(std::net::SocketAddrV4, Option<String>)> {
+    let [d, c, b, a] = r.ip;
+    let ip = std::net::Ipv4Addr::new(a, b, c, d);
+    if ip.is_unspecified() || r.port == 0 {
+        return None;
+    }
+    let name = fixed_to_string(r.arena.as_bytes());
+    let arena = if !name.is_empty() {
+        Some(name)
+    } else if r.arena_type >= 0 {
+        Some(r.arena_type.to_string())
+    } else {
+        None
+    };
+    Some((std::net::SocketAddrV4::new(ip, r.port), arena))
+}
+
 fn fixed_to_string(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf8_lossy(&b[..end]).trim_end().to_string()
@@ -2272,6 +2360,73 @@ mod tests {
                 listed("empty", 0, false),
             ])]
         );
+    }
+
+    /// A redirect used to reach the game as "some other packet", which it
+    /// ignored, so a zone that answers the arena request with one left the
+    /// player waiting for an arena that never came. It is its own event now,
+    /// with the address read the way the live servers send it (the bytes
+    /// reversed) and the arena by its entry type.
+    #[test]
+    fn a_redirect_says_where_to_go() {
+        let redirect = |ip: [u8; 4], port: u16, arena_type: i16, arena: &str| {
+            let mut data = Vec::new();
+            s2c::Redirect {
+                ip,
+                port,
+                arena_type,
+                arena: FixedStr::new(arena.as_bytes()),
+                login_id: 7,
+            }
+            .encode(&mut data);
+            assert_eq!(data.len(), 29, "the packet as the servers send it");
+            data
+        };
+        let run = |data: &[u8]| {
+            let mut s = Session::new(SessionConfig::default(), 0, 1);
+            s.handle_packet(0, data);
+            s.events.into_iter().collect::<Vec<_>>()
+        };
+        let went = |server: &str, arena: Option<&str>| {
+            vec![SessionEvent::Redirected {
+                server: server.into(),
+                arena: arena.map(str::to_string),
+                login_id: 7,
+            }]
+        };
+
+        // 192.0.2.10 (a documentation address), written d c b a.
+        let ip = [10, 2, 0, 192];
+        assert_eq!(
+            run(&redirect(ip, 5000, -1, "")),
+            went("192.0.2.10:5000", None)
+        );
+        assert_eq!(
+            run(&redirect(ip, 5000, -3, "duel")),
+            went("192.0.2.10:5000", Some("duel"))
+        );
+        assert_eq!(
+            run(&redirect(ip, 5001, 2, "")),
+            went("192.0.2.10:5001", Some("2"))
+        );
+
+        // Nowhere to go: no event, and the session is not hung up.
+        assert!(run(&redirect([0; 4], 5000, -1, "")).is_empty());
+        assert!(run(&redirect(ip, 0, -1, "")).is_empty());
+    }
+
+    /// The login id a redirect hands over goes out in the next login.
+    #[test]
+    fn the_redirect_id_goes_out_in_the_login() {
+        let cfg = SessionConfig {
+            redirect_id: 0x0102_0304,
+            ..Default::default()
+        };
+        let mut s = Session::new(cfg, 0, 1);
+        s.send_login();
+        let sent = s.buf.clone();
+        let login = c2s::Login::decode(&sent).expect("a login went out");
+        assert_eq!(login.redirect_id, 0x0102_0304);
     }
 
     /// Hyperspace, 2026-11-17: the zone said exactly what was wrong in a login
