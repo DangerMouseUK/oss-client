@@ -481,7 +481,7 @@ fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
         from_home: true,
         from_work: false,
         from_school: true,
-        sex: oss_session::Sex::Female,
+        sex: Some(oss_session::Sex::Female),
     };
     assert!(client.send_registration(&form));
     assert!(!client.send_registration(&form), "one form only");
@@ -512,6 +512,58 @@ fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
             .all(|h| h.to_str().is_none_or(str::is_empty))
     );
     assert_eq!(zone.go_arenas, 1, "then the arena");
+}
+
+/// A form with only the e-mail filled in -- all Continuum requires -- goes
+/// out with every other answer as not given. Sex unchosen is a 0 byte, not
+/// `M` or `F`, so the zone is told nothing the player did not choose.
+#[test]
+fn a_form_with_only_an_email_sends_the_rest_as_not_given() {
+    let mut now = 1_000u64;
+    let mut server = vie_server();
+    let cfg = SessionConfig {
+        want_lvz: true,
+        ..Default::default()
+    };
+    let mut client = Session::new(cfg, now, 0xBEEF);
+    let mut zone = Zone {
+        demo_data: 1,
+        ..Default::default()
+    };
+    for _ in 0..300 {
+        if step(&mut client, &mut server, &mut zone, &mut now)
+            .iter()
+            .any(|e| matches!(e, SessionEvent::RegistrationWanted))
+        {
+            break;
+        }
+    }
+    assert!(client.send_registration(&oss_session::RegistrationForm {
+        real_name: String::new(),
+        email: "ada@example.org".into(),
+        city: String::new(),
+        state: String::new(),
+        age: 0,
+        from_home: false,
+        from_work: false,
+        from_school: false,
+        sex: None,
+    }));
+    for _ in 0..300 {
+        step(&mut client, &mut server, &mut zone, &mut now);
+        if zone.registration.is_some() {
+            break;
+        }
+    }
+    let (form, _) = zone.registration.expect("the form arrived");
+    assert_eq!(form.email.to_str(), Some("ada@example.org"));
+    assert_eq!(form.sex, 0, "no sex chosen, none claimed");
+    assert_eq!(form.age, 0);
+    assert_eq!(
+        (form.from_home, form.from_work, form.from_school),
+        (0, 0, 0)
+    );
+    assert!(form.real_name.to_str().is_none_or(str::is_empty));
 }
 
 /// Disconnecting at the form -- the graphical client's other way out of it,

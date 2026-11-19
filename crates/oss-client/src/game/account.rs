@@ -474,11 +474,10 @@ impl Prompt {
         None
     }
 
-    /// The registration form's yes. The e-mail is required, as Continuum
-    /// requires it, and has to look like an address. Sex has to be chosen:
-    /// both round buttons start empty, and a form sent with neither would
-    /// have to claim one the player never picked. The age, when given, has to
-    /// fit the one byte it is sent in. Everything else may be left empty.
+    /// The registration form's yes. The e-mail is the one thing required, as
+    /// it is the one thing Continuum marks required, and it has to look like
+    /// an address. Everything else may be left empty or unchosen, Sex
+    /// included. The age, when given, has to fit the one byte it is sent in.
     fn send(&mut self) -> Option<Answer> {
         let email = self.text(EMAIL);
         if email.is_empty() {
@@ -500,9 +499,9 @@ impl Prompt {
             }
         };
         let sex = match self.set(SEX).as_slice() {
-            [true, _] => Sex::Male,
-            [_, true] => Sex::Female,
-            _ => return self.refuse(SEX, "Choose Male or Female under Sex."),
+            [true, _] => Some(Sex::Male),
+            [_, true] => Some(Sex::Female),
+            _ => None,
         };
         let from = self.set(CONNECT_FROM);
         let from = |i: usize| from.get(i).copied().unwrap_or(false);
@@ -861,7 +860,7 @@ mod tests {
                 from_home: true,
                 from_work: false,
                 from_school: true,
-                sex: Sex::Female,
+                sex: Some(Sex::Female),
             }))
         );
     }
@@ -899,20 +898,36 @@ mod tests {
         );
     }
 
-    /// Sex starts unchosen and has to be chosen: a form sent without would
-    /// claim an answer the player never gave. The refusal picks that row.
+    /// The e-mail is the only thing required, as in Continuum: a form with
+    /// nothing else filled in, nothing ticked and no sex chosen is sent, with
+    /// every other answer as not given.
     #[test]
-    fn sex_has_to_be_chosen() {
+    fn only_the_email_is_required() {
         let mut p = Prompt::registration();
         p.input(&typed("a@b.co"), false);
-        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
-        assert!(p.error.as_deref().is_some_and(|e| e.contains("Sex")));
-        assert_eq!(focused(&p), SEX);
-        p.input(&space(), false);
-        assert!(matches!(
+        assert_eq!(
             p.input(&keys(&[KeyCode::Enter]), false),
-            Some(Answer::Send(RegistrationForm { sex: Sex::Male, .. }))
-        ));
+            Some(Answer::Send(RegistrationForm {
+                real_name: String::new(),
+                email: "a@b.co".into(),
+                city: String::new(),
+                state: String::new(),
+                age: 0,
+                from_home: false,
+                from_work: false,
+                from_school: false,
+                sex: None,
+            }))
+        );
+        assert_eq!(p.error, None);
+        assert!(
+            labels(&p).iter().all(|&l| l == EMAIL
+                || !matches!(
+                    &p.lines[p.find(l)],
+                    Line::Field(Field { required: true, .. })
+                )),
+            "only the e-mail is marked required"
+        );
     }
 
     /// Tick boxes tick and untick, any number at once; round buttons choose
@@ -1049,7 +1064,7 @@ mod tests {
             p.click(10.0, 65.0),
             Some(Answer::Send(RegistrationForm {
                 from_work: true,
-                sex: Sex::Male,
+                sex: Some(Sex::Male),
                 ..
             }))
         ));
@@ -1083,7 +1098,7 @@ mod tests {
             from_home: false,
             from_work: false,
             from_school: false,
-            sex: Sex::Female,
+            sex: Some(Sex::Female),
         });
         assert!(!format!("{form:?}").contains("ovelace"));
     }

@@ -62,8 +62,11 @@ impl Sex {
 /// What the player put into a zone's registration form, for
 /// [`Session::send_registration`]: the questions SubSpace and Continuum ask.
 ///
-/// Text is trimmed as it is sent, and cut to the packet's field lengths. An
-/// age of 0 is "not given". There is deliberately no field for the machine
+/// Only the e-mail is required, as Continuum requires only that; everything
+/// else may be left as not given. Text is trimmed as it is sent, and cut to
+/// the packet's field lengths. An age of 0 is "not given", and so is a sex of
+/// `None`, which is sent as a 0 byte rather than as either letter, so the zone
+/// is not told an answer the player never gave. There is deliberately no field for the machine
 /// description the original clients added: nothing about the computer is sent.
 ///
 /// `Debug` is written out rather than derived so a log line cannot print what
@@ -79,7 +82,8 @@ pub struct RegistrationForm {
     pub from_home: bool,
     pub from_work: bool,
     pub from_school: bool,
-    pub sex: Sex,
+    /// `None` when neither round button was chosen.
+    pub sex: Option<Sex>,
 }
 
 impl fmt::Debug for RegistrationForm {
@@ -892,7 +896,7 @@ impl Session {
             email: FixedStr::new(form.email.trim().as_bytes()),
             city: FixedStr::new(form.city.trim().as_bytes()),
             state: FixedStr::new(form.state.trim().as_bytes()),
-            sex: form.sex.byte(),
+            sex: form.sex.map_or(0, Sex::byte),
             age: form.age,
             from_home: u8::from(form.from_home),
             from_work: u8::from(form.from_work),
