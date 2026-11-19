@@ -1042,9 +1042,9 @@ impl App {
                         conn.net.create_account();
                     }
                     Some(Answer::Cancel) => give_up = Some("No account was created.".to_string()),
-                    Some(Answer::Send { real_name, email }) => {
+                    Some(Answer::Send(form)) => {
                         conn.prompt = None;
-                        conn.net.send_registration(&real_name, &email);
+                        conn.net.send_registration(&form);
                     }
                     Some(Answer::Skip) => {
                         conn.prompt = None;

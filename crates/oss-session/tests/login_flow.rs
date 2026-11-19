@@ -436,8 +436,8 @@ fn a_second_unknown_name_answer_is_a_refusal_not_a_loop() {
 
 /// A zone that wants the registration form says so in the login reply. The
 /// session reports it and holds the arena request until it is answered; the
-/// form that goes out is the full 766 bytes with the player's real name and
-/// e-mail, and nothing about the computer.
+/// form that goes out is the full 766 bytes with every answer in its own
+/// field, and nothing about the computer.
 #[test]
 fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
     let mut now = 1_000u64;
@@ -468,8 +468,19 @@ fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
     }
     assert_eq!(zone.go_arenas, 0, "the arena waits for the form");
 
-    assert!(client.send_registration("  Ada Lovelace ", "ada@example.org"));
-    assert!(!client.send_registration("again", "x@y.z"), "one form only");
+    let form = oss_session::RegistrationForm {
+        real_name: "  Ada Lovelace ".into(),
+        email: "ada@example.org".into(),
+        city: "London".into(),
+        state: "England".into(),
+        age: 36,
+        from_home: true,
+        from_work: false,
+        from_school: true,
+        sex: oss_session::Sex::Female,
+    };
+    assert!(client.send_registration(&form));
+    assert!(!client.send_registration(&form), "one form only");
     for _ in 0..300 {
         step(&mut client, &mut server, &mut zone, &mut now);
         if zone.go_arenas > 0 {
@@ -480,8 +491,17 @@ fn a_zone_that_asks_for_the_form_gets_it_before_the_arena() {
     assert_eq!(len, oss_proto::c2s::Registration::LEN);
     assert_eq!(form.real_name.to_str(), Some("Ada Lovelace"));
     assert_eq!(form.email.to_str(), Some("ada@example.org"));
-    assert_eq!(form.from_home, 1);
+    assert_eq!(form.city.to_str(), Some("London"));
+    assert_eq!(form.state.to_str(), Some("England"));
+    assert_eq!(form.age, 36);
+    assert_eq!(
+        (form.from_home, form.from_work, form.from_school),
+        (1, 0, 1)
+    );
+    assert_eq!(form.sex, b'F');
+    assert_eq!(form.processor, 0);
     assert!(form.win_owner.to_str().is_none_or(str::is_empty));
+    assert!(form.win_org.to_str().is_none_or(str::is_empty));
     assert!(
         form.hardware
             .iter()

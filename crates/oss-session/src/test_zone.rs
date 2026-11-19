@@ -302,8 +302,20 @@ impl TestZone {
                     String::from_utf8_lossy(&b[..end]).into_owned()
                 };
                 let (real, email) = (text(r.real_name.as_bytes()), text(r.email.as_bytes()));
+                let (city, state) = (text(r.city.as_bytes()), text(r.state.as_bytes()));
+                let machine_empty = r.processor == 0
+                    && text(r.win_owner.as_bytes()).is_empty()
+                    && text(r.win_org.as_bytes()).is_empty()
+                    && r.hardware.iter().all(|h| text(h.as_bytes()).is_empty());
                 log::info!(
-                    "test zone: registration form from {name}: real name {real:?}, e-mail {email:?}"
+                    "test zone: registration form from {name}: real name {real:?}, \
+                     e-mail {email:?}, city {city:?}, state/country {state:?}, age {}, \
+                     home {} work {} school {}, sex {:?}, machine fields empty: {machine_empty}",
+                    r.age,
+                    r.from_home,
+                    r.from_work,
+                    r.from_school,
+                    char::from(r.sex),
                 );
                 self.registrations.push((name, real, email));
             }

@@ -42,6 +42,52 @@ pub use oss_proto::s2c::BallPosition;
 /// Spectator "ship".
 pub const SPECTATOR: u8 = 8;
 
+/// Which of the form's two round buttons for sex the player chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sex {
+    Male,
+    Female,
+}
+
+impl Sex {
+    /// The byte C2S `0x17` carries: `M` or `F`.
+    pub fn byte(self) -> u8 {
+        match self {
+            Sex::Male => b'M',
+            Sex::Female => b'F',
+        }
+    }
+}
+
+/// What the player put into a zone's registration form, for
+/// [`Session::send_registration`]: the questions SubSpace and Continuum ask.
+///
+/// Text is trimmed as it is sent, and cut to the packet's field lengths. An
+/// age of 0 is "not given". There is deliberately no field for the machine
+/// description the original clients added: nothing about the computer is sent.
+///
+/// `Debug` is written out rather than derived so a log line cannot print what
+/// the player typed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RegistrationForm {
+    pub real_name: String,
+    pub email: String,
+    pub city: String,
+    /// "State/Country" on the form.
+    pub state: String,
+    pub age: u8,
+    pub from_home: bool,
+    pub from_work: bool,
+    pub from_school: bool,
+    pub sex: Sex,
+}
+
+impl fmt::Debug for RegistrationForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistrationForm").finish_non_exhaustive()
+    }
+}
+
 /// Who to log in as and where to go.
 ///
 /// `Debug` is written out rather than derived so the password cannot be printed.
@@ -829,23 +875,28 @@ impl Session {
     /// then goes on into the arena. Returns `false`, and sends nothing, when the
     /// zone has not asked or the form has already gone.
     ///
-    /// Only the real name and the e-mail come from the player. The rest of the
-    /// 1998 form is [`Registration::default`] -- empty city and state, age 0, no
-    /// processor -- with "connecting from home" set, as nullspace's version of
-    /// the form sets it. The machine fields (the Windows registered owner and
-    /// organisation, and thirteen hardware strings) go empty: nothing about the
-    /// computer leaves it.
-    pub fn send_registration(&mut self, real_name: &str, email: &str) -> bool {
+    /// Every answer the player gave goes in its own field. The rest of the
+    /// packet is what the original clients filled in about the machine -- the
+    /// processor, the Windows registered owner and organisation, and thirteen
+    /// hardware strings -- and goes as zeros and empty strings: nothing about
+    /// the computer leaves it.
+    pub fn send_registration(&mut self, form: &RegistrationForm) -> bool {
         if !std::mem::take(&mut self.awaiting_registration) {
             return false;
         }
-        let form = Registration {
-            real_name: FixedStr::new(real_name.trim().as_bytes()),
-            email: FixedStr::new(email.trim().as_bytes()),
-            from_home: 1,
+        let packet = Registration {
+            real_name: FixedStr::new(form.real_name.trim().as_bytes()),
+            email: FixedStr::new(form.email.trim().as_bytes()),
+            city: FixedStr::new(form.city.trim().as_bytes()),
+            state: FixedStr::new(form.state.trim().as_bytes()),
+            sex: form.sex.byte(),
+            age: form.age,
+            from_home: u8::from(form.from_home),
+            from_work: u8::from(form.from_work),
+            from_school: u8::from(form.from_school),
             ..Default::default()
         };
-        self.send(&form, true);
+        self.send(&packet, true);
         self.go_arena();
         true
     }

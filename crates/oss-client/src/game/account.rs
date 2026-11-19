@@ -10,19 +10,22 @@
 //! account's, as it does in Continuum.
 //!
 //! A zone whose billing server wants a registration form says so in its login
-//! reply ([`oss_session::SessionEvent::RegistrationWanted`]). That form, from
-//! 1998, has room for a real name, an e-mail address, a postal address, age,
-//! sex, the Windows registered owner and thirteen lines describing the
-//! computer. The box asks for the first two only -- what zones that ask are
-//! seen to want is the e-mail -- and says plainly that nothing else is sent.
-//! It can be skipped, and the zone is entered either way.
+//! reply ([`oss_session::SessionEvent::RegistrationWanted`]). The box asks what
+//! Continuum's *Player Information* dialog asks, in its order: the e-mail
+//! address first and required, then real name, city, state or country and age,
+//! all optional; where the player connects from, as three tick boxes; and sex,
+//! as two round buttons with neither chosen until the player chooses. The
+//! original clients sent a description of the computer with it. This one does
+//! not, and the box says plainly that only what is typed into it is sent.
 //!
 //! Both boxes work fully from the keyboard and fully from the pointer: every
-//! line that can be typed in can be clicked, and each key on the foot line is
-//! a button as well, as the start-up screen's are.
+//! line can be clicked, every tick box and round button can be clicked, and
+//! each key on the foot line is a button as well, as the start-up screen's
+//! are.
 
 use std::fmt;
 
+use oss_session::{RegistrationForm, Sex};
 use winit::keyboard::KeyCode;
 
 use super::input::Stroke;
@@ -37,8 +40,8 @@ pub enum Answer {
     Create,
     /// Do not create it; go back.
     Cancel,
-    /// Send the registration form with these.
-    Send { real_name: String, email: String },
+    /// Send the registration form with these answers.
+    Send(RegistrationForm),
     /// Do not send the form; enter the zone anyway.
     Skip,
 }
@@ -53,23 +56,97 @@ enum Kind {
 /// Something in the box a pointer can be over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Spot {
-    /// A line that takes text, by its index.
-    Field(usize),
+    /// A line that can be picked, by its index.
+    Line(usize),
+    /// One tick box or round button: the line, and which along it.
+    Option(usize, usize),
     /// The foot line's yes ("Enter = ...").
     Yes,
     /// The foot line's no ("Esc = ...").
     No,
 }
 
-/// One line that takes text.
+/// One line of the box, top to bottom.
 #[derive(Clone, PartialEq, Eq)]
-struct Entry {
+enum Line {
+    /// Words already wrapped to the box, in a colour; `indent` starts them
+    /// under the values rather than under the labels.
+    Note {
+        text: String,
+        color: u32,
+        indent: bool,
+    },
+    /// Half a line of space.
+    Gap,
+    /// A line that takes text.
+    Field(Field),
+    /// A row of tick boxes or round buttons.
+    Choice(Choice),
+}
+
+/// A line that takes text.
+#[derive(Clone, PartialEq, Eq)]
+struct Field {
     label: &'static str,
     value: String,
-    /// Shown as stars.
-    secret: bool,
     /// The most characters the field on the wire holds.
     max: usize,
+    /// Takes digits only.
+    digits: bool,
+    /// Marked "(required)", as Continuum marks its e-mail.
+    required: bool,
+}
+
+/// A row of tick boxes, any number of which may be ticked, or of round
+/// buttons, of which one at most is chosen.
+#[derive(Clone, PartialEq, Eq)]
+struct Choice {
+    label: &'static str,
+    options: &'static [&'static str],
+    set: Vec<bool>,
+    /// Round buttons: choosing one clears the rest, and once one is chosen
+    /// there is always one, as with Windows' own.
+    round: bool,
+    /// The one the keyboard is on.
+    at: usize,
+}
+
+impl Choice {
+    fn new(label: &'static str, options: &'static [&'static str], round: bool) -> Self {
+        Self {
+            label,
+            options,
+            set: vec![false; options.len()],
+            round,
+            at: 0,
+        }
+    }
+
+    /// Space, or a click, on option `i`.
+    fn press(&mut self, i: usize) {
+        if i >= self.set.len() {
+            return;
+        }
+        self.at = i;
+        if self.round {
+            self.set.iter_mut().for_each(|s| *s = false);
+            self.set[i] = true;
+        } else {
+            self.set[i] = !self.set[i];
+        }
+    }
+
+    /// How an option reads: `[x] Home`, `( ) Male`.
+    fn option_text(&self, i: usize) -> String {
+        let on = self.set.get(i).copied().unwrap_or(false);
+        let mark = match (self.round, on) {
+            (false, true) => "[x]",
+            (false, false) => "[ ]",
+            (true, true) => "(*)",
+            (true, false) => "( )",
+        };
+        format!("{mark} {}", self.options.get(i).copied().unwrap_or(""))
+    }
 }
 
 /// Continuum's question, word for word.
@@ -78,30 +155,59 @@ const NEW_USER_QUESTION: &str =
 
 /// How wide the new-account box is, in characters: Continuum's question on two
 /// lines.
-const NEW_USER_COLUMNS: usize = 50;
+const NEW_USER_COLUMNS: usize = 52;
 
-/// The registration form's real name and e-mail fields, less their NULs.
-const REAL_NAME_MAX: usize = 31;
+/// How wide the registration form is, in characters: a label, a field and the
+/// "(required)" after the e-mail.
+const FORM_COLUMNS: usize = 62;
+
+/// The form's top paragraph. Continuum's says a hardware profile goes with
+/// the answers; this client sends none, so this one says what is sent instead.
+const FORM_INTRO: &str = "This zone's player database asks for the following information. \
+     Only what you type or choose below is sent; nothing about this computer is.";
+
+/// Continuum's line under its e-mail field, word for word.
+const EMAIL_WHY: &str = "E-Mail address is required in case you lose your password or there \
+     are any disputes about the ownership of the account.";
+
+/// How the keys work, under the fields.
+const FORM_KEYS: &str = "Tab, Up and Down move between lines. On a row of boxes, Left and \
+     Right move along it and Space ticks or chooses.";
+
+/// The form's labels, which are also how its answers are found.
+const EMAIL: &str = "E-Mail";
+const REAL_NAME: &str = "Real Name";
+const CITY: &str = "City";
+const STATE: &str = "State/Country";
+const AGE: &str = "Age";
+const CONNECT_FROM: &str = "Connect From";
+const SEX: &str = "Sex";
+
+/// The form's text fields' lengths on the wire, less their NULs.
 const EMAIL_MAX: usize = 63;
+const REAL_NAME_MAX: usize = 31;
+const CITY_MAX: usize = 31;
+const STATE_MAX: usize = 23;
+/// Age is one byte: up to three digits, checked against 255 when sent.
+const AGE_MAX: usize = 3;
 
-/// The box, its fields and where the pointer can find them.
+/// The box, its lines and where the pointer can find them.
 ///
 /// `Debug` is written out rather than derived so what a player typed into it
 /// cannot be printed.
 pub struct Prompt {
     kind: Kind,
     title: &'static str,
-    heading: &'static str,
-    /// What the box says, one line each, before the fields.
-    lines: Vec<String>,
-    /// Lines shown under the fields, before the input: the label and what it says.
-    shown: Vec<(&'static str, String)>,
-    fields: Vec<Entry>,
+    /// How wide the box asks to be, in characters.
+    columns: usize,
+    lines: Vec<Line>,
+    /// The picked line, by its index; always a field or a choice when the box
+    /// has any.
     focus: usize,
     /// The two keys on the foot line, as they are drawn.
     yes: &'static str,
     no: &'static str,
-    /// What went wrong with the last answer, in red under the fields.
+    /// What went wrong with the last answer, in red under the lines.
     pub error: Option<String>,
     /// Where everything was drawn last frame, so a click finds it.
     spots: Vec<(Rect, Spot)>,
@@ -117,24 +223,39 @@ impl fmt::Debug for Prompt {
     }
 }
 
+/// Words wrapped to `width`, one [`Line::Note`] each.
+fn notes(text: &str, width: usize, color: u32, indent: bool) -> Vec<Line> {
+    super::chat::wrap(text, width, true)
+        .into_iter()
+        .map(|text| Line::Note {
+            text,
+            color,
+            indent,
+        })
+        .collect()
+}
+
 impl Prompt {
     /// The offer to create the name the zone said it does not know, asked as
     /// Continuum asks it. `zone_text` is anything the zone said with the
     /// offer, shown under the question when there is some.
     pub fn new_account(zone_text: Option<&str>) -> Self {
-        let wrap = |text: &str| super::chat::wrap(text, NEW_USER_COLUMNS, true);
-        let mut lines = wrap(NEW_USER_QUESTION);
+        let width = NEW_USER_COLUMNS - 2;
+        let mut lines = notes(NEW_USER_QUESTION, width, color::WHITE, false);
         if let Some(text) = zone_text.filter(|t| !t.trim().is_empty()) {
-            lines.push(String::new());
-            lines.extend(wrap(&format!("The zone says: {}", text.trim())));
+            lines.push(Line::Gap);
+            lines.extend(notes(
+                &format!("The zone says: {}", text.trim()),
+                width,
+                color::WHITE,
+                false,
+            ));
         }
         Self {
             kind: Kind::NewAccount,
             title: "-= Information =-",
-            heading: "",
+            columns: NEW_USER_COLUMNS,
             lines,
-            shown: Vec::new(),
-            fields: Vec::new(),
             focus: 0,
             yes: "Enter = Yes",
             no: "Esc = No",
@@ -143,44 +264,108 @@ impl Prompt {
         }
     }
 
-    /// The zone's registration form: a real name and an e-mail address.
+    /// The zone's registration form: Continuum's *Player Information*.
     pub fn registration() -> Self {
-        let field = |label, max| Entry {
-            label,
-            value: String::new(),
-            secret: false,
-            max,
+        let field = |label, max, digits, required| {
+            Line::Field(Field {
+                label,
+                value: String::new(),
+                max,
+                digits,
+                required,
+            })
         };
-        Self {
+        let width = FORM_COLUMNS - 2;
+        let mut lines = notes(FORM_INTRO, width, color::WHITE, false);
+        lines.push(Line::Gap);
+        lines.push(field(EMAIL, EMAIL_MAX, false, true));
+        lines.extend(notes(EMAIL_WHY, width - LABEL_COLUMNS, color::WHITE, true));
+        lines.push(Line::Gap);
+        lines.push(field(REAL_NAME, REAL_NAME_MAX, false, false));
+        lines.push(field(CITY, CITY_MAX, false, false));
+        lines.push(field(STATE, STATE_MAX, false, false));
+        lines.push(field(AGE, AGE_MAX, true, false));
+        lines.push(Line::Choice(Choice::new(
+            CONNECT_FROM,
+            &["Home", "Work", "School"],
+            false,
+        )));
+        lines.push(Line::Choice(Choice::new(SEX, &["Male", "Female"], true)));
+        lines.push(Line::Gap);
+        lines.extend(notes(FORM_KEYS, width, color::GREEN, false));
+        let mut p = Self {
             kind: Kind::Registration,
-            title: "-= Registration =-",
-            heading: "This zone asks you to register",
-            lines: vec![
-                "This zone's billing server asks new players".to_string(),
-                "for a real name and an e-mail address.".to_string(),
-                String::new(),
-                "Only these two are sent, nothing about this".to_string(),
-                "computer. Esc enters the zone without them.".to_string(),
-            ],
-            shown: Vec::new(),
-            fields: vec![
-                field("Real name", REAL_NAME_MAX),
-                field("E-mail", EMAIL_MAX),
-            ],
+            title: "-= Player Information =-",
+            columns: FORM_COLUMNS,
+            lines,
             focus: 0,
-            yes: "Enter = Send",
+            yes: "Enter = Submit Information",
             no: "Esc = Skip",
             error: None,
             spots: Vec::new(),
+        };
+        p.focus = p.find(EMAIL);
+        p
+    }
+
+    /// The index of the field or choice labelled `label`.
+    fn find(&self, label: &str) -> usize {
+        self.lines
+            .iter()
+            .position(|l| match l {
+                Line::Field(f) => f.label == label,
+                Line::Choice(c) => c.label == label,
+                _ => false,
+            })
+            .unwrap_or(0)
+    }
+
+    /// What was typed into the field labelled `label`, trimmed.
+    fn text(&self, label: &str) -> String {
+        match self.lines.get(self.find(label)) {
+            Some(Line::Field(f)) => f.value.trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Which of the choice labelled `label`'s options are set.
+    fn set(&self, label: &str) -> Vec<bool> {
+        match self.lines.get(self.find(label)) {
+            Some(Line::Choice(c)) => c.set.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether line `i` can be picked.
+    fn pickable(&self, i: usize) -> bool {
+        matches!(self.lines.get(i), Some(Line::Field(_) | Line::Choice(_)))
+    }
+
+    /// Moves the pick to the next line that takes one, forwards or back,
+    /// round from the end to the start.
+    fn step_focus(&mut self, back: bool) {
+        let n = self.lines.len();
+        for k in 1..=n {
+            let i = if back {
+                (self.focus + n * 2 - k) % n
+            } else {
+                (self.focus + k) % n
+            };
+            if self.pickable(i) {
+                self.focus = i;
+                return;
+            }
         }
     }
 
     /// Applies one frame of keystrokes.
     ///
-    /// Typing goes into the focused line, Backspace (held or not) takes from it,
-    /// Tab and the arrows move between lines, Enter answers yes and Esc no. The
-    /// new-account question, which has nothing to type in, also takes Y and N,
-    /// as the buttons of the Windows message box it copies do.
+    /// Typing goes into the picked field and Backspace (held or not) takes
+    /// from it. On a row of tick boxes or round buttons, Left and Right move
+    /// along it and Space ticks or chooses. Tab, Shift-Tab and Up and Down
+    /// move between lines. Enter answers yes and Esc no. The new-account
+    /// question, which has nothing to type in, also takes Y and N, as the
+    /// buttons of the Windows message box it copies do.
     pub fn input(&mut self, strokes: &[Stroke], shift: bool) -> Option<Answer> {
         for stroke in strokes {
             if self.kind == Kind::NewAccount && !stroke.repeat {
@@ -190,25 +375,42 @@ impl Prompt {
                     _ => {}
                 }
             }
-            let count = self.fields.len().max(1);
-            if let Some(c) = stroke.text
-                && !c.is_control()
-                && let Some(e) = self.fields.get_mut(self.focus)
-                && e.value.chars().count() < e.max
-            {
-                e.value.push(c);
-            }
-            match stroke.key {
-                Some(KeyCode::Tab) if !shift => self.focus = (self.focus + 1) % count,
-                Some(KeyCode::Tab | KeyCode::ArrowUp) => {
-                    self.focus = (self.focus + count - 1) % count;
-                }
-                Some(KeyCode::ArrowDown) => self.focus = (self.focus + 1) % count,
-                Some(KeyCode::Backspace) => {
-                    if let Some(e) = self.fields.get_mut(self.focus) {
-                        e.value.pop();
+            match self.lines.get_mut(self.focus) {
+                Some(Line::Field(f)) => {
+                    if let Some(c) = stroke.text
+                        && !c.is_control()
+                        && (!f.digits || c.is_ascii_digit())
+                        && f.value.chars().count() < f.max
+                    {
+                        f.value.push(c);
+                    }
+                    if stroke.key == Some(KeyCode::Backspace) {
+                        f.value.pop();
                     }
                 }
+                Some(Line::Choice(c)) => {
+                    let space = match stroke.key {
+                        Some(KeyCode::Space) => !stroke.repeat,
+                        Some(_) => false,
+                        None => stroke.text == Some(' '),
+                    };
+                    if space {
+                        c.press(c.at);
+                    }
+                    match stroke.key {
+                        Some(KeyCode::ArrowLeft) => c.at = c.at.saturating_sub(1),
+                        Some(KeyCode::ArrowRight) => {
+                            c.at = (c.at + 1).min(c.options.len().saturating_sub(1));
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            match stroke.key {
+                Some(KeyCode::Tab) => self.step_focus(shift),
+                Some(KeyCode::ArrowUp) => self.step_focus(true),
+                Some(KeyCode::ArrowDown) => self.step_focus(false),
                 _ => {}
             }
             match stroke.first_press() {
@@ -227,8 +429,17 @@ impl Prompt {
     /// A click at (`x`, `y`) in UI pixels, against what the last frame drew.
     pub fn click(&mut self, x: f32, y: f32) -> Option<Answer> {
         match self.spot_at(x, y)? {
-            Spot::Field(i) => {
-                self.focus = i;
+            Spot::Line(i) => {
+                if self.pickable(i) {
+                    self.focus = i;
+                }
+                None
+            }
+            Spot::Option(i, k) => {
+                if let Some(Line::Choice(c)) = self.lines.get_mut(i) {
+                    c.press(k);
+                    self.focus = i;
+                }
                 None
             }
             Spot::Yes => self.yes(),
@@ -243,7 +454,7 @@ impl Prompt {
         }
     }
 
-    /// The yes, if the box's fields allow it; otherwise says why not.
+    /// The yes, if the box's lines allow it; otherwise says why not.
     fn yes(&mut self) -> Option<Answer> {
         match self.kind {
             Kind::NewAccount => Some(Answer::Create),
@@ -251,30 +462,57 @@ impl Prompt {
         }
     }
 
-    /// The registration form's yes: an e-mail address is the one thing a zone
-    /// that asks is after, so it has to be there and look like one. The real
-    /// name may be left empty.
+    /// Refuses the form: says why in red and picks the line to fix.
+    fn refuse(&mut self, label: &str, why: &str) -> Option<Answer> {
+        self.focus = self.find(label);
+        self.error = Some(why.to_string());
+        None
+    }
+
+    /// The registration form's yes. The e-mail is required, as Continuum
+    /// requires it, and has to look like an address. Sex has to be chosen:
+    /// both round buttons start empty, and a form sent with neither would
+    /// have to claim one the player never picked. The age, when given, has to
+    /// fit the one byte it is sent in. Everything else may be left empty.
     fn send(&mut self) -> Option<Answer> {
-        let value = |i: usize| {
-            self.fields
-                .get(i)
-                .map_or_else(String::new, |e| e.value.trim().to_string())
-        };
-        let (real_name, email) = (value(0), value(1));
-        let why = if email.is_empty() {
-            Some("Enter an e-mail address, or press Esc to skip the form.")
-        } else if !looks_like_email(&email) {
-            Some("That does not look like an e-mail address.")
-        } else {
-            None
-        };
-        if let Some(why) = why {
-            self.focus = 1;
-            self.error = Some(why.to_string());
-            return None;
+        let email = self.text(EMAIL);
+        if email.is_empty() {
+            return self.refuse(
+                EMAIL,
+                "E-Mail is required. Enter one, or press Esc to skip the form.",
+            );
         }
+        if !looks_like_email(&email) {
+            return self.refuse(EMAIL, "That does not look like an e-mail address.");
+        }
+        let age = self.text(AGE);
+        let age = if age.is_empty() {
+            0
+        } else {
+            match age.parse::<u8>() {
+                Ok(n) => n,
+                Err(_) => return self.refuse(AGE, "Age is a number from 0 to 255."),
+            }
+        };
+        let sex = match self.set(SEX).as_slice() {
+            [true, _] => Sex::Male,
+            [_, true] => Sex::Female,
+            _ => return self.refuse(SEX, "Choose Male or Female under Sex."),
+        };
+        let from = self.set(CONNECT_FROM);
+        let from = |i: usize| from.get(i).copied().unwrap_or(false);
         self.error = None;
-        Some(Answer::Send { real_name, email })
+        Some(Answer::Send(RegistrationForm {
+            real_name: self.text(REAL_NAME),
+            email,
+            city: self.text(CITY),
+            state: self.text(STATE),
+            age,
+            from_home: from(0),
+            from_work: from(1),
+            from_school: from(2),
+            sex,
+        }))
     }
 
     fn spot_at(&self, x: f32, y: f32) -> Option<Spot> {
@@ -285,35 +523,25 @@ impl Prompt {
             .map(|(_, s)| *s)
     }
 
-    /// The box's width in characters: wide enough for its longest line.
+    /// The box's width in characters: what it asks for, or more if the title
+    /// or the foot line need it.
     fn columns(&self) -> usize {
-        let foot = self.yes.len() + 8 + self.no.len();
-        self.lines
-            .iter()
-            .map(|l| l.chars().count())
-            .chain(
-                self.shown
-                    .iter()
-                    .map(|(_, v)| LABEL_COLUMNS + v.chars().count()),
-            )
-            // A field as wide as it needs to be shown, not as long as it may get:
-            // a long value scrolls, and sixty-three columns of e-mail made a box
-            // wider than the screen.
-            .chain(
-                self.fields
-                    .iter()
-                    .map(|e| LABEL_COLUMNS + e.max.min(FIELD_COLUMNS) + 1),
-            )
-            .chain([self.title.len(), foot, 40])
-            .max()
-            .unwrap_or(40)
-            + 2
+        let foot = self.yes.len() + 4 + self.no.len() + 2;
+        self.columns.max(self.title.len() + 2).max(foot)
+    }
+
+    /// How tall a line is drawn, in UI pixels.
+    fn pitch(line: &Line) -> f32 {
+        match line {
+            Line::Gap => 7.0,
+            _ => 14.0,
+        }
     }
 
     /// Draws the box in the middle of the screen, in the start-up screen's
-    /// style: green labels, red headings, the game's grey border, and the keys
-    /// on a yellow foot line that are buttons as well. Records where everything
-    /// went for [`Prompt::click`].
+    /// style: green labels, white values, the game's grey border, and the keys
+    /// on a yellow foot line that are buttons as well. Records where
+    /// everything went for [`Prompt::click`].
     pub fn draw(&mut self, c: &Canvas, r: &mut Renderer, cursor: Option<(f32, f32)>) {
         self.spots.clear();
         let hovered = |rect: Rect| cursor.is_some_and(|(mx, my)| rect.holds(mx, my));
@@ -321,12 +549,9 @@ impl Prompt {
             .columns()
             .min(((c.view_w - 16.0) / 8.0).max(20.0) as usize);
         let w = cols as f32 * 8.0;
-        let rows = usize::from(!self.heading.is_empty())
-            + self.lines.len()
-            + self.shown.len()
-            + self.fields.len();
-        // Title, rule, the heading and rows, a gap, two error lines, a rule, the keys.
-        let h = 20.0 + rows as f32 * 14.0 + 8.0 + 2.0 * ERROR_PITCH + 8.0 + 16.0;
+        let body: f32 = self.lines.iter().map(Self::pitch).sum();
+        // Title and rule, the lines, a gap, two error lines, a rule, the keys.
+        let h = 20.0 + body + 8.0 + 2.0 * ERROR_PITCH + 8.0 + 16.0;
         let x = ((c.view_w - w) / 2.0).floor();
         let top = ((c.view_h - h) / 2.0).floor().max(4.0);
         c.panel(r, x, top, w, h);
@@ -334,42 +559,69 @@ impl Prompt {
         c.separator(r, x, top + 13.0, w);
 
         let mut y = top + 20.0;
-        if !self.heading.is_empty() {
-            c.text(r, x + 4.0, y, color::DARK_RED, self.heading);
-            y += 14.0;
-        }
         let width = cols.saturating_sub(1);
-        for line in &self.lines {
-            let shown: String = line.chars().take(width).collect();
-            c.text(r, x + 4.0, y, color::WHITE, &shown);
-            y += 14.0;
-        }
         let value_x = x + 4.0 + LABEL_COLUMNS as f32 * 8.0;
-        for (label, value) in &self.shown {
-            c.text(r, x + 4.0, y, color::GREEN, label);
-            c.text(r, value_x, y, color::WHITE, value);
-            y += 14.0;
-        }
-        for (i, e) in self.fields.iter().enumerate() {
+        let room = FIELD_COLUMNS.min(cols.saturating_sub(LABEL_COLUMNS + 1).max(1));
+        for (i, line) in self.lines.iter().enumerate() {
             let row = Rect::new(x + 2.0, y - 1.0, w - 4.0, 13.0);
-            self.spots.push((row, Spot::Field(i)));
-            if self.focus == i || hovered(row) {
-                c.color_rect(r, ui_color::HIGHLIGHT, row.x, row.y, row.w, row.h);
+            let picked = self.focus == i;
+            match line {
+                Line::Note {
+                    text,
+                    color,
+                    indent,
+                } => {
+                    let (lx, room) = if *indent {
+                        (value_x, width.saturating_sub(LABEL_COLUMNS))
+                    } else {
+                        (x + 4.0, width)
+                    };
+                    let shown: String = text.chars().take(room).collect();
+                    c.text(r, lx, y, *color, &shown);
+                }
+                Line::Gap => {}
+                Line::Field(f) => {
+                    self.spots.push((row, Spot::Line(i)));
+                    if picked || hovered(row) {
+                        c.color_rect(r, ui_color::HIGHLIGHT, row.x, row.y, row.w, row.h);
+                    }
+                    c.text(r, x + 4.0, y, color::GREEN, f.label);
+                    let mut value = f.value.clone();
+                    if picked {
+                        value.push('_');
+                    }
+                    // A long value scrolls: its end, where the typing is, shows.
+                    let n = value.chars().count();
+                    let shown: String = value.chars().skip(n.saturating_sub(room)).collect();
+                    c.text(r, value_x, y, color::WHITE, &shown);
+                    if f.required {
+                        let rx = value_x + (room + 1) as f32 * 8.0;
+                        c.text(r, rx, y, color::DARK_RED, "(required)");
+                    }
+                }
+                Line::Choice(ch) => {
+                    self.spots.push((row, Spot::Line(i)));
+                    if hovered(row) && !picked {
+                        c.color_rect(r, ui_color::HIGHLIGHT, row.x, row.y, row.w, row.h);
+                    }
+                    c.text(r, x + 4.0, y, color::GREEN, ch.label);
+                    let mut ox = value_x;
+                    for k in 0..ch.options.len() {
+                        let text = ch.option_text(k);
+                        let tw = text.chars().count() as f32 * 8.0;
+                        let rect = Rect::new(ox - 2.0, y - 1.0, tw + 4.0, 13.0);
+                        self.spots.push((rect, Spot::Option(i, k)));
+                        // The one the keyboard is on is lit while the row is
+                        // picked, so Space visibly has a target.
+                        if (picked && ch.at == k) || hovered(rect) {
+                            c.color_rect(r, ui_color::HIGHLIGHT, rect.x, rect.y, rect.w, rect.h);
+                        }
+                        c.text(r, ox, y, color::WHITE, &text);
+                        ox += tw + 16.0;
+                    }
+                }
             }
-            c.text(r, x + 4.0, y, color::GREEN, e.label);
-            let mut value = if e.secret {
-                "*".repeat(e.value.chars().count())
-            } else {
-                e.value.clone()
-            };
-            if self.focus == i {
-                value.push('_');
-            }
-            let room = cols.saturating_sub(LABEL_COLUMNS + 1).max(1);
-            let n = value.chars().count();
-            let shown: String = value.chars().skip(n.saturating_sub(room)).collect();
-            c.text(r, value_x, y, color::WHITE, &shown);
-            y += 14.0;
+            y += Self::pitch(line);
         }
         y += 8.0;
         // Wrapped onto two lines rather than cut at the edge, which lost the
@@ -389,8 +641,9 @@ impl Prompt {
         // The foot line: both keys are buttons, as on the start-up screen.
         let ky = y + 6.0;
         let items = [(self.yes, Spot::Yes), (self.no, Spot::No)];
-        let total: f32 = items.iter().map(|(t, _)| t.len() as f32 * 8.0).sum::<f32>() + 64.0;
-        let mut kx = (x + w / 2.0 - total / 2.0).floor();
+        let text_w: f32 = items.iter().map(|(t, _)| t.len() as f32 * 8.0).sum();
+        let gap = ((w - text_w) / 3.0).clamp(16.0, 64.0).floor();
+        let mut kx = (x + w / 2.0 - (text_w + gap) / 2.0).floor();
         for (text, spot) in items {
             let tw = text.len() as f32 * 8.0;
             let rect = Rect::new(kx - 2.0, ky - 1.0, tw + 4.0, 13.0);
@@ -399,16 +652,16 @@ impl Prompt {
                 c.color_rect(r, ui_color::HIGHLIGHT, rect.x, rect.y, rect.w, rect.h);
             }
             c.text(r, kx, ky, color::YELLOW, text);
-            kx += tw + 64.0;
+            kx += tw + gap;
         }
     }
 }
 
-/// Where the values start, in characters from the box's left edge: the same
-/// ten the start-up screen's profile lines use.
-const LABEL_COLUMNS: usize = 10;
+/// Where the values start, in characters from the box's left edge: room for
+/// the longest label, "State/Country", and two spaces.
+const LABEL_COLUMNS: usize = 15;
 
-/// The most columns a field asks the box for; longer values scroll.
+/// The most columns a field is drawn across; longer values scroll.
 const FIELD_COLUMNS: usize = 32;
 
 /// The spacing of the error lines, which the start-up screen's foot uses too.
@@ -443,18 +696,57 @@ mod tests {
         k.iter().copied().map(Stroke::press).collect()
     }
 
+    /// Space as a keyboard sends it: the key, with the character on it.
+    fn space() -> Vec<Stroke> {
+        vec![Stroke {
+            key: Some(KeyCode::Space),
+            text: Some(' '),
+            repeat: false,
+        }]
+    }
+
+    fn note_text(p: &Prompt) -> String {
+        p.lines
+            .iter()
+            .filter_map(|l| match l {
+                Line::Note { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The labels of the lines that can be picked, top to bottom.
+    fn labels(p: &Prompt) -> Vec<&'static str> {
+        p.lines
+            .iter()
+            .filter_map(|l| match l {
+                Line::Field(f) => Some(f.label),
+                Line::Choice(c) => Some(c.label),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn focused(p: &Prompt) -> &'static str {
+        match &p.lines[p.focus] {
+            Line::Field(f) => f.label,
+            Line::Choice(c) => c.label,
+            _ => "",
+        }
+    }
+
     /// The offer is Continuum's question, word for word, and nothing to type:
     /// the account is made with the password the login was sent with.
     #[test]
     fn the_offer_asks_continuums_question_and_nothing_else() {
         let p = Prompt::new_account(None);
-        assert_eq!(p.lines.join(" "), NEW_USER_QUESTION);
-        assert!(p.fields.is_empty(), "no second password");
-        assert!(p.shown.is_empty());
+        assert_eq!(note_text(&p), NEW_USER_QUESTION);
+        assert!(labels(&p).is_empty(), "no second password");
         assert_eq!((p.yes, p.no), ("Enter = Yes", "Esc = No"));
 
         let p = Prompt::new_account(Some("  Welcome!  "));
-        assert!(p.lines.iter().any(|l| l == "The zone says: Welcome!"));
+        assert!(note_text(&p).ends_with("The zone says: Welcome!"));
     }
 
     /// Enter or Y says yes; Esc or N says no. Nothing typed gets in the way.
@@ -496,31 +788,103 @@ mod tests {
         assert_eq!(p.click(200.0, 200.0), None, "outside everything");
     }
 
-    /// The form takes a real name and an e-mail, Tab moves between them, and
-    /// Enter sends both -- trimmed, so a stray space is not sent to the zone.
+    /// Continuum's fields, in Continuum's order, with the e-mail first, marked
+    /// required and explained; nothing ticked and no sex chosen to begin with.
     #[test]
-    fn the_form_sends_a_real_name_and_an_email() {
+    fn the_form_asks_continuums_questions_in_its_order() {
+        let p = Prompt::registration();
+        assert_eq!(
+            labels(&p),
+            [EMAIL, REAL_NAME, CITY, STATE, AGE, CONNECT_FROM, SEX]
+        );
+        assert_eq!(focused(&p), EMAIL, "the e-mail is picked first");
+        assert!(matches!(
+            &p.lines[p.find(EMAIL)],
+            Line::Field(Field { required: true, .. })
+        ));
+        assert!(note_text(&p).contains(EMAIL_WHY));
+        assert_eq!(p.set(CONNECT_FROM), [false, false, false]);
+        assert_eq!(p.set(SEX), [false, false], "neither is chosen");
+        assert_eq!(p.title, "-= Player Information =-");
+        assert!(p.yes.ends_with("Submit Information"));
+    }
+
+    /// The top paragraph says what is sent, and does not claim a hardware
+    /// profile goes with it, because none does.
+    #[test]
+    fn the_form_says_only_what_is_typed_is_sent() {
+        let text = note_text(&Prompt::registration());
+        assert!(text.contains("Only what you type or choose below is sent"));
+        assert!(!text.to_lowercase().contains("hardware"));
+    }
+
+    /// The whole form from the keyboard: each field typed, Tab between them,
+    /// Space to tick and choose, Left and Right along a row, Enter to send.
+    /// Text is trimmed, and every answer lands in its own field.
+    #[test]
+    fn the_whole_form_fills_from_the_keyboard() {
         let mut p = Prompt::registration();
-        p.input(&typed("Ada Lovelace "), false);
-        p.input(&keys(&[KeyCode::Tab]), false);
-        p.input(&typed("ada@example.org"), false);
+        let tab = keys(&[KeyCode::Tab]);
+        let right = keys(&[KeyCode::ArrowRight]);
+        p.input(&typed("ada@example.org "), false);
+        p.input(&tab, false);
+        p.input(&typed("Ada Lovelace"), false);
+        p.input(&tab, false);
+        p.input(&typed("London"), false);
+        p.input(&tab, false);
+        p.input(&typed("England"), false);
+        p.input(&tab, false);
+        p.input(&typed("36"), false);
+        p.input(&tab, false);
+        assert_eq!(focused(&p), CONNECT_FROM);
+        p.input(&space(), false);
+        p.input(&right, false);
+        p.input(&right, false);
+        p.input(&space(), false);
+        p.input(&tab, false);
+        assert_eq!(focused(&p), SEX);
+        p.input(&right, false);
+        p.input(&space(), false);
         assert_eq!(
             p.input(&keys(&[KeyCode::Enter]), false),
-            Some(Answer::Send {
+            Some(Answer::Send(RegistrationForm {
                 real_name: "Ada Lovelace".into(),
                 email: "ada@example.org".into(),
-            })
+                city: "London".into(),
+                state: "England".into(),
+                age: 36,
+                from_home: true,
+                from_work: false,
+                from_school: true,
+                sex: Sex::Female,
+            }))
         );
     }
 
-    /// No e-mail, or something that is plainly not one, is refused with the
-    /// reason and the cursor on that line; Esc skips the form whatever is in it.
+    /// Tab goes round, Shift-Tab and Up go back, and only the lines that take
+    /// an answer are stopped at.
     #[test]
-    fn the_form_wants_an_email_or_a_skip() {
+    fn tab_and_the_arrows_move_between_answers() {
         let mut p = Prompt::registration();
+        p.input(&keys(&[KeyCode::ArrowUp]), false);
+        assert_eq!(focused(&p), SEX, "back from the first goes to the last");
+        p.input(&keys(&[KeyCode::Tab]), false);
+        assert_eq!(focused(&p), EMAIL, "and on from the last to the first");
+        p.input(&keys(&[KeyCode::ArrowDown]), false);
+        assert_eq!(focused(&p), REAL_NAME);
+        p.input(&keys(&[KeyCode::Tab]), true);
+        assert_eq!(focused(&p), EMAIL);
+    }
+
+    /// The e-mail is required: without one, or with something plainly not
+    /// one, the form is refused with the reason and the e-mail line picked.
+    #[test]
+    fn a_missing_or_odd_email_is_refused() {
+        let mut p = Prompt::registration();
+        p.input(&keys(&[KeyCode::Tab]), false);
         assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
-        assert!(p.error.as_deref().is_some_and(|e| e.contains("Esc")));
-        assert_eq!(p.focus, 1);
+        assert!(p.error.as_deref().is_some_and(|e| e.contains("required")));
+        assert_eq!(focused(&p), EMAIL);
         p.input(&typed("Ada Lovelace"), false);
         assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
         assert!(
@@ -528,10 +892,92 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("does not look"))
         );
-        assert_eq!(
-            p.input(&keys(&[KeyCode::Escape]), false),
-            Some(Answer::Skip)
-        );
+    }
+
+    /// Sex starts unchosen and has to be chosen: a form sent without would
+    /// claim an answer the player never gave. The refusal picks that row.
+    #[test]
+    fn sex_has_to_be_chosen() {
+        let mut p = Prompt::registration();
+        p.input(&typed("a@b.co"), false);
+        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
+        assert!(p.error.as_deref().is_some_and(|e| e.contains("Sex")));
+        assert_eq!(focused(&p), SEX);
+        p.input(&space(), false);
+        assert!(matches!(
+            p.input(&keys(&[KeyCode::Enter]), false),
+            Some(Answer::Send(RegistrationForm { sex: Sex::Male, .. }))
+        ));
+    }
+
+    /// Tick boxes tick and untick, any number at once; round buttons choose
+    /// one, clear the other, and stay chosen.
+    #[test]
+    fn ticks_toggle_and_round_buttons_choose_one() {
+        let mut p = Prompt::registration();
+        p.focus = p.find(CONNECT_FROM);
+        p.input(&space(), false);
+        p.input(&keys(&[KeyCode::ArrowRight]), false);
+        p.input(&space(), false);
+        assert_eq!(p.set(CONNECT_FROM), [true, true, false]);
+        p.input(&space(), false);
+        assert_eq!(p.set(CONNECT_FROM), [true, false, false]);
+
+        p.focus = p.find(SEX);
+        p.input(&space(), false);
+        assert_eq!(p.set(SEX), [true, false]);
+        p.input(&keys(&[KeyCode::ArrowRight]), false);
+        p.input(&space(), false);
+        assert_eq!(p.set(SEX), [false, true]);
+        p.input(&space(), false);
+        assert_eq!(p.set(SEX), [false, true], "a chosen one stays chosen");
+    }
+
+    /// A held Space does not flicker a tick box on and off.
+    #[test]
+    fn a_held_space_ticks_once() {
+        let mut p = Prompt::registration();
+        p.focus = p.find(CONNECT_FROM);
+        let held = Stroke {
+            key: Some(KeyCode::Space),
+            text: Some(' '),
+            repeat: true,
+        };
+        p.input(&space(), false);
+        p.input(&[held, held], false);
+        assert_eq!(p.set(CONNECT_FROM), [true, false, false]);
+    }
+
+    /// Space is a space in a text field: real names have them.
+    #[test]
+    fn space_types_in_a_field() {
+        let mut p = Prompt::registration();
+        p.focus = p.find(REAL_NAME);
+        p.input(&typed("Ada"), false);
+        p.input(&space(), false);
+        p.input(&typed("L"), false);
+        assert_eq!(p.text(REAL_NAME), "Ada L");
+    }
+
+    /// Age takes digits only, and has to fit its one byte; left empty it is
+    /// sent as 0, "not given".
+    #[test]
+    fn age_is_a_number_that_fits_a_byte() {
+        let mut p = Prompt::registration();
+        p.input(&typed("a@b.co"), false);
+        p.focus = p.find(SEX);
+        p.input(&space(), false);
+        p.focus = p.find(AGE);
+        p.input(&typed("3x0-0"), false);
+        assert_eq!(p.text(AGE), "300", "digits only, three at most");
+        assert_eq!(p.input(&keys(&[KeyCode::Enter]), false), None);
+        assert!(p.error.as_deref().is_some_and(|e| e.contains("255")));
+        assert_eq!(focused(&p), AGE);
+        p.input(&keys(&[KeyCode::Backspace; 3]), false);
+        assert!(matches!(
+            p.input(&keys(&[KeyCode::Enter]), false),
+            Some(Answer::Send(RegistrationForm { age: 0, .. }))
+        ));
     }
 
     /// The fields stop where the form's do on the wire, so nothing typed is cut
@@ -539,28 +985,68 @@ mod tests {
     #[test]
     fn the_form_fields_stop_at_the_wire_lengths() {
         let mut p = Prompt::registration();
-        p.input(&typed(&"x".repeat(80)), false);
-        assert_eq!(p.fields[0].value.len(), REAL_NAME_MAX);
-        p.input(&keys(&[KeyCode::ArrowDown]), false);
-        p.input(&typed(&"y".repeat(80)), false);
-        assert_eq!(p.fields[1].value.len(), EMAIL_MAX);
+        for (label, max) in [
+            (EMAIL, EMAIL_MAX),
+            (REAL_NAME, REAL_NAME_MAX),
+            (CITY, CITY_MAX),
+            (STATE, STATE_MAX),
+        ] {
+            p.focus = p.find(label);
+            p.input(&typed(&"x".repeat(80)), false);
+            assert_eq!(p.text(label).len(), max, "{label}");
+        }
     }
 
-    /// Clicks work on the form as on the offer: the no is a skip there.
+    /// Esc leaves the form whatever is in it.
     #[test]
-    fn the_pointer_can_send_or_skip_the_form() {
+    fn escape_leaves_the_form() {
         let mut p = Prompt::registration();
-        p.spots = vec![
-            (Rect::new(0.0, 0.0, 100.0, 13.0), Spot::Field(0)),
-            (Rect::new(0.0, 14.0, 100.0, 13.0), Spot::Field(1)),
-            (Rect::new(0.0, 30.0, 40.0, 13.0), Spot::Yes),
-            (Rect::new(50.0, 30.0, 40.0, 13.0), Spot::No),
-        ];
-        assert_eq!(p.click(10.0, 20.0), None);
-        assert_eq!(p.focus, 1, "clicking a line focuses it");
         p.input(&typed("a@b.co"), false);
-        assert!(matches!(p.click(10.0, 35.0), Some(Answer::Send { .. })));
-        assert_eq!(p.click(60.0, 35.0), Some(Answer::Skip));
+        assert_eq!(
+            p.input(&keys(&[KeyCode::Escape]), false),
+            Some(Answer::Skip)
+        );
+    }
+
+    /// Everything the keys do on the form, a click does: a field takes the
+    /// focus, a tick box or round button ticks or chooses, and the foot line
+    /// answers.
+    #[test]
+    fn the_pointer_can_fill_and_answer_the_form() {
+        let mut p = Prompt::registration();
+        let (email, from, sex) = (p.find(EMAIL), p.find(CONNECT_FROM), p.find(SEX));
+        p.spots = vec![
+            (Rect::new(0.0, 0.0, 300.0, 13.0), Spot::Line(email)),
+            (Rect::new(0.0, 20.0, 300.0, 13.0), Spot::Line(from)),
+            (Rect::new(100.0, 20.0, 40.0, 13.0), Spot::Option(from, 0)),
+            (Rect::new(150.0, 20.0, 40.0, 13.0), Spot::Option(from, 1)),
+            (Rect::new(0.0, 40.0, 300.0, 13.0), Spot::Line(sex)),
+            (Rect::new(100.0, 40.0, 40.0, 13.0), Spot::Option(sex, 0)),
+            (Rect::new(150.0, 40.0, 40.0, 13.0), Spot::Option(sex, 1)),
+            (Rect::new(0.0, 60.0, 40.0, 13.0), Spot::Yes),
+            (Rect::new(50.0, 60.0, 40.0, 13.0), Spot::No),
+        ];
+        assert_eq!(p.click(10.0, 25.0), None);
+        assert_eq!(focused(&p), CONNECT_FROM, "a row's label picks it");
+        assert_eq!(p.set(CONNECT_FROM), [false, false, false]);
+        p.click(160.0, 25.0);
+        assert_eq!(p.set(CONNECT_FROM), [false, true, false]);
+        p.click(160.0, 45.0);
+        assert_eq!(p.set(SEX), [false, true]);
+        p.click(110.0, 45.0);
+        assert_eq!(p.set(SEX), [true, false]);
+        p.click(10.0, 5.0);
+        assert_eq!(focused(&p), EMAIL);
+        p.input(&typed("a@b.co"), false);
+        assert!(matches!(
+            p.click(10.0, 65.0),
+            Some(Answer::Send(RegistrationForm {
+                from_work: true,
+                sex: Sex::Male,
+                ..
+            }))
+        ));
+        assert_eq!(p.click(60.0, 65.0), Some(Answer::Skip));
     }
 
     #[test]
@@ -579,7 +1065,19 @@ mod tests {
     #[test]
     fn the_box_cannot_print_what_was_typed_into_it() {
         let mut p = Prompt::registration();
-        p.input(&typed("Ada Lovelace"), false);
-        assert!(!format!("{p:?}").contains("Lovelace"));
+        p.input(&typed("ada@lovelace.org"), false);
+        assert!(!format!("{p:?}").contains("lovelace"));
+        let form = Answer::Send(RegistrationForm {
+            real_name: "Ada Lovelace".into(),
+            email: "ada@lovelace.org".into(),
+            city: String::new(),
+            state: String::new(),
+            age: 0,
+            from_home: false,
+            from_work: false,
+            from_school: false,
+            sex: Sex::Female,
+        });
+        assert!(!format!("{form:?}").contains("ovelace"));
     }
 }

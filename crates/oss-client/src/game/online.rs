@@ -12,7 +12,7 @@ use oss_session::security::{
     HandshakeRequest, Identities, KnownServers, Security, SecurityMode, built_in, fingerprint,
 };
 use oss_session::udp::UdpDriver;
-use oss_session::{Profile, Session, SessionConfig, SessionEvent, State};
+use oss_session::{Profile, RegistrationForm, Session, SessionConfig, SessionEvent, State};
 
 /// What a build outside this repository can supply to a connection. Both halves
 /// default to `None`, which is this repository's own client and nothing else.
@@ -660,10 +660,8 @@ impl Online {
 
     /// Sends the zone's registration form ([`Online::registration`]) and goes on
     /// into the arena.
-    pub fn send_registration(&mut self, real_name: &str, email: &str) {
-        if std::mem::take(&mut self.registration)
-            && self.session.send_registration(real_name, email)
-        {
+    pub fn send_registration(&mut self, form: &RegistrationForm) {
+        if std::mem::take(&mut self.registration) && self.session.send_registration(form) {
             log::info!("sent the registration form to {}", self.server);
             self.status = "Entering arena...".into();
             self.flush();
