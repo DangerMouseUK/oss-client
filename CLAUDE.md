@@ -127,7 +127,7 @@ that may already belong to somebody else.
 
 ## Architecture
 - Protocol, transport and formats come from the sibling `../oss-core` crates (`oss-proto`, `oss-net`, `oss-formats`). Don't fork them here; request changes there.
-- Stack: `winit` (window/input), `wgpu` (rendering; keep it WebGPU-compatible for the later browser build), `gilrs` (gamepads), a cpal-based audio crate, `egui` for menus/tools. In-game HUD is a custom batched sprite renderer that defaults to Continuum's layout.
+- Stack: `winit` (window/input), `wgpu` (rendering; keep it WebGPU-compatible for the later browser build), `gilrs` (gamepads), a cpal-based audio crate. Every screen, the HUD, menus and settings window included, is drawn by a custom batched sprite renderer in Continuum's own font and box; there is no GUI toolkit. The HUD defaults to Continuum's layout.
 - `oss-sim` lives in `../oss-core` and is shared with the server, which uses its validation API for anti-cheat. Deterministic 100 Hz fixed-step simulation (ships, weapons, collisions) driven purely by arena settings; no rendering, no I/O, no floating-point nondeterminism in anything that must match the server/Continuum. Changes to it belong in oss-core: request them rather than working around them here, since a divergence between the client's physics and the server's would cause false anti-cheat findings.
 - Rendering interpolates between sim ticks so 60–240+ Hz displays are smooth; pixel-art scaling is integer nearest by default.
 - The network layer is a library usable headless: a `oss-bot`-style CLI drives it for tests and load swarms.

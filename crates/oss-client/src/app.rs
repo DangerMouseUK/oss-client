@@ -1231,7 +1231,7 @@ impl App {
         if let Some(ui) = self.settings.as_mut() {
             draw_settings(ui, &run.screen, &mut run.renderer, run.scale, cursor);
         }
-        match run.renderer.render(stars, 0.0, None) {
+        match run.renderer.render(stars, 0.0) {
             Ok(()) | Err(FrameError::Skip) => {}
             Err(FrameError::Fatal(e)) => return self.fail(event_loop, e),
         }

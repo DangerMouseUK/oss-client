@@ -21,8 +21,6 @@ use std::time::{Duration, Instant};
 pub enum Stage {
     /// The game building its vertex list on the CPU (outside the renderer).
     Draw,
-    /// Uploading egui's texture deltas.
-    UiTex,
     /// Waiting for room under the in-flight bound.
     Wait,
     /// `get_current_texture`: waiting for the swapchain to free a buffer, which is
@@ -41,9 +39,8 @@ pub enum Stage {
 }
 
 impl Stage {
-    const ALL: [Stage; 9] = [
+    const ALL: [Stage; 8] = [
         Stage::Draw,
-        Stage::UiTex,
         Stage::Wait,
         Stage::Acquire,
         Stage::Write,
@@ -60,7 +57,6 @@ impl Stage {
     fn name(self) -> &'static str {
         match self {
             Stage::Draw => "draw",
-            Stage::UiTex => "ui-tex",
             Stage::Wait => "wait",
             Stage::Acquire => "acquire",
             Stage::Write => "write",
@@ -132,7 +128,7 @@ impl Samples {
 /// Records stage timings for the frames of one run.
 pub struct Perf {
     enabled: bool,
-    stages: [Samples; 9],
+    stages: [Samples; 8],
     /// Set at the start of each stage by [`Perf::begin`].
     mark: Instant,
     /// When the run started, for the overall frame rate.
