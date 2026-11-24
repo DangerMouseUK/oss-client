@@ -998,7 +998,9 @@ impl Session {
                     self.state = State::Closed;
                     self.events.push_back(SessionEvent::Closed(reason));
                 }
-                _ => {}
+                NetEvent::SizedIncomingCancelled => self.on_transfer_cancelled(),
+                // Transfers this session sends; it sends none.
+                NetEvent::SizedSent(_) | NetEvent::SizedCancelled(_) => {}
             }
         }
     }
@@ -1792,6 +1794,12 @@ impl Session {
             "its checksum is {got:08x}, not the {:08x} the zone listed",
             file.checksum
         );
+        self.file_copy_failed(file, problem);
+    }
+
+    /// A copy of a listed file could not be used (`problem` says why): asked for
+    /// once more, ahead of the queue, and left out after the second.
+    fn file_copy_failed(&mut self, file: &ArenaFile, problem: String) {
         let bad = self.files_bad.entry(file.index).or_insert(0);
         *bad = bad.saturating_add(1);
         let bad = *bad;
@@ -1849,6 +1857,12 @@ impl Session {
             }
             Err(e) => format!("it does not decompress ({e})"),
         };
+        self.map_copy_failed(name, problem);
+    }
+
+    /// A copy of the map could not be used (`problem` says why): asked for once
+    /// more, ahead of the queue, and after the second the visit ends.
+    fn map_copy_failed(&mut self, name: String, problem: String) {
         let bad = match self.map.as_mut() {
             Some(info) => {
                 info.bad_downloads = info.bad_downloads.saturating_add(1);
@@ -1867,6 +1881,42 @@ impl Session {
             self.downloads.push_front(0);
         } else {
             self.reject_map(name, format!("arrived damaged twice ({problem})"));
+        }
+    }
+
+    /// The transfer in flight was cancelled: by the zone, or by the transport
+    /// because it was not a transfer it could take (too large, or inconsistent
+    /// from one piece to the next). Nothing more will arrive for that request,
+    /// so it counts as a damaged copy: asked for again once, then the map is
+    /// refused or the file left out. Before this, the session kept waiting for
+    /// it, a security check held for the map was never answered, and the
+    /// client never left its download screen.
+    ///
+    /// The retry is not swallowed by the transport's "ignore the rest of the
+    /// cancelled transfer" state: the zone acknowledges the cancel (`00 0C`,
+    /// ASSS `net.c` and oss-net alike), which clears it, before it can answer
+    /// the new request.
+    fn on_transfer_cancelled(&mut self) {
+        let Some(index) = self.downloading.take() else {
+            log::debug!("a transfer nobody asked for was cancelled");
+            return;
+        };
+        let problem = "its transfer was cancelled".to_string();
+        if index == 0 {
+            match self.map.as_ref() {
+                Some(m) if m.tiles.is_none() => {
+                    let name = m.name.clone();
+                    self.map_copy_failed(name, problem);
+                }
+                _ => {}
+            }
+        } else if let Some(f) = self.files.iter().find(|f| f.index == index).cloned()
+            && !self.files_accepted.contains(&index)
+        {
+            self.file_copy_failed(&f, problem);
+        }
+        if self.state != State::Closed {
+            self.next_download();
         }
     }
 

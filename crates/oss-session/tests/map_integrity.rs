@@ -218,6 +218,10 @@ struct Zone {
     damaged_maps: u32,
     /// Damaged copies of the listed LVZ to send before a good one.
     damaged_lvz: u32,
+    /// Map transfers to send as ones the client cannot take, before a good one.
+    cancelled_maps: u32,
+    /// The same for the listed LVZ.
+    cancelled_lvz: u32,
     /// Send the security check with the arena, before the map is asked for.
     challenge_on_entry: bool,
     /// Push [`HIDDEN_NAME`] unasked once the map has gone, then send the check.
@@ -280,6 +284,19 @@ impl Zone {
             C2SPacket::MapRequest(r) => {
                 let index = r.index.unwrap_or(0);
                 self.requests.push(index);
+                // A transfer whose first byte is 0 is no packet at all, so the
+                // client's transport cancels it on its first piece.
+                let left = match index {
+                    0 => Some(&mut self.cancelled_maps),
+                    2 => Some(&mut self.cancelled_lvz),
+                    _ => None,
+                };
+                if let Some(n) = left.filter(|n| **n > 0) {
+                    *n -= 1;
+                    let conn = server.connection_mut(&ADDR).unwrap();
+                    conn.send_sized(vec![0; 1500]);
+                    return;
+                }
                 let p = match index {
                     0 if self.damaged_maps > 0 => {
                         self.damaged_maps -= 1;
@@ -710,6 +727,66 @@ fn the_map_checksum_counts_large_objects_over_their_whole_area() {
     });
     assert_eq!(zone.answers.len(), 1);
     assert_eq!(zone.answers[0].map_checksum, want);
+    assert_eq!(client.state(), State::Playing);
+}
+
+/// A map transfer the client's transport cancels never arrives. It used to be
+/// waited for for ever: the check held for the map went unanswered and the
+/// client never left its download screen. Now it counts as a damaged copy:
+/// asked for once more, and a second ends the visit.
+#[test]
+fn a_cancelled_map_transfer_is_asked_for_again_then_refused() {
+    let mut zone = Zone {
+        cancelled_maps: 1,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, events) = run(&mut zone, 3000, None, |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending()
+    });
+    assert_eq!(zone.requests, vec![0, 0, 2], "asked for again, then got");
+    assert_eq!(maps_ready(&events), vec![&map_bytes()[..]]);
+    assert_eq!(zone.answers.len(), 1);
+    assert_eq!(zone.answers[0].map_checksum, map_checksum_of(&map_bytes()));
+    assert_eq!(client.state(), State::Playing);
+
+    let mut zone = Zone {
+        cancelled_maps: u32::MAX,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, events) = run(&mut zone, 3000, None, |z, c| {
+        z.disconnected && c.state() == State::Closed
+    });
+    assert_eq!(zone.requests, vec![0, 0]);
+    assert!(maps_ready(&events).is_empty());
+    assert!(zone.answers.is_empty());
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SessionEvent::MapRejected { reason, .. } if reason.contains("cancelled")
+    )));
+    assert_eq!(client.state(), State::Closed);
+}
+
+/// The same for an LVZ, which is left out rather than ending the visit.
+#[test]
+fn a_cancelled_lvz_transfer_is_asked_for_again_then_left_out() {
+    let mut zone = Zone {
+        cancelled_lvz: u32::MAX,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, events) = run(&mut zone, 3000, None, |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending() && z.requests.len() >= 3
+    });
+    assert_eq!(zone.requests, vec![0, 2, 2]);
+    assert!(files_ready(&events, LVZ_NAME).is_empty());
+    assert_eq!(files_rejected(&events, LVZ_NAME), 1);
+    assert!(
+        !client.downloads_pending(),
+        "nothing is waited for any more"
+    );
+    assert_eq!(zone.answers.len(), 1);
     assert_eq!(client.state(), State::Playing);
 }
 
