@@ -222,6 +222,10 @@ struct Zone {
     cancelled_maps: u32,
     /// The same for the listed LVZ.
     cancelled_lvz: u32,
+    /// Map transfers to send as a map-data packet too short to decode.
+    malformed_maps: u32,
+    /// Send the map announcement one byte too long, so it does not decode.
+    malformed_list: bool,
     /// Send the security check with the arena, before the map is asked for.
     challenge_on_entry: bool,
     /// Send the check first of all, before the settings and the map list.
@@ -290,7 +294,11 @@ impl Zone {
                     ..Default::default()
                 };
                 server.send(&ADDR, &packet(&PlayerEntering { players: vec![me] }), true);
-                if !self.no_map {
+                if self.malformed_list {
+                    let mut list = packet(&file_list(&self.the_map()));
+                    list.push(0);
+                    server.send(&ADDR, &list, true);
+                } else if !self.no_map {
                     server.send(&ADDR, &packet(&file_list(&self.the_map())), true);
                 }
                 server.send(&ADDR, &packet(&EnteringArena {}), true);
@@ -306,6 +314,12 @@ impl Zone {
                 }
                 // A transfer whose first byte is 0 is no packet at all, so the
                 // client's transport cancels it on its first piece.
+                if index == 0 && self.malformed_maps > 0 {
+                    self.malformed_maps -= 1;
+                    let conn = server.connection_mut(&ADDR).unwrap();
+                    conn.send_sized(vec![0x2A, b't', b'i', b'n', b'y']);
+                    return;
+                }
                 let left = match index {
                     0 => Some(&mut self.cancelled_maps),
                     2 => Some(&mut self.cancelled_lvz),
@@ -882,6 +896,47 @@ fn settings_that_do_not_decode_end_the_visit_unanswered() {
             .any(|e| matches!(e, SessionEvent::Refused { .. } | SessionEvent::Closed(_)))
     );
     assert_ne!(replayed.state(), State::Closed);
+}
+
+/// A map-data packet too short to decode is a failed copy of the map: asked
+/// for again, not waited for for ever.
+#[test]
+fn a_map_data_packet_that_does_not_decode_is_asked_for_again() {
+    let mut zone = Zone {
+        malformed_maps: 1,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, events) = run(&mut zone, 3000, None, |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending()
+    });
+    assert_eq!(zone.requests, vec![0, 0, 2]);
+    assert_eq!(maps_ready(&events), vec![&map_bytes()[..]]);
+    assert_eq!(zone.answers.len(), 1);
+    assert_eq!(zone.answers[0].map_checksum, map_checksum_of(&map_bytes()));
+    assert_eq!(client.state(), State::Playing);
+}
+
+/// A map announcement that does not decode cannot be asked for again, and
+/// without it every answer would carry no map, or the last arena's: the visit
+/// ends with the reason, and the check is never answered.
+#[test]
+fn a_map_announcement_that_does_not_decode_ends_the_visit_unanswered() {
+    let mut zone = Zone {
+        malformed_list: true,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, events) = run(&mut zone, 3000, None, |z, c| {
+        z.disconnected && c.state() == State::Closed
+    });
+    assert!(zone.answers.is_empty());
+    assert!(zone.requests.is_empty());
+    assert!(events.iter().any(|e| matches!(
+        e,
+        SessionEvent::Refused { reason } if reason.contains("map announcement")
+    )));
+    assert_eq!(client.state(), State::Closed);
 }
 
 /// A `Write` the test can read back after the session is gone.
