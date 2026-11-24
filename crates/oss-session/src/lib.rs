@@ -442,11 +442,14 @@ pub enum SessionEvent {
         data: Vec<u8>,
         downloaded: bool,
     },
-    /// The map came down damaged twice: its CRC was not the one the zone announced,
-    /// or it would not decompress. The session has hung up rather than answer the
-    /// zone's security checks with a map known to be wrong; a
-    /// [`SessionEvent::Closed`] follows. `reason` says what was wrong with the last
-    /// copy, for the log and for the player.
+    /// The map cannot be used: it came down damaged twice (its CRC was not the
+    /// one the zone announced, or it would not decompress), or it has the zone's
+    /// CRC but does not read as a map. The session has hung up rather than
+    /// answer the zone's security checks with a map known to be wrong; a
+    /// [`SessionEvent::Closed`] follows. `reason` finishes a sentence that
+    /// starts with the map's name -- "arrived damaged twice (...)", "has the
+    /// zone's checksum but does not read as a map (...)" -- for the log and
+    /// for the player.
     MapRejected {
         name: String,
         reason: String,
@@ -1559,6 +1562,9 @@ impl Session {
 
     /// Offers a cached copy of the map named in [`SessionEvent::MapNeeded`]. Returns
     /// false (and changes nothing) if it doesn't match the server's checksum.
+    /// A copy that matches but does not read as a map ends the visit
+    /// ([`SessionEvent::MapRejected`]), since downloading it would only bring
+    /// the same bytes.
     pub fn use_cached_map(&mut self, data: &[u8]) -> bool {
         let Some(info) = self.map.as_ref() else {
             return false;
@@ -1859,22 +1865,38 @@ impl Session {
             self.downloads.retain(|&i| i != 0);
             self.downloads.push_front(0);
         } else {
-            log::error!("map {name} arrived damaged again ({problem}); leaving the zone");
-            self.downloads.clear();
-            self.events.push_back(SessionEvent::MapRejected {
-                name,
-                reason: problem,
-            });
-            self.disconnect();
+            self.reject_map(name, format!("arrived damaged twice ({problem})"));
         }
     }
 
+    /// Ends the visit because the map cannot be used ([`SessionEvent::MapRejected`]):
+    /// every security answer carries the map, so playing on would only answer
+    /// with a checksum known to be wrong. A check waiting for the map stays
+    /// unanswered. Playback, which has no zone to answer, only logs it.
+    fn reject_map(&mut self, name: String, reason: String) {
+        if self.playback {
+            log::warn!("map {name} in the recording {reason}; not used");
+            return;
+        }
+        log::error!("map {name} {reason}; leaving the zone");
+        self.downloads.clear();
+        self.events
+            .push_back(SessionEvent::MapRejected { name, reason });
+        self.disconnect();
+    }
+
     fn set_map(&mut self, name: String, data: Vec<u8>, downloaded: bool) {
+        // Its CRC is the zone's, so another copy would be the same bytes: there
+        // is nothing to ask for again. An empty map in its place would answer
+        // every check with a checksum known to be wrong.
         let tiles = match oss_formats::Level::parse(&data) {
             Ok(level) => level.tile_grid().cells().to_vec(),
             Err(e) => {
-                log::warn!("map {name} doesn't parse ({e}); using an empty map");
-                vec![0; 1024 * 1024]
+                self.reject_map(
+                    name,
+                    format!("has the zone's checksum but does not read as a map ({e})"),
+                );
+                return;
             }
         };
         if let Some(info) = self.map.as_mut() {

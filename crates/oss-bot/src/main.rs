@@ -206,8 +206,8 @@ impl Bot {
                     self.map = Some(data);
                 }
                 SessionEvent::MapRejected { name, reason } => log::error!(
-                    "[{}] map {name} arrived damaged twice ({reason}); left the zone \
-                     rather than answer its checks with it",
+                    "[{}] map {name} {reason}; left the zone rather than answer its \
+                     checks with it",
                     self.label
                 ),
                 SessionEvent::Seeds { green_seed, .. } => self.green_seed = green_seed,
