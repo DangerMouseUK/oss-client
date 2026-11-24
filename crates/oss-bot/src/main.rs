@@ -205,6 +205,11 @@ impl Bot {
                     self.log(format_args!("map {name} ready ({} bytes)", data.len()));
                     self.map = Some(data);
                 }
+                SessionEvent::MapRejected { name, reason } => log::error!(
+                    "[{}] map {name} arrived damaged twice ({reason}); left the zone \
+                     rather than answer its checks with it",
+                    self.label
+                ),
                 SessionEvent::Seeds { green_seed, .. } => self.green_seed = green_seed,
                 SessionEvent::Playing => {
                     let n = self.session.players().count();

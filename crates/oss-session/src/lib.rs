@@ -355,7 +355,6 @@ pub enum SessionEvent {
         received: usize,
         total: usize,
     },
-    /// The map is ready (decompressed `.lvl` bytes). Cache it if it was downloaded.
     /// The arena's extra files (LVZ), listed after its map. Answer each with
     /// [`Session::use_cached_file`] or [`Session::download_file`].
     FilesListed(Vec<ArenaFile>),
@@ -427,10 +426,21 @@ pub enum SessionEvent {
     ObjectsToggled(Vec<(u16, bool)>),
     /// LVZ object properties changed (S2C `0x36`).
     ObjectsChanged(Vec<ObjectChange>),
+    /// The map is ready (decompressed `.lvl` bytes) and its CRC is the one the
+    /// zone announced. Cache it if it was downloaded.
     MapReady {
         name: String,
         data: Vec<u8>,
         downloaded: bool,
+    },
+    /// The map came down damaged twice: its CRC was not the one the zone announced,
+    /// or it would not decompress. The session has hung up rather than answer the
+    /// zone's security checks with a map known to be wrong; a
+    /// [`SessionEvent::Closed`] follows. `reason` says what was wrong with the last
+    /// copy, for the log and for the player.
+    MapRejected {
+        name: String,
+        reason: String,
     },
     /// The arena entry sequence finished; positions can flow.
     Playing,
@@ -533,9 +543,18 @@ pub struct ArenaFile {
 struct MapInfo {
     name: String,
     checksum: u32,
-    /// Row-major 1024×1024 tiles, for the security map checksum.
+    /// Row-major 1024×1024 tiles, for the security map checksum. Set only from a
+    /// map whose CRC matched `checksum`.
     tiles: Option<Vec<u8>>,
+    /// Downloads of this map that arrived damaged (a checksum that is not the
+    /// zone's, or data that would not decompress).
+    bad_downloads: u8,
 }
+
+/// How many damaged copies of the map a session takes before it gives up: the
+/// first is asked for again, the second ends the visit
+/// ([`SessionEvent::MapRejected`]).
+const MAX_BAD_MAP_DOWNLOADS: u8 = 2;
 
 pub struct Session {
     conn: Connection,
@@ -1169,10 +1188,18 @@ impl Session {
                     },
                 };
                 self.files = match &m {
+                    // An entry with no name, checksum or size is a slot the zone
+                    // keeps but does not offer. A subgame zone was seen listing
+                    // one to a client that had not asked for optional files,
+                    // which keeps the indices after it the same; asked for anyway,
+                    // it sent the file behind the slot, under a name the list
+                    // never gave. Real Continuum is not known to ask for one. It
+                    // is skipped; the indices of the others are kept as they are.
                     MapFilename::Files(files) => files
                         .iter()
                         .enumerate()
                         .skip(1)
+                        .filter(|(_, f)| !fixed_to_string(f.name.as_bytes()).is_empty())
                         .map(|(i, f)| ArenaFile {
                             index: i.min(u16::MAX as usize) as u16,
                             name: fixed_to_string(f.name.as_bytes()),
@@ -1187,6 +1214,7 @@ impl Session {
                     name: name.clone(),
                     checksum,
                     tiles: None,
+                    bad_downloads: 0,
                 });
                 if self.state == State::EnteringArena || self.state == State::Playing {
                     self.state = State::WaitingForMap;
@@ -1205,10 +1233,17 @@ impl Session {
                     .map
                     .as_ref()
                     .is_some_and(|i| i.name.eq_ignore_ascii_case(&name));
-                if !is_map && let Some(f) = self.file_named(&name).cloned() {
+                // Routed by name only. A file the arena did not list is not the map,
+                // whatever is being fetched: taking one for the map used to replace
+                // a good map with an LVZ's bytes, and the next security answer then
+                // carried a map checksum the zone could not accept.
+                if is_map {
+                    self.on_map_data(&m.data);
+                } else if let Some(f) = self.file_named(&name).cloned() {
                     self.on_file_data(&f, m.data);
                 } else {
-                    self.on_map_data(&m.data);
+                    log::info!("the zone sent {name:?}, a file this arena does not list; ignored");
+                    return;
                 }
                 self.downloading = None;
                 self.next_download();
@@ -1715,25 +1750,61 @@ impl Session {
         });
     }
 
+    /// The map arrived. It is used only if its CRC is the one the zone announced:
+    /// the map is part of every security answer, so a map known to be wrong would
+    /// be an answer known to be wrong. A damaged copy is asked for once more; a
+    /// second one ends the visit with [`SessionEvent::MapRejected`], and any
+    /// security check waiting for the map is never answered.
     fn on_map_data(&mut self, compressed: &[u8]) {
         let Some(info) = self.map.as_ref() else {
             return;
         };
-        let data = match map::inflate(compressed) {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("map download for {} is corrupt: {e}", info.name);
-                return;
-            }
-        };
-        if checksum::crc32(&data) != info.checksum {
-            log::warn!(
-                "map {} checksum differs from the server's; using it anyway",
+        if info.tiles.is_some() {
+            // A repeat of a map already accepted changes nothing.
+            log::debug!(
+                "map {} arrived again; keeping the copy already checked",
                 info.name
             );
+            return;
         }
         let name = info.name.clone();
-        self.set_map(name, data, true);
+        let expected = info.checksum;
+        let problem = match map::inflate(compressed) {
+            Ok(data) => {
+                let got = checksum::crc32(&data);
+                if got == expected {
+                    self.set_map(name, data, true);
+                    return;
+                }
+                format!("its checksum is {got:08x}, not the {expected:08x} the zone announced")
+            }
+            Err(e) => format!("it does not decompress ({e})"),
+        };
+        let bad = match self.map.as_mut() {
+            Some(info) => {
+                info.bad_downloads = info.bad_downloads.saturating_add(1);
+                info.bad_downloads
+            }
+            None => return,
+        };
+        if self.playback {
+            // A recording is played as it was; there is no zone to ask again.
+            log::warn!("map {name} in the recording is damaged ({problem}); not used");
+        } else if bad < MAX_BAD_MAP_DOWNLOADS {
+            log::warn!("map {name} arrived damaged ({problem}); asking for it again");
+            // Ahead of any files still queued: a security check may be waiting
+            // for the map, and the files are not.
+            self.downloads.retain(|&i| i != 0);
+            self.downloads.push_front(0);
+        } else {
+            log::error!("map {name} arrived damaged again ({problem}); leaving the zone");
+            self.downloads.clear();
+            self.events.push_back(SessionEvent::MapRejected {
+                name,
+                reason: problem,
+            });
+            self.disconnect();
+        }
     }
 
     fn set_map(&mut self, name: String, data: Vec<u8>, downloaded: bool) {
@@ -1796,6 +1867,10 @@ impl Session {
                 })
             })
             .unwrap_or(0);
+        log::debug!(
+            "security check {key:08x}: settings checksum {settings_checksum:08x}, \
+             map checksum {map_checksum:08x}"
+        );
         // The profile supplies only what depends on the client binary; everything
         // above and below it is the same for either client.
         let answer = self.cfg.client.security(SecurityChallenge {

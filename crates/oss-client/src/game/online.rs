@@ -496,6 +496,16 @@ impl Online {
                     }
                     self.map = Some((name.clone(), data.clone()));
                 }
+                // The session has hung up already; the `Closed` that follows
+                // keeps this sentence rather than its own.
+                SessionEvent::MapRejected { name, reason } => {
+                    log::error!("map {name} arrived damaged twice ({reason}); left the zone");
+                    self.error = Some(format!(
+                        "The zone's map {name} arrived damaged twice, so the client left \
+                         rather than play on a map the zone would not accept. Try again; \
+                         if it keeps happening, please report it."
+                    ));
+                }
                 SessionEvent::Seeds {
                     green_seed,
                     door_seed,
