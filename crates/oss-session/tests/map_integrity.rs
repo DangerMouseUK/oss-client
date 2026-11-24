@@ -81,8 +81,73 @@ const DAMAGED_LVZ: &[u8] = b"CONT listed lvz bytez";
 
 /// The security map checksum of a level's bytes, as the session computes it.
 fn map_checksum_of(level: &[u8]) -> u32 {
-    let grid = oss_formats::Level::parse(level).unwrap().tile_grid();
+    let grid = oss_formats::Level::parse(level)
+        .unwrap()
+        .server_tile_grid()
+        .0;
     checksum::map_checksum(KEY, |x, y| grid.get(x as u32, y as u32))
+}
+
+/// A map with large objects that cover walls listed before them, on squares
+/// the checksum samples for [`KEY`]: a large asteroid (2x2) over one wall and
+/// a wormhole (5x5) over another, plus a wall nothing covers. Away from the
+/// edges, where the servers disagree about wrapping.
+fn big_object_map_bytes() -> Vec<u8> {
+    let (x, y) = sample_origin();
+    let (x1, y1) = (x + 31 * 10, y + 32 * 10);
+    let (x2, y2) = (x + 31 * 12, y + 32 * 12);
+    [
+        tile(x1, y1, 1),
+        tile(x2, y2, 4),
+        tile(x + 31 * 14, y + 32 * 14, 7),
+        tile(x1 - 1, y1 - 1, 217),
+        tile(x2 - 2, y2 - 3, 220),
+    ]
+    .concat()
+}
+
+/// ASSS 1.4.4's map checksum, transcribed here from `core/mapdata.c` rather
+/// than taken from `oss-formats`, so that this test can disagree with it.
+/// `read_plain_tile_data` puts each tile into a sparse array in file order,
+/// and a tile type of 217 or above fills its whole area (217: 2x2, 219: 6x6,
+/// 220: 5x5) with its own type, over whatever was there. `GetChecksum` then
+/// adds `key ^ tile` for tiles 1..=160 and 171 on every 31st column and 32nd
+/// row from the key's remainders (signed; equal to unsigned for this key).
+fn asss_map_checksum(level: &[u8], key: u32) -> u32 {
+    let mut tiles = std::collections::HashMap::new();
+    for w in level.as_chunks::<4>().0 {
+        let v = u32::from_le_bytes(*w);
+        let (x, y, t) = (v & 0xFFF, (v >> 12) & 0xFFF, (v >> 24) as u8);
+        if x >= 1024 || y >= 1024 {
+            continue;
+        }
+        let size = match t {
+            217 => 2,
+            219 => 6,
+            220 => 5,
+            _ => 1,
+        };
+        for dx in 0..size {
+            for dy in 0..size {
+                tiles.insert((x + dx, y + dy), t);
+            }
+        }
+    }
+    let save = key as i32;
+    let mut sum = key;
+    let mut y = save % 32;
+    while y < 1024 {
+        let mut x = save % 31;
+        while x < 1024 {
+            let t = tiles.get(&(x as u32, y as u32)).copied().unwrap_or(0);
+            if (1..=160).contains(&t) || t == 171 {
+                sum = sum.wrapping_add(save as u32 ^ u32::from(t));
+            }
+            x += 31;
+        }
+        y += 32;
+    }
+    sum
 }
 
 fn zlib(data: &[u8]) -> Vec<u8> {
@@ -615,6 +680,37 @@ fn a_map_that_does_not_read_as_one_ends_the_visit_unanswered() {
         )));
         assert_ne!(replayed.state(), State::Closed);
     }
+}
+
+/// The map in the security answer is the map as the servers hold it: a large
+/// object covers the whole of its area, walls listed before it included.
+/// ASSS, Subspace Server .NET and oss-server all compute the checksum they
+/// expect that way; the plain grid, which the session used to answer from,
+/// keeps the covered walls and gives a different sum.
+#[test]
+fn the_map_checksum_counts_large_objects_over_their_whole_area() {
+    let level = big_object_map_bytes();
+    let plain = oss_formats::Level::parse(&level).unwrap().tile_grid();
+    let plain = checksum::map_checksum(KEY, |x, y| plain.get(x as u32, y as u32));
+    let want = asss_map_checksum(&level, KEY);
+    assert_ne!(plain, want, "the map tells the two grids apart");
+    assert_eq!(
+        asss_map_checksum(&map_bytes(), KEY),
+        map_checksum_of(&map_bytes()),
+        "the transcription agrees where there is nothing to expand"
+    );
+
+    let mut zone = Zone {
+        map: Some(level),
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, _) = run(&mut zone, 3000, None, |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending()
+    });
+    assert_eq!(zone.answers.len(), 1);
+    assert_eq!(zone.answers[0].map_checksum, want);
+    assert_eq!(client.state(), State::Playing);
 }
 
 /// A `Write` the test can read back after the session is gone.

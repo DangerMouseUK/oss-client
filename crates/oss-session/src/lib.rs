@@ -555,8 +555,9 @@ pub struct ArenaFile {
 struct MapInfo {
     name: String,
     checksum: u32,
-    /// Row-major 1024×1024 tiles, for the security map checksum. Set only from a
-    /// map whose CRC matched `checksum`.
+    /// Row-major 1024×1024 tiles, for the security map checksum, with large
+    /// objects expanded over their area. Set only from a map whose CRC matched
+    /// `checksum` and which read as a map.
     tiles: Option<Vec<u8>>,
     /// Downloads of this map that arrived damaged (a checksum that is not the
     /// zone's, or data that would not decompress).
@@ -1890,7 +1891,13 @@ impl Session {
         // is nothing to ask for again. An empty map in its place would answer
         // every check with a checksum known to be wrong.
         let tiles = match oss_formats::Level::parse(&data) {
-            Ok(level) => level.tile_grid().cells().to_vec(),
+            // The grid as servers hold it, with large asteroids, stations and
+            // wormholes covering their whole area. ASSS (`mapdata.c`,
+            // `read_plain_tile_data`), Subspace Server .NET (`BasicLvl.cs`,
+            // `ReadPlainTileData`) and oss-server all compute the checksum
+            // they expect from that grid; the plain one differs wherever an
+            // object covers a wall listed before it.
+            Ok(level) => level.server_tile_grid().0.cells().to_vec(),
             Err(e) => {
                 self.reject_map(
                     name,
