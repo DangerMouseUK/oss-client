@@ -224,6 +224,14 @@ struct Zone {
     cancelled_lvz: u32,
     /// Send the security check with the arena, before the map is asked for.
     challenge_on_entry: bool,
+    /// Send the check first of all, before the settings and the map list.
+    challenge_first: bool,
+    /// Announce no map at all.
+    no_map: bool,
+    /// Send the settings only once the map has gone, with the listed LVZ.
+    settings_late: bool,
+    /// Send the settings cut short, so they do not decode.
+    short_settings: bool,
     /// Push [`HIDDEN_NAME`] unasked once the map has gone, then send the check.
     push_hidden: bool,
     settings: Vec<u8>,
@@ -267,7 +275,14 @@ impl Zone {
                     }),
                     true,
                 );
-                server.send(&ADDR, &self.settings, true);
+                if self.challenge_first {
+                    server.send(&ADDR, &security(), true);
+                }
+                if self.short_settings {
+                    server.send(&ADDR, &self.settings[..700], true);
+                } else if !self.settings_late {
+                    server.send(&ADDR, &self.settings, true);
+                }
                 let me = PlayerData {
                     pid: 5,
                     name: FixedStr::new(b"tester"),
@@ -275,7 +290,9 @@ impl Zone {
                     ..Default::default()
                 };
                 server.send(&ADDR, &packet(&PlayerEntering { players: vec![me] }), true);
-                server.send(&ADDR, &packet(&file_list(&self.the_map())), true);
+                if !self.no_map {
+                    server.send(&ADDR, &packet(&file_list(&self.the_map())), true);
+                }
                 server.send(&ADDR, &packet(&EnteringArena {}), true);
                 if self.challenge_on_entry {
                     server.send(&ADDR, &security(), true);
@@ -284,6 +301,9 @@ impl Zone {
             C2SPacket::MapRequest(r) => {
                 let index = r.index.unwrap_or(0);
                 self.requests.push(index);
+                if index == 2 && self.settings_late {
+                    server.send(&ADDR, &self.settings, true);
+                }
                 // A transfer whose first byte is 0 is no packet at all, so the
                 // client's transport cancels it on its first piece.
                 let left = match index {
@@ -788,6 +808,80 @@ fn a_cancelled_lvz_transfer_is_asked_for_again_then_left_out() {
     );
     assert_eq!(zone.answers.len(), 1);
     assert_eq!(client.state(), State::Playing);
+}
+
+/// A check that arrives before the arena's settings waits for them, and for
+/// the map, rather than going out with a settings checksum of 0. Here the
+/// settings come last of all, after the map.
+#[test]
+fn a_check_before_the_settings_waits_for_them() {
+    let mut zone = Zone {
+        challenge_first: true,
+        settings_late: true,
+        ..Default::default()
+    };
+    let (client, _) = run(&mut zone, 3000, None, |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending()
+    });
+    assert_eq!(zone.answers.len(), 1);
+    assert_eq!(
+        zone.answers[0].settings_checksum,
+        checksum::settings_checksum(KEY, &zone.settings)
+    );
+    assert_eq!(zone.answers[0].map_checksum, map_checksum_of(&map_bytes()));
+    assert_eq!(client.state(), State::Playing);
+}
+
+/// A zone that announces no map has none: the answer is the sum over an empty
+/// map, which is the key itself (ASSS `GetChecksum`), not 0.
+#[test]
+fn with_no_map_announced_the_map_checksum_is_that_of_an_empty_map() {
+    let mut zone = Zone {
+        no_map: true,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    run(&mut zone, 3000, None, |z, _| !z.answers.is_empty());
+    assert_eq!(zone.answers.len(), 1);
+    assert_eq!(zone.answers[0].map_checksum, KEY);
+    assert_eq!(zone.requests, Vec::<u16>::new());
+}
+
+/// Settings that do not decode cannot be asked for again, and every answer is
+/// built from them: the visit ends, with the reason, and the check is never
+/// answered. Played back, the recording carries on.
+#[test]
+fn settings_that_do_not_decode_end_the_visit_unanswered() {
+    let mut zone = Zone {
+        short_settings: true,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let recording = Shared::default();
+    let (client, events) = run(&mut zone, 3000, Some(recording.clone()), |z, c| {
+        z.disconnected && c.state() == State::Closed
+    });
+    assert!(zone.answers.is_empty());
+    let refused = events.iter().position(|e| {
+        matches!(
+            e,
+            SessionEvent::Refused { reason } if reason.contains("arena settings")
+        )
+    });
+    let closed = events
+        .iter()
+        .position(|e| matches!(e, SessionEvent::Closed(_)));
+    assert!(refused.expect("refused") < closed.expect("closed"));
+    assert_eq!(client.state(), State::Closed);
+    drop(client);
+
+    let (replayed, seen) = play_back(&recording);
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Refused { .. } | SessionEvent::Closed(_)))
+    );
+    assert_ne!(replayed.state(), State::Closed);
 }
 
 /// A `Write` the test can read back after the session is gone.

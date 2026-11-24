@@ -210,6 +210,9 @@ impl Bot {
                      checks with it",
                     self.label
                 ),
+                SessionEvent::Refused { reason } => {
+                    log::error!("[{}] {reason}; left the zone", self.label)
+                }
                 SessionEvent::Seeds { green_seed, .. } => self.green_seed = green_seed,
                 SessionEvent::Playing => {
                     let n = self.session.players().count();

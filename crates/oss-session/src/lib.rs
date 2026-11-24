@@ -507,6 +507,14 @@ pub enum SessionEvent {
         prize: i16,
     },
     Closed(DisconnectReason),
+    /// The zone sent something a security answer is built from in a form the
+    /// session cannot read -- its arena settings or its map announcement -- and
+    /// neither can be asked for again, so the session has hung up rather than
+    /// answer with checksums known to be wrong. A [`SessionEvent::Closed`]
+    /// follows. `reason` is a sentence for the player.
+    Refused {
+        reason: String,
+    },
     /// The zone sent the player on to another zone (S2C `0x3B`), and this
     /// session has hung up on the first. Connect to `server` with the same name
     /// and password, put `login_id` in [`SessionConfig::redirect_id`], and enter
@@ -1084,10 +1092,7 @@ impl Session {
         let packet = match S2CPacket::decode(data) {
             Ok(p) => p,
             Err(e) => {
-                log::debug!(
-                    "bad S2C packet {:#04x}: {e}",
-                    data.first().copied().unwrap_or(0)
-                );
+                self.on_unreadable(data.first().copied().unwrap_or(0), &e.to_string());
                 return;
             }
         };
@@ -1178,6 +1183,7 @@ impl Session {
                 self.settings_raw = data.to_vec();
                 self.settings = Some(cs.clone());
                 self.events.push_back(SessionEvent::Settings(cs));
+                self.answer_held_check();
             }
             S2CPacket::PlayerEntering(pe) => {
                 for d in pe.players {
@@ -1352,6 +1358,7 @@ impl Session {
                 .push_back(SessionEvent::ObjectsChanged(m.changes)),
             S2CPacket::EnteringArena(_) => {
                 self.entering_done = true;
+                self.answer_held_check();
                 self.maybe_playing();
             }
             S2CPacket::Security(s) => self.on_security(now_ms, &s),
@@ -1897,11 +1904,16 @@ impl Session {
     /// ASSS `net.c` and oss-net alike), which clears it, before it can answer
     /// the new request.
     fn on_transfer_cancelled(&mut self) {
+        self.on_transfer_failed("its transfer was cancelled");
+    }
+
+    /// The request in flight will bring nothing usable (`problem` says why).
+    fn on_transfer_failed(&mut self, problem: &str) {
         let Some(index) = self.downloading.take() else {
-            log::debug!("a transfer nobody asked for was cancelled");
+            log::debug!("a transfer nobody asked for failed ({problem})");
             return;
         };
-        let problem = "its transfer was cancelled".to_string();
+        let problem = problem.to_string();
         if index == 0 {
             match self.map.as_ref() {
                 Some(m) if m.tiles.is_none() => {
@@ -1967,9 +1979,7 @@ impl Session {
             data,
             downloaded,
         });
-        if let Some(key) = self.pending_security.take() {
-            self.answer_security(self.last_now_ms, key);
-        }
+        self.answer_held_check();
         self.maybe_playing();
     }
 
@@ -1982,12 +1992,75 @@ impl Session {
         if s.key == 0 {
             return;
         }
-        let map_loading = self.map.as_ref().is_some_and(|m| m.tiles.is_none());
-        if map_loading {
+        if self.check_must_wait() {
             self.pending_security = Some(s.key);
         } else {
             self.answer_security(now_ms, s.key);
         }
+    }
+
+    /// Whether a security check has to wait: for the arena's settings, which
+    /// every answer checksums; for a map the zone announced and that is still on
+    /// its way; or, with no map announced, for the end of the arena entry
+    /// (S2C `0x02`), since servers announce the map before it (ASSS
+    /// `arenaman.c` sends `0x29`, then `0x02`) and only then is "no map" known.
+    /// Answering earlier would send a checksum known to be wrong, where it
+    /// used to send 0 for missing settings.
+    fn check_must_wait(&self) -> bool {
+        self.settings_raw.is_empty()
+            || match &self.map {
+                Some(m) => m.tiles.is_none(),
+                None => !self.entering_done,
+            }
+    }
+
+    /// Answers a held security check once nothing it needs is missing.
+    fn answer_held_check(&mut self) {
+        if self.pending_security.is_some() && !self.check_must_wait() {
+            let key = self.pending_security.take().expect("checked above");
+            self.answer_security(self.last_now_ms, key);
+        }
+    }
+
+    /// A packet of a known type that did not decode. Most are dropped, as
+    /// before: nothing is built from them. Two are refused instead, because a
+    /// security answer is built from each and neither can be asked for again:
+    /// unreadable settings would leave the previous ones (or none) in every
+    /// answer, and an unreadable map announcement would leave no map, or the
+    /// previous arena's. A map-data packet that does not decode is a failed
+    /// copy of whatever is being fetched.
+    fn on_unreadable(&mut self, kind: u8, error: &str) {
+        match kind {
+            s2c::kind::SETTINGS | s2c::kind::MAP_FILENAME => {
+                let what = if kind == s2c::kind::SETTINGS {
+                    "arena settings"
+                } else {
+                    "map announcement"
+                };
+                self.refuse(format!(
+                    "The zone sent its {what} in a form this client cannot read ({error})"
+                ));
+            }
+            s2c::kind::MAP_DATA if !self.playback => {
+                log::warn!("a file transfer arrived malformed ({error})");
+                self.on_transfer_failed("it arrived malformed");
+            }
+            _ => log::debug!("bad S2C packet {kind:#04x}: {error}"),
+        }
+    }
+
+    /// Ends the visit because the zone sent something the session needs and
+    /// cannot use ([`SessionEvent::Refused`]). Playback only logs it.
+    fn refuse(&mut self, reason: String) {
+        if self.playback {
+            log::warn!("{reason}; in a recording, played on");
+            return;
+        }
+        log::error!("{reason}; leaving the zone");
+        self.pending_security = None;
+        self.downloads.clear();
+        self.events.push_back(SessionEvent::Refused { reason });
+        self.disconnect();
     }
 
     fn answer_security(&mut self, now_ms: u64, key: u32) {
@@ -2007,7 +2080,11 @@ impl Session {
                     }
                 })
             })
-            .unwrap_or(0);
+            // No map announced by the end of the arena entry: the zone has
+            // none (see `check_must_wait`). ASSS's `GetChecksum`
+            // (`mapdata.c`) then returns the key itself, which is the sum over
+            // an empty map; Subspace Server .NET does not check the field.
+            .unwrap_or_else(|| checksum::map_checksum(key, |_, _| 0));
         log::debug!(
             "security check {key:08x}: settings checksum {settings_checksum:08x}, \
              map checksum {map_checksum:08x}"

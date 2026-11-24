@@ -506,6 +506,13 @@ impl Online {
                          happening, please report it."
                     ));
                 }
+                // As for the map: the `Closed` that follows keeps this sentence.
+                SessionEvent::Refused { reason } => {
+                    log::error!("{reason}; left the zone");
+                    self.error = Some(format!(
+                        "{reason}, so the client left rather than answer the zone's                          checks with it. Please report it."
+                    ));
+                }
                 SessionEvent::Seeds {
                     green_seed,
                     door_seed,
