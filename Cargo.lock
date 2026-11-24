@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "oss-assets"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "gif",
  "png",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "oss-bot"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "env_logger",
  "log",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "oss-client"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "bytemuck",
  "cpal",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "oss-credstore"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "apple-native-keyring-store",
  "keyring-core",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "oss-formats"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "miniz_oxide 0.8.9",
  "oss-proto",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "oss-net"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.4.3",
@@ -2292,11 +2292,11 @@ dependencies = [
 
 [[package]]
 name = "oss-proto"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 
 [[package]]
 name = "oss-session"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "flate2",
  "log",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "oss-sim"
-version = "0.1.0-dev7"
+version = "0.1.0-dev8"
 dependencies = [
  "oss-proto",
 ]
