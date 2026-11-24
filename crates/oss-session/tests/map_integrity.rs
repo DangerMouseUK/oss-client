@@ -17,9 +17,12 @@
 //! 3. **A damaged map is never used.** One damaged copy is asked for again; a
 //!    second ends the visit with [`SessionEvent::MapRejected`], and a security
 //!    check held for the map is never answered.
+//! 4. **A damaged LVZ is never used either.** One damaged copy is asked for again;
+//!    a second leaves the file out ([`SessionEvent::FileRejected`]) and the visit
+//!    goes on, since no answer to the zone depends on it.
 //!
-//! Playback of a recording that holds a damaged map neither refuses nor hangs up:
-//! there is no zone to ask again.
+//! Playback of a recording that holds a damaged map or file neither refuses nor
+//! hangs up: there is no zone to ask again.
 
 use std::io::Write;
 
@@ -73,6 +76,8 @@ fn hidden_bytes() -> Vec<u8> {
 }
 
 const LVZ: &[u8] = b"CONT listed lvz bytes";
+/// The listed LVZ with one byte changed, so its CRC is not the listed one.
+const DAMAGED_LVZ: &[u8] = b"CONT listed lvz bytez";
 
 /// The security map checksum of a level's bytes, as the session computes it.
 fn map_checksum_of(level: &[u8]) -> u32 {
@@ -133,6 +138,8 @@ fn file_list() -> MapFilename {
 struct Zone {
     /// Damaged copies of the map to send before a good one.
     damaged_maps: u32,
+    /// Damaged copies of the listed LVZ to send before a good one.
+    damaged_lvz: u32,
     /// Send the security check with the arena, before the map is asked for.
     challenge_on_entry: bool,
     /// Push [`HIDDEN_NAME`] unasked once the map has gone, then send the check.
@@ -197,6 +204,10 @@ impl Zone {
                         map_data(MAP_NAME, zlib(&other_map_bytes()))
                     }
                     0 => map_data(MAP_NAME, zlib(&map_bytes())),
+                    2 if self.damaged_lvz > 0 => {
+                        self.damaged_lvz -= 1;
+                        map_data(LVZ_NAME, DAMAGED_LVZ.to_vec())
+                    }
                     2 => map_data(LVZ_NAME, LVZ.to_vec()),
                     // The unnamed slot, answered as a subgame zone answers it.
                     _ => map_data(HIDDEN_NAME, hidden_bytes()),
@@ -425,6 +436,38 @@ fn a_map_that_stays_damaged_ends_the_visit_unanswered() {
 
     // The same visit played back: the damaged map is not used, and playback,
     // which has no zone to ask again, neither refuses nor hangs up.
+    let (replayed, seen) = play_back(&recording);
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, SessionEvent::MapNeeded { .. }))
+    );
+    assert!(!seen.iter().any(|e| matches!(
+        e,
+        SessionEvent::MapReady { .. } | SessionEvent::MapRejected { .. } | SessionEvent::Closed(_)
+    )));
+    assert_ne!(replayed.state(), State::Closed);
+}
+
+fn files_ready<'a>(events: &'a [SessionEvent], want: &str) -> Vec<&'a [u8]> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::FileReady { name, data, .. } if name == want => Some(&data[..]),
+            _ => None,
+        })
+        .collect()
+}
+
+fn files_rejected(events: &[SessionEvent], want: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::FileRejected { name, .. } if name == want))
+        .count()
+}
+
+/// Plays a recording back through a playback session, as the client's replay
+/// viewer does, and returns the session and everything it reported.
+fn play_back(recording: &Shared) -> (Session, Vec<SessionEvent>) {
     let bytes = recording.0.lock().unwrap().clone();
     let mut player = ReplayPlayer::from_bytes(&bytes).unwrap();
     let mut replayed = Session::playback(SessionConfig::default(), 0);
@@ -438,14 +481,72 @@ fn a_map_that_stays_damaged_ends_the_visit_unanswered() {
         }
         seen.extend(std::iter::from_fn(|| replayed.poll_event()));
     }
+    (replayed, seen)
+}
+
+#[test]
+fn a_damaged_lvz_is_asked_for_again_and_the_good_copy_used() {
+    let mut zone = Zone {
+        damaged_lvz: 1,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let (client, events) = run(&mut zone, 3000, None, |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending() && z.requests.len() >= 3
+    });
+
+    assert_eq!(zone.requests, vec![0, 2, 2], "the LVZ was asked for twice");
+    assert_eq!(
+        files_ready(&events, LVZ_NAME),
+        vec![LVZ],
+        "only the good copy"
+    );
+    assert_eq!(files_rejected(&events, LVZ_NAME), 0);
+    assert_eq!(zone.answers.len(), 1);
+    assert_eq!(client.state(), State::Playing);
+}
+
+#[test]
+fn an_lvz_that_stays_damaged_is_left_out_and_the_visit_goes_on() {
+    let mut zone = Zone {
+        damaged_lvz: u32::MAX,
+        challenge_on_entry: true,
+        ..Default::default()
+    };
+    let recording = Shared::default();
+    let (client, events) = run(&mut zone, 3000, Some(recording.clone()), |z, c| {
+        !z.answers.is_empty() && !c.downloads_pending() && z.requests.len() >= 3
+    });
+
+    assert_eq!(
+        zone.requests,
+        vec![0, 2, 2],
+        "asked once more, then no more"
+    );
+    assert!(
+        files_ready(&events, LVZ_NAME).is_empty(),
+        "a damaged LVZ is never handed on"
+    );
+    assert_eq!(
+        files_rejected(&events, LVZ_NAME),
+        1,
+        "and that is said once"
+    );
+    assert_eq!(zone.answers.len(), 1, "the check is still answered");
+    assert_eq!(zone.answers[0].map_checksum, map_checksum_of(&map_bytes()));
+    assert!(!events.iter().any(|e| matches!(e, SessionEvent::Closed(_))));
+    assert!(!zone.disconnected);
+    assert_eq!(client.state(), State::Playing);
+    drop(client);
+
+    // Played back, the damaged copies are neither used nor asked for again.
+    let (replayed, seen) = play_back(&recording);
+    assert!(files_ready(&seen, LVZ_NAME).is_empty());
+    assert_eq!(files_rejected(&seen, LVZ_NAME), 0);
     assert!(
         seen.iter()
-            .any(|e| matches!(e, SessionEvent::MapNeeded { .. }))
+            .any(|e| matches!(e, SessionEvent::MapReady { .. }))
     );
-    assert!(!seen.iter().any(|e| matches!(
-        e,
-        SessionEvent::MapReady { .. } | SessionEvent::MapRejected { .. } | SessionEvent::Closed(_)
-    )));
     assert_ne!(replayed.state(), State::Closed);
 }
 

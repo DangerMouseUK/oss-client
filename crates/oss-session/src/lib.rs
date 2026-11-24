@@ -358,11 +358,20 @@ pub enum SessionEvent {
     /// The arena's extra files (LVZ), listed after its map. Answer each with
     /// [`Session::use_cached_file`] or [`Session::download_file`].
     FilesListed(Vec<ArenaFile>),
-    /// An extra file is ready (raw bytes). Cache it if it was downloaded.
+    /// An extra file is ready (raw bytes) and its CRC is the one the zone
+    /// listed. Cache it if it was downloaded.
     FileReady {
         name: String,
         data: Vec<u8>,
         downloaded: bool,
+    },
+    /// An extra file came down damaged twice (its CRC was not the one the zone
+    /// listed), so it is left out: no [`SessionEvent::FileReady`] follows for it.
+    /// The visit goes on, since the files are not part of any answer to the
+    /// zone. `reason` says what was wrong with the last copy.
+    FileRejected {
+        name: String,
+        reason: String,
     },
     /// The zone's news file, as text ([`Session::request_news`] asked for it).
     News(String),
@@ -556,6 +565,10 @@ struct MapInfo {
 /// ([`SessionEvent::MapRejected`]).
 const MAX_BAD_MAP_DOWNLOADS: u8 = 2;
 
+/// The same for each extra file: the first damaged copy is asked for again, the
+/// second leaves the file out ([`SessionEvent::FileRejected`]).
+const MAX_BAD_FILE_DOWNLOADS: u8 = 2;
+
 pub struct Session {
     conn: Connection,
     cfg: SessionConfig,
@@ -571,6 +584,11 @@ pub struct Session {
     map: Option<MapInfo>,
     /// Extra files listed with the map.
     files: Vec<ArenaFile>,
+    /// Indices of listed files already accepted (downloaded with the right CRC,
+    /// or taken from a cache that matched). A repeat of one changes nothing.
+    files_accepted: std::collections::BTreeSet<u16>,
+    /// Damaged copies received so far, by file index.
+    files_bad: BTreeMap<u16, u8>,
     /// Flag ids the server reported as turf (static) flags.
     turf_flags: std::collections::BTreeSet<u16>,
     /// File requests waiting for the current transfer to finish (0 = the map).
@@ -653,6 +671,8 @@ impl Session {
             settings_raw: Vec::new(),
             map: None,
             files: Vec::new(),
+            files_accepted: Default::default(),
+            files_bad: BTreeMap::new(),
             downloads: VecDeque::new(),
             turf_flags: Default::default(),
             downloading: None,
@@ -1209,6 +1229,8 @@ impl Session {
                         .collect(),
                     MapFilename::Single { .. } => Vec::new(),
                 };
+                self.files_accepted.clear();
+                self.files_bad.clear();
                 self.downloads.clear();
                 self.map = Some(MapInfo {
                     name: name.clone(),
@@ -1581,6 +1603,7 @@ impl Session {
             return false;
         }
         let name = f.name.clone();
+        self.files_accepted.insert(f.index);
         if let Some(r) = self.recorder.as_mut() {
             r.file(self.last_now_ms, &name, data);
         }
@@ -1733,21 +1756,60 @@ impl Session {
         self.events.push_back(SessionEvent::News(text));
     }
 
+    /// A listed file arrived. It is used only if its CRC is the one the zone
+    /// listed, as the map is: a damaged copy is asked for once more, and a second
+    /// one leaves the file out ([`SessionEvent::FileRejected`]). The visit goes
+    /// on without it, since no answer to the zone depends on the files.
     fn on_file_data(&mut self, file: &ArenaFile, data: Vec<u8>) {
-        if checksum::crc32(&data) != file.checksum {
-            log::warn!(
-                "{} checksum differs from the server's; using it anyway",
+        if self.files_accepted.contains(&file.index) {
+            log::debug!(
+                "{} arrived again; keeping the copy already checked",
                 file.name
             );
+            return;
         }
-        if let Some(r) = self.recorder.as_mut() {
-            r.file(self.last_now_ms, &file.name, &data);
+        let got = checksum::crc32(&data);
+        if got == file.checksum {
+            self.files_accepted.insert(file.index);
+            if let Some(r) = self.recorder.as_mut() {
+                r.file(self.last_now_ms, &file.name, &data);
+            }
+            self.events.push_back(SessionEvent::FileReady {
+                name: file.name.clone(),
+                data,
+                downloaded: true,
+            });
+            return;
         }
-        self.events.push_back(SessionEvent::FileReady {
-            name: file.name.clone(),
-            data,
-            downloaded: true,
-        });
+        let problem = format!(
+            "its checksum is {got:08x}, not the {:08x} the zone listed",
+            file.checksum
+        );
+        let bad = self.files_bad.entry(file.index).or_insert(0);
+        *bad = bad.saturating_add(1);
+        let bad = *bad;
+        if self.playback {
+            log::warn!(
+                "{} in the recording is damaged ({problem}); not used",
+                file.name
+            );
+        } else if bad < MAX_BAD_FILE_DOWNLOADS {
+            log::warn!(
+                "{} arrived damaged ({problem}); asking for it again",
+                file.name
+            );
+            self.downloads.retain(|&i| i != file.index);
+            self.downloads.push_front(file.index);
+        } else {
+            log::warn!(
+                "{} arrived damaged again ({problem}); left out of this arena",
+                file.name
+            );
+            self.events.push_back(SessionEvent::FileRejected {
+                name: file.name.clone(),
+                reason: problem,
+            });
+        }
     }
 
     /// The map arrived. It is used only if its CRC is the one the zone announced:

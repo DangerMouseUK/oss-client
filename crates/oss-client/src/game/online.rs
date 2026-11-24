@@ -537,6 +537,12 @@ impl Online {
                     }
                     self.files.push((name.clone(), data.clone()));
                 }
+                // Left out, so the arena is shown without it; counted as done so
+                // the progress line still reaches the end.
+                SessionEvent::FileRejected { name, reason } => {
+                    log::warn!("{name} arrived damaged twice ({reason}); shown without it");
+                    self.downloads.finished(name, 0);
+                }
                 SessionEvent::News(text) => {
                     if !self.is_replay()
                         && let Err(e) = self.cache.store(NEWS_FILE, text.as_bytes())
