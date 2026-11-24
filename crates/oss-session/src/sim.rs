@@ -123,7 +123,9 @@ pub fn arena_world(
     green_seed: u32,
 ) -> (World, Vec<MapObject>) {
     let (map, objects) = match oss_formats::Level::parse(map_lvl) {
-        Ok(level) => TileMap::from_entries(level.tiles.iter().map(|t| (t.x, t.y, t.tile))),
+        Ok(level) => TileMap::from_entries(level_entries(&level)),
+        // The session never hands on a map that does not read as one (it ends
+        // the visit instead), so this is only an offline caller's own bytes.
         Err(_) => (TileMap::empty(), Vec::new()),
     };
     let mut world = World::new(
@@ -136,9 +138,65 @@ pub fn arena_world(
     (world, objects)
 }
 
+/// A level's tiles in the order the servers apply them: those of any eLVL
+/// `TILE` chunks first, then the file's own tile list, each in file order
+/// (ASSS `mapdata.c` reads the chunks, then the list; so does
+/// `Level::server_tile_grid`). Order matters because a large object covers
+/// whatever was listed before it. The collision map used to take the file's
+/// list alone, so walls kept in a `TILE` chunk -- which the security
+/// checksum does count -- were not there to hit.
+fn level_entries(level: &oss_formats::Level) -> Vec<(u16, u16, u8)> {
+    let chunks = level.metadata.iter().flat_map(|m| &m.chunks);
+    let mut out: Vec<(u16, u16, u8)> = chunks
+        .filter_map(|c| match c {
+            oss_formats::Chunk::TileData(d) => Some(oss_formats::lvl::parse_tile_list(d).0),
+            _ => None,
+        })
+        .flatten()
+        .map(|t| (t.x, t.y, t.tile))
+        .collect();
+    out.extend(level.tiles.iter().map(|t| (t.x, t.y, t.tile)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Walls kept in an eLVL `TILE` chunk are walls to fly into, as they are
+    /// squares in the security checksum.
+    #[test]
+    fn walls_in_an_elvl_tile_chunk_are_in_the_collision_map() {
+        use oss_formats::{Chunk, Level, Metadata, TileEntry};
+        let wall = |x, y, tile| TileEntry { x, y, tile };
+        let mut chunk = Vec::new();
+        for t in [wall(100, 200, 5), wall(300, 300, 1)] {
+            chunk.extend_from_slice(&t.to_u32().to_le_bytes());
+        }
+        let level = Level {
+            metadata: Some(Metadata {
+                reserved: 0,
+                chunks: vec![Chunk::TileData(chunk)],
+            }),
+            // Listed after the chunk, so the file's own tile wins its square.
+            tiles: vec![wall(10, 20, 3), wall(300, 300, 7)],
+            ..Default::default()
+        };
+        let bytes = level.to_bytes();
+        let parsed = Level::parse(&bytes).unwrap();
+        assert!(
+            parsed.metadata.is_some(),
+            "the chunk survives the round trip"
+        );
+        let (world, _) = arena_world(&bytes, &ClientSettings::default(), 0);
+        assert_eq!(world.map.get(100, 200), 5, "from the chunk");
+        assert_eq!(world.map.get(10, 20), 3, "from the file's list");
+        assert_eq!(world.map.get(300, 300), 7, "the list after the chunk");
+        let grid = parsed.server_tile_grid().0;
+        for (x, y) in [(100, 200), (10, 20), (300, 300)] {
+            assert_eq!(world.map.get(x, y), grid.get(x as u32, y as u32));
+        }
+    }
 
     #[test]
     fn reports_ship_and_weapons() {
