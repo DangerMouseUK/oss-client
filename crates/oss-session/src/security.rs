@@ -171,24 +171,51 @@ pub fn built_in() -> Security {
 struct KeyFile {
     path: Option<PathBuf>,
     keys: BTreeMap<String, [u8; 32]>,
+    /// Lines that are neither comments nor keys, kept as they are and written
+    /// back: a line this version cannot read is not this version's to delete.
+    other_lines: Vec<String>,
+    /// The file exists but could not be read: why. Its keys are unknown, so it
+    /// is never written over.
+    unreadable: Option<String>,
 }
 
 impl KeyFile {
-    /// A missing or unreadable file is an empty list; bad lines are skipped.
+    /// A missing file is an empty list. A file that exists but cannot be read
+    /// is an empty list too, marked `unreadable`: it used to be taken for an
+    /// empty one and written over at the next save, losing every key in it.
+    /// Lines that are not keys are kept for writing back.
     fn load(path: &Path) -> Self {
         let mut keys = BTreeMap::new();
-        if let Ok(text) = std::fs::read_to_string(path) {
-            for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
-                if let Some((server, key)) = line.split_once(char::is_whitespace)
-                    && let Some(k) = unhex(key.trim())
-                {
-                    keys.insert(server.to_ascii_lowercase(), k);
+        let mut other_lines = Vec::new();
+        let mut unreadable = None;
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let lines = text.lines().map(str::trim);
+                for line in lines.filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                    if let Some((server, key)) = line.split_once(char::is_whitespace)
+                        && let Some(k) = unhex(key.trim())
+                    {
+                        keys.insert(server.to_ascii_lowercase(), k);
+                    } else {
+                        log::warn!(
+                            "{}: a line that is not a key is kept as it is",
+                            path.display()
+                        );
+                        other_lines.push(line.to_string());
+                    }
                 }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                log::error!("{} could not be read: {e}", path.display());
+                unreadable = Some(e.to_string());
             }
         }
         Self {
             path: Some(path.to_path_buf()),
             keys,
+            other_lines,
+            unreadable,
         }
     }
 
@@ -198,11 +225,22 @@ impl KeyFile {
 
     /// Adds or replaces a key and saves the file under `header`.
     fn insert(&mut self, server: &str, key: [u8; 32], header: &str) -> std::io::Result<()> {
-        self.keys.insert(server.to_ascii_lowercase(), key);
         let Some(path) = &self.path else {
+            self.keys.insert(server.to_ascii_lowercase(), key);
             return Ok(());
         };
+        if let Some(why) = &self.unreadable {
+            return Err(std::io::Error::other(format!(
+                "{} could not be read ({why}), so it is not written over",
+                path.display()
+            )));
+        }
+        self.keys.insert(server.to_ascii_lowercase(), key);
         let mut text = String::from(header);
+        for line in &self.other_lines {
+            text += line;
+            text.push('\n');
+        }
         for (s, k) in &self.keys {
             text += &format!("{s} {}\n", hex(k));
         }
@@ -240,6 +278,15 @@ impl KnownServers {
 
     pub fn get(&self, server: &str) -> Option<[u8; 32]> {
         self.0.get(server)
+    }
+
+    /// Why the file could not be read, when it exists and could not. Its keys
+    /// are then unknown, so a server whose key changed cannot be told from one
+    /// met for the first time: a caller should not connect on trust-on-first-use
+    /// until the file is fixed. [`KnownServers::remember`] refuses to write
+    /// over it.
+    pub fn unreadable(&self) -> Option<&str> {
+        self.0.unreadable.as_deref()
     }
 
     /// Records a server's key and saves the file.
@@ -287,6 +334,62 @@ pub fn fingerprint(public: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    /// A fresh path in the system's temporary folder for one test.
+    fn temp_file(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("oss-session-keyfile-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("keys.txt")
+    }
+
+    /// A file that exists but cannot be read is not taken for an empty one:
+    /// it says so, and nothing is written over it.
+    #[test]
+    fn an_unreadable_key_file_is_never_written_over() {
+        let path = temp_file("unreadable");
+        let bytes = [b'a', 0xFF, 0xFE, b'\n'];
+        std::fs::write(&path, bytes).unwrap();
+        let mut known = KnownServers::load(&path);
+        assert!(known.unreadable().is_some());
+        assert!(known.remember("192.0.2.1:5000", [7; 32]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "left as it was");
+
+        let mut ids = Identities::load(&path);
+        assert!(ids.for_server("192.0.2.1:5000").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "left as it was");
+
+        let missing = KnownServers::load(&path.with_file_name("absent.txt"));
+        assert!(
+            missing.unreadable().is_none(),
+            "a missing file is just empty"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A line that is not a key survives the next save.
+    #[test]
+    fn lines_that_are_not_keys_are_kept() {
+        let path = temp_file("kept");
+        let key = "ab".repeat(32);
+        std::fs::write(
+            &path,
+            format!("# header\n192.0.2.1:5000 {key}\nsomething newer 1 2 3\n"),
+        )
+        .unwrap();
+        let mut known = KnownServers::load(&path);
+        assert!(known.unreadable().is_none());
+        assert_eq!(known.get("192.0.2.1:5000"), Some([0xAB; 32]));
+        known.remember("192.0.2.2:5000", [1; 32]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("something newer 1 2 3"), "{text}");
+        assert!(text.contains(&key), "{text}");
+        let again = KnownServers::load(&path);
+        assert_eq!(again.get("192.0.2.2:5000"), Some([1; 32]));
+        assert_eq!(again.get("192.0.2.1:5000"), Some([0xAB; 32]));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;

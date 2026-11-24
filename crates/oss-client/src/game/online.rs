@@ -225,6 +225,15 @@ impl Online {
             .as_deref()
             .map(KnownServers::load)
             .unwrap_or_default();
+        // Unreadable, its keys are unknown, and a server whose key changed
+        // would look like one met for the first time.
+        if let Some(why) = known.unreadable() {
+            return Err(format!(
+                "The file of known server keys could not be read ({why}). Without it a \
+                 changed server key would go unnoticed, so the client did not connect. \
+                 Fix or remove the file and try again."
+            ));
+        }
         let pin = known.get(&opts.server);
         let identity = opts.identities.as_deref().and_then(|path| {
             match Identities::load(path).for_server(&opts.server) {
