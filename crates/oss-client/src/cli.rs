@@ -613,6 +613,18 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
             None => opts.mode = app::Mode::Login(z.clone()),
         }
     }
+    // The same for a zone named with no password, which goes by way of the
+    // form: the settings file's name, as straight in, and with no name
+    // anywhere the form asks for one rather than playing by itself.
+    if opts.form_plays_itself
+        && let app::Mode::Login(z) = &mut opts.mode
+        && z.name.is_empty()
+    {
+        match opts.player_name.clone() {
+            Some(name) => z.name = name,
+            None => opts.form_plays_itself = false,
+        }
+    }
     Ok(())
 }
 
@@ -917,5 +929,19 @@ mod tests {
 
         let o = parse("").unwrap().unwrap();
         assert!(!o.form_plays_itself, "no zone named: the form, as ever");
+
+        // No --name: the settings file's, as straight in; with none there
+        // either, the form asks for one and does not play by itself.
+        let cfg = config::Config {
+            name: Some("Ace".into()),
+            ..Default::default()
+        };
+        let mut o = parse("--server x:1").unwrap().unwrap();
+        finish_options(&mut o, cfg).unwrap();
+        assert!(matches!(&o.mode, app::Mode::Login(z) if z.name == "Ace"));
+        assert!(o.form_plays_itself);
+        let mut o = parse("--server x:1").unwrap().unwrap();
+        finish_options(&mut o, config::Config::default()).unwrap();
+        assert!(!o.form_plays_itself, "no name anywhere: ask for one");
     }
 }

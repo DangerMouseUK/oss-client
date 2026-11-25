@@ -237,6 +237,28 @@ impl Login {
         l
     }
 
+    /// The form exactly as a straight-in `--server` start would have connected:
+    /// its zone, name, arena and ship, and nothing kept in `login.ini` from the
+    /// last time the form was used.
+    ///
+    /// [`Login::load`] lays the command line over `login.ini`, which is right for
+    /// a form the player fills in but not for one that plays by itself: an arena
+    /// typed last time for another zone would be entered here without anyone
+    /// asking for it.
+    pub fn as_command_line(&mut self, z: &ServerOptions) {
+        self.server = z.server.chars().take(MAX_FIELD).collect();
+        self.name = z.name.chars().take(MAX_FIELD).collect();
+        self.arena = z
+            .arena
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(MAX_FIELD)
+            .collect();
+        self.ship = z.ship;
+        self.focus = usize::from(!self.name.is_empty());
+    }
+
     /// Remembers everything but the password.
     pub fn save(&self, path: &Path) {
         let text = format!(
@@ -936,6 +958,39 @@ mod tests {
             l.input(&strokes(&[KeyCode::Escape], ""), false),
             Some(Choice::Quit)
         );
+    }
+
+    /// A `--server` start with no password opens the form and lets it play by
+    /// itself. That form must send what straight in would have sent: not the
+    /// arena, name or ship left in `login.ini` from the last time the form was
+    /// used for some other zone.
+    #[test]
+    fn the_command_lines_form_carries_nothing_left_over_in_login_ini() {
+        let dir = std::env::temp_dir().join(format!("oss-login-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let ini = dir.join("login.ini");
+        std::fs::write(
+            &ini,
+            "server = 127.0.0.1:7000\nname = Other\narena = leftover\nship = 3\n",
+        )
+        .expect("login.ini");
+        let z = ServerOptions {
+            server: "127.0.0.1:5000".into(),
+            name: "Pilot".into(),
+            ..Login::default().into_base()
+        };
+        let mut l = Login::load(Some(&ini), None, Box::new(z.clone()));
+        assert_eq!(l.arena, "leftover", "the form a player fills in keeps it");
+        l.as_command_line(&z);
+        let Some(Choice::Connect(o)) = l.play() else {
+            panic!("expected connect");
+        };
+        assert_eq!(
+            (o.server.as_str(), o.name.as_str(), o.arena, o.ship),
+            ("127.0.0.1:5000", "Pilot", None, SPECTATOR),
+            "what --server --name sent straight in"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Both ship fallbacks are spectator.

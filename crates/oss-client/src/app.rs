@@ -620,10 +620,11 @@ impl ApplicationHandler for App {
                 }
                 // A zone named on the command line with no password: play as
                 // soon as the saved one is found, and wait for one to be typed
-                // when there is none. The ship is the command line's too, as it
-                // would have been straight in.
+                // when there is none. The form carries what the command line
+                // sent, as straight in, and nothing left over from the last
+                // time the form was used.
                 let hold = self.options.form_plays_itself.then(|| {
-                    login.ship = z.ship;
+                    login.as_command_line(z);
                     crate::game::remember::Hold::new(
                         std::time::Instant::now(),
                         crate::game::remember::IfNone::Stay,
@@ -974,11 +975,21 @@ impl App {
                 Some(Spot::RefreshZones) => Some(Choice::RefreshZones),
                 _ => ls.login.input(&strokes, self.input.shift()),
             };
-            // The command line's Play gives way to the player's first key or
-            // click: the form is theirs from then on.
-            if ls.held_for_command_line && (clicked || !strokes.is_empty()) {
+            // A waiting Play gives way to the player's next key or click: the
+            // form is theirs from then on. Without this, a character typed while
+            // it waited filled the box, and the Play went off with that one
+            // character as the password. The OS repeating a key still held is
+            // not a next key, or a held Enter would cancel its own Play.
+            if ls.hold.is_some() && remember::Hold::interrupted(clicked, &strokes) {
                 ls.hold = None;
                 ls.held_for_command_line = false;
+                ls.login.error = None;
+            }
+            // A password filled in for one zone never goes to another: the zone
+            // may have changed in this very frame, after the store's last look.
+            // Play is then made again from the form as it now stands.
+            if matches!(choice, Some(Choice::Connect(_))) && ls.recall.follow(&mut ls.login) {
+                choice = ls.login.play();
             }
             // Play with the password box empty while the store may still be
             // looking up a saved password for this name and zone: wait for it.

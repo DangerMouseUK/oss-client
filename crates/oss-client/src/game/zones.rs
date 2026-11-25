@@ -407,7 +407,7 @@ mod tests {
     /// field, the account changed, and the filled-in password went with it.
     #[test]
     fn tabbing_through_the_list_keeps_the_zone_and_its_saved_password() {
-        use super::super::login::Field;
+        use super::super::login::{Choice, Field};
         use super::super::remember::Recall;
         use oss_credstore::{MemoryStore, PasswordStore, account};
         use std::sync::Arc;
@@ -449,8 +449,34 @@ mod tests {
         assert_eq!(l.password, "saved-for-tests", "and so is its password");
         assert!(l.remember);
 
-        // Walking the list is choosing a zone, and does move the field.
+        // Enter on another zone in the list picks it and plays in one frame.
+        // The password in the box was saved for the zone in the field, and must
+        // not go to the one just picked.
         l.focus_zones();
+        b.selected = 0;
+        let enter = keys(&[KeyCode::Enter]);
+        b.form_keys(&mut l, &enter);
+        assert_eq!(l.server, "127.0.0.1:6000", "picked");
+        let Some(Choice::Connect(_)) = l.input(&enter, false) else {
+            panic!("Enter plays");
+        };
+        assert!(
+            recall.follow(&mut l),
+            "the other zone's password is taken out"
+        );
+        let Some(Choice::Connect(o)) = l.play() else {
+            panic!("and Play is made again");
+        };
+        assert_eq!(
+            (o.server.as_str(), o.password.as_str()),
+            ("127.0.0.1:6000", "")
+        );
+        assert!(!l.remember);
+
+        // Walking the list is choosing a zone, and does move the field.
+        l.server = "127.0.0.1:5000".into();
+        l.focus_zones();
+        b.selected = 1;
         b.form_keys(&mut l, &keys(&[KeyCode::ArrowUp]));
         assert_eq!(l.server, "127.0.0.1:6000");
     }

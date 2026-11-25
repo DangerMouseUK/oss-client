@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use oss_credstore::{OsStore, PasswordStore, account};
 
+use super::input::Stroke;
 use super::login::Login;
 
 /// How long the store has to say whether it is there before the client stops
@@ -197,16 +198,8 @@ impl Recall {
     /// One frame's worth: notices a new name or zone, asks once it has stopped
     /// changing, and fills the box when the answer comes.
     pub fn tick(&mut self, login: &mut Login, store: &Arc<dyn PasswordStore>, now: Instant) {
+        self.follow(login);
         let who = account_of(login);
-
-        // A password we filled in belongs to the account it was saved for.
-        if let Some(filled) = &self.filled_for
-            && who.as_ref() != Some(filled)
-        {
-            login.password.clear();
-            login.remember = false;
-            self.filled_for = None;
-        }
 
         if let Some((asked_for, rx)) = &self.pending {
             match rx.try_recv() {
@@ -258,6 +251,26 @@ impl Recall {
             let _ = tx.send(found);
         });
         self.pending = Some((who, rx));
+    }
+
+    /// Takes a password we filled in back out of the box when the form no
+    /// longer names the account it was saved for. Says whether it did.
+    ///
+    /// Called every frame, and again at the moment of Play: the zone can change
+    /// and Play be pressed in the same frame -- Enter on a zone in the list
+    /// picks it and plays at once -- and without the second call the password
+    /// saved for the old zone went to the new one, and was then filed under
+    /// the new zone's name if it let us in.
+    pub fn follow(&mut self, login: &mut Login) -> bool {
+        match &self.filled_for {
+            Some(filled) if account_of(login).as_ref() != Some(filled) => {
+                login.password.clear();
+                login.remember = false;
+                self.filled_for = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// What the store said about the account the form names now: `Some(true)`
@@ -317,6 +330,13 @@ pub enum Verdict {
 }
 
 impl Hold {
+    /// Whether this frame's keys or click take the form back from a waiting
+    /// Play: any key going down, or a click. The OS repeating a key still held
+    /// is not one, or a held Enter would cancel its own Play.
+    pub fn interrupted(clicked: bool, strokes: &[Stroke]) -> bool {
+        clicked || strokes.iter().any(|s| !s.repeat)
+    }
+
     pub fn new(now: Instant, if_none: IfNone) -> Self {
         Self {
             until: now + HOLD_LIMIT,
@@ -567,6 +587,22 @@ mod tests {
             hold.verdict(&l, &recall, &vault, start + HOLD_LIMIT),
             Verdict::Play
         );
+    }
+
+    /// A key going down takes the form back from a waiting Play, so a
+    /// character typed while it waits is not sent as the whole password. The
+    /// OS repeating the Enter that started it does not.
+    #[test]
+    fn a_waiting_play_gives_way_to_the_next_key_only() {
+        use winit::keyboard::KeyCode;
+        assert!(Hold::interrupted(false, &[Stroke::text('x')]));
+        assert!(Hold::interrupted(false, &[Stroke::press(KeyCode::Enter)]));
+        assert!(Hold::interrupted(true, &[]));
+        assert!(!Hold::interrupted(
+            false,
+            &[Stroke::press(KeyCode::Enter).repeated(true)]
+        ));
+        assert!(!Hold::interrupted(false, &[]));
     }
 
     /// No store, no line: the form is the six lines it always was, and Tab never
