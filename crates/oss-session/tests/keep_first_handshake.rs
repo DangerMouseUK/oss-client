@@ -228,7 +228,7 @@ fn the_driver_steps_down_from_a_fresh_port_and_is_heard() {
 /// fresh port, so the SubSpace attempt is heard.
 #[test]
 fn the_automatic_order_gets_past_a_lenient_zone_that_keeps_its_first_handshake() {
-    use oss_session::security::{HandshakeRequest, SecurityMode, built_in};
+    use oss_session::security::{MechanismRegistry, SecurityMode, client_handshake, context};
     use oss_session::{Session, SessionConfig, SessionEvent, udp::UdpDriver};
 
     let mut zone = TestZone::bind(
@@ -243,17 +243,17 @@ fn the_automatic_order_gets_past_a_lenient_zone_that_keeps_its_first_handshake()
     let addr = zone.local_addr().expect("zone address").to_string();
     let mut driver = UdpDriver::connect(&addr).expect("socket");
     let first_port = driver.bound_port();
-    let hs = built_in().handshake(HandshakeRequest {
-        mode: SecurityMode::Auto,
-        pinned: None,
-        identity: None,
-        seed: 0x1234_5678,
-    });
+    let hs = client_handshake(
+        &MechanismRegistry::builtin(),
+        &SecurityMode::Auto,
+        &context(0x1234_5678, None, None),
+    )
+    .expect("the built-ins build");
     let cfg = SessionConfig {
         name: "automatic".into(),
         ..Default::default()
     };
-    let mut session = Session::with_handshake(cfg, driver.now_ms(), hs);
+    let mut session = Session::with_negotiation(cfg, driver.now_ms(), hs);
     let start = Instant::now();
     let mut logged_in = false;
     while start.elapsed() < Duration::from_secs(5) && !logged_in {

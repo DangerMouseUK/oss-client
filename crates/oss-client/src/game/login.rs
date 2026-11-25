@@ -715,7 +715,11 @@ mod tests {
             follow: Some("Someone".into()),
             attach: Some("Teammate".into()),
             record: Some(PathBuf::from("visit.ossr")),
-            security: oss_session::security::SecurityMode::OpenSec,
+            security: oss_session::security::SecurityMode::parse(
+                "opensec",
+                &oss_session::security::MechanismRegistry::builtin(),
+            )
+            .unwrap(),
             known_servers: Some(PathBuf::from("known.txt")),
             identities: Some(PathBuf::from("ids.txt")),
             new_user: true,

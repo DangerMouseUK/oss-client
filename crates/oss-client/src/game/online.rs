@@ -9,27 +9,42 @@ use std::time::Instant;
 use oss_session::map::{MapCache, default_cache_dir};
 use oss_session::replay::{Player as ReplayPlayer, Recorder};
 use oss_session::security::{
-    HandshakeRequest, Identities, KnownServers, Security, SecurityMode, built_in, fingerprint,
+    Identities, KnownServers, MechanismRegistry, SecurityMode, client_handshake, context,
+    fingerprint,
 };
 use oss_session::udp::UdpDriver;
 use oss_session::{Profile, RegistrationForm, Session, SessionConfig, SessionEvent, State};
 
-/// What a build outside this repository can supply to a connection. Both halves
-/// default to `None`, which is this repository's own client and nothing else.
+/// The mechanisms a connection can use and the client it presents itself as.
+/// The default is this repository's own: the built-in mechanisms and
+/// [`oss_session::VieClient`].
 ///
-/// The two go together: a zone picks which login form it expects from the
-/// encryption rather than from the packet, so a connection given a handshake and
-/// not the client to go with it is dropped at login with nothing said. See
-/// [`oss_session::client`].
-#[derive(Debug, Clone, Default)]
+/// A build outside this repository **adds** to the built-ins rather than
+/// replacing them: one line, `supplied.mechanisms.register(mechanism)?`, and the
+/// mechanism is in the automatic order at its place by strength, is a word
+/// `--security` and the settings file take, and is in the start-up line.
+///
+/// The client goes with the mechanisms: a zone picks which login form it expects
+/// from the encryption rather than from the packet. The session checks the form
+/// against the era the winning mechanism declares, and says so in the log when
+/// they disagree. See [`oss_session::client`].
+#[derive(Debug, Clone)]
 pub struct Supplied {
-    /// Where the handshake comes from. `None` is
-    /// [`oss_session::security::built_in`] -- the modes
-    /// [`ServerOptions::security`] names.
-    pub security: Option<Security>,
+    /// The mechanisms the client can speak:
+    /// [`MechanismRegistry::builtin`] unless more are registered.
+    pub mechanisms: MechanismRegistry,
     /// Which client the session presents itself as. `None` is
     /// [`oss_session::VieClient`], as [`SessionConfig`] defaults to.
     pub client: Option<Profile>,
+}
+
+impl Default for Supplied {
+    fn default() -> Self {
+        Self {
+            mechanisms: MechanismRegistry::builtin(),
+            client: None,
+        }
+    }
 }
 
 /// The zone's news, cached beside its maps under Continuum's name for it.
@@ -79,7 +94,8 @@ pub struct ServerOptions {
     pub attach: Option<String>,
     /// Record the visit to this replay file.
     pub record: Option<PathBuf>,
-    /// Encryption: OpenSec first with VIE fallback (auto), or one of them.
+    /// Encryption: the automatic order, or one mechanism by name, from
+    /// [`Supplied::mechanisms`].
     pub security: SecurityMode,
     /// Where OpenSec server keys are remembered (trust on first use).
     pub known_servers: Option<PathBuf>,
@@ -180,9 +196,9 @@ impl Online {
 
     /// Opens a session to the zone.
     ///
-    /// `supplied` is what a build outside this repository provides for the
-    /// connection; [`Supplied::default`] is this repository's own client, which is
-    /// what the binary here passes. See [`crate::Options::supplied`].
+    /// `supplied` holds the mechanisms and the client; [`Supplied::default`] is
+    /// this repository's own, which is what the binary here passes. See
+    /// [`crate::Options::supplied`].
     pub fn connect(
         opts: &ServerOptions,
         resolution: (u16, u16),
@@ -251,14 +267,15 @@ impl Online {
                 }
             }
         });
-        let security = supplied.security.clone().unwrap_or_else(built_in);
-        let handshake = security.handshake(HandshakeRequest {
-            mode: opts.security,
-            pinned: pin,
-            identity,
-            seed,
-        });
-        let mut session = Session::with_handshake(cfg, now, handshake);
+        // A key on record is OpenSec's, so `auto` then uses OpenSec alone; a
+        // mechanism asked for by name wins over it.
+        let negotiation = client_handshake(
+            &supplied.mechanisms,
+            &opts.security,
+            &context(seed, pin, identity),
+        )
+        .map_err(|e| format!("--security {}: {e}", opts.security))?;
+        let mut session = Session::with_negotiation(cfg, now, negotiation);
         if let Some(path) = &opts.record {
             let started = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -826,8 +843,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use oss_net::{Handshake, VieClientHandshake};
-    use oss_session::security::{HandshakeRequest, SecurityMode, SecurityProfile};
+    use oss_session::security::{Era, Mechanism, MechanismInUse, SecurityMode};
+    use oss_session::test_zone::dummy_mechanism;
     use oss_session::{ClientProfile, LoginForm, Profile, SecurityAnswer, SecurityChallenge};
 
     use super::{Downloads, Online, ServerOptions, Supplied, redirect_recording, size_text};
@@ -846,24 +863,12 @@ mod tests {
         );
     }
 
-    /// A stand-in for a build outside this repository, supplying both halves. The
-    /// handshake it returns is the VIE one and the login form the SubSpace one,
-    /// because what a supplied client *is* is not this repository's business;
-    /// what this proves is that a zone is joined with what was supplied, and that
-    /// the request reaches the profile as the connection filled it in.
+    /// A stand-in for the client a build outside this repository supplies. The
+    /// login form is the SubSpace one, because what a supplied client *is* is
+    /// not this repository's business; what this proves is that the session
+    /// presents the client it was given.
     #[derive(Debug)]
-    struct StubSupplied {
-        calls: Arc<AtomicUsize>,
-        mode: Arc<AtomicUsize>,
-    }
-
-    impl SecurityProfile for StubSupplied {
-        fn handshake(&self, request: HandshakeRequest) -> Box<dyn Handshake> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.mode.store(request.mode as usize, Ordering::SeqCst);
-            Box::new(VieClientHandshake::new(request.seed))
-        }
-    }
+    struct StubSupplied;
 
     impl ClientProfile for StubSupplied {
         fn login(&self) -> LoginForm {
@@ -888,37 +893,56 @@ mod tests {
             follow: None,
             attach: None,
             record: None,
-            security: SecurityMode::Vie,
+            security: SecurityMode::Auto,
             known_servers: None,
             identities: None,
             new_user: false,
         }
     }
 
-    /// The seam the graphical client gains: what a build outside this repository
-    /// supplies is what the session is opened with -- the handshake, and the
-    /// client it presents itself as. Nothing is sent here (a UDP socket is
-    /// connected, not a zone), so this needs no server.
+    /// The seam the graphical client gains: a mechanism a build outside this
+    /// repository registers is used, and the built-ins are still there. Its
+    /// client half is called when the session is opened, in the automatic order
+    /// at its place by strength and by name; the session presents the client
+    /// supplied with it; and every built-in is still a word the connection
+    /// takes. Nothing is sent here (a UDP socket is connected, not a zone), so
+    /// this needs no server.
     #[test]
-    fn what_is_supplied_is_what_the_session_is_opened_with() {
+    fn a_registered_mechanism_is_used_and_the_built_ins_are_still_there() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let mode = Arc::new(AtomicUsize::new(usize::MAX));
-        let stub = Arc::new(StubSupplied {
-            calls: Arc::clone(&calls),
-            mode: Arc::clone(&mode),
-        });
-        let supplied = Supplied {
-            security: Some(Arc::clone(&stub) as _),
-            client: Some(Arc::clone(&stub) as Profile),
+        let counted = {
+            let calls = Arc::clone(&calls);
+            let inner = dummy_mechanism("dummy@example.org", "Dummy", Era::Modern, 2000);
+            Mechanism::new(
+                "dummy@example.org",
+                "Dummy",
+                Era::Modern,
+                2000,
+                oss_session::security::Selection::Automatic,
+            )
+            .unwrap()
+            .client(move |ctx| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                inner.handshake(ctx).unwrap()
+            })
         };
+        let stub = Arc::new(StubSupplied);
+        let mut supplied = Supplied {
+            client: Some(Arc::clone(&stub) as Profile),
+            ..Supplied::default()
+        };
+        supplied.mechanisms.register(counted).unwrap();
+
+        // Automatic: built as a ladder with the registered mechanism between
+        // the two built-ins.
         let opts = options();
         let net = Online::connect(&opts, (800, 600), &supplied).expect("a local socket");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "the profile was asked");
-        assert_eq!(
-            mode.load(Ordering::SeqCst),
-            SecurityMode::Vie as usize,
-            "and told what the connection asked for"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "its client half was asked");
+        let Some(MechanismInUse::Automatic(progress)) = net.session.mechanism() else {
+            panic!("the automatic order")
+        };
+        let rungs: Vec<&str> = progress.rungs().map(|id| id.as_str()).collect();
+        assert_eq!(rungs, ["opensec", "dummy@example.org", "vie"]);
         assert!(
             Arc::ptr_eq(&net.session.config().client, &(stub as Profile)),
             "the session presents the client it was given"
@@ -926,12 +950,52 @@ mod tests {
         assert_eq!(net.session.cipher_name(), None, "nothing has connected yet");
         drop(net);
 
-        // And with nothing supplied the client is this repository's own: the stub
-        // is not consulted again, and the session is back on the default profile.
+        // By name: that one, alone.
+        let mut named = options();
+        named.security = SecurityMode::parse("dummy@example.org", &supplied.mechanisms).unwrap();
+        let net = Online::connect(&named, (800, 600), &supplied).expect("a local socket");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            net.session
+                .mechanism()
+                .and_then(MechanismInUse::id)
+                .map(|id| id.as_str()),
+            Some("dummy@example.org")
+        );
+        drop(net);
+
+        // The built-ins are still there, each by name, without the dummy.
+        for word in ["none", "vie", "opensec"] {
+            let mut built_in = options();
+            built_in.security = SecurityMode::parse(word, &supplied.mechanisms).unwrap();
+            let net = Online::connect(&built_in, (800, 600), &supplied).expect("a local socket");
+            assert_eq!(
+                net.session
+                    .mechanism()
+                    .and_then(MechanismInUse::id)
+                    .map(|id| id.as_str()),
+                Some(word)
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the dummy was not asked");
+
+        // And with nothing supplied the client is this repository's own: the
+        // dummy is not there, and the session is back on the default profile.
         let net = Online::connect(&opts, (800, 600), &Supplied::default()).expect("a local socket");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let Some(MechanismInUse::Automatic(progress)) = net.session.mechanism() else {
+            panic!("the automatic order")
+        };
+        let rungs: Vec<&str> = progress.rungs().map(|id| id.as_str()).collect();
+        assert_eq!(rungs, ["opensec", "vie"]);
         assert_eq!(net.session.config().client.login().kind, 0x09);
         drop(net);
+
+        // A name the supplied mechanisms do not hold is an error, not a panic.
+        let mut unknown = options();
+        unknown.security =
+            SecurityMode::Named(oss_session::security::MechanismId::new("x@example.org").unwrap());
+        assert!(Online::connect(&unknown, (800, 600), &supplied).is_err());
     }
 
     /// An arena as it arrives: a big map, then a handful of small files.

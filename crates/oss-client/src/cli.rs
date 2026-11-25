@@ -4,15 +4,30 @@
 //! [`options`] is the whole of it -- parse the arguments, read the settings file,
 //! and hand back an [`crate::Options`] ready for [`crate::run`]. The binary in
 //! this crate is a dozen lines on top of it, and a build outside this repository
-//! can be the same (see the crate documentation).
+//! can be the same, with [`options_with`] (see the crate documentation).
 
 use std::path::PathBuf;
 
-use crate::game::online::ServerOptions;
+use oss_session::security::{MechanismRegistry, SecurityMode};
+
+use crate::game::online::{ServerOptions, Supplied};
 use crate::{app, config, game};
 
-/// The `--help` text.
-pub const USAGE: &str = "\
+/// The `--help` text for the mechanisms in `mechanisms`: the words
+/// `--security` accepts, and the order `auto` tries, are read from them.
+pub fn usage(mechanisms: &MechanismRegistry) -> String {
+    let security = oss_session::security::usage(mechanisms, SECURITY_NOTES, 28, 80);
+    USAGE.replace("{security}", &security)
+}
+
+/// What the client says about `--security` that the bot does not.
+const SECURITY_NOTES: &str = "With a server's key on record (known_servers.txt), \
+     auto uses that key's mechanism alone and never steps down from it; a mechanism \
+     named here wins over the key. The settings file's [network] security takes the \
+     same words.";
+
+/// The `--help` text, with `{security}` for the part read from the mechanisms.
+const USAGE: &str = "\
 Usage: oss-client [options]                (login screen)
        oss-client --server <host:port> --name <name> [options]
        oss-client --sandbox [map.lvl] [options]
@@ -76,11 +91,7 @@ Options:
   --directory <host:port>   A directory server for the start-up screen's zone list
                             (repeatable; adds to the settings file's)
   --zones                   Start with the zone list selected
-  --security <mode>         auto (OpenSec, falling back to VIE), opensec, vie,
-                            or none. The none mode sends your password in the
-                            clear and only works against a server set to allow
-                            it: it is for development, and nothing selects it
-                            for you
+  --security <mode>         {security}
   --config <file>           Settings file, which must already exist; only the
                             default is written for you (oss-client.ini in the
                             user's settings folder)
@@ -111,16 +122,35 @@ pub fn init_logging() {
 /// the settings file filled in behind them, or `None` for `--help`.
 ///
 /// This is what the binary in this crate does before [`crate::run`], and the first
-/// half of what any other binary on this library has to do.
+/// half of what any other binary on this library has to do. It is
+/// [`options_with`] and this repository's own mechanisms and client.
 pub fn options(args: impl Iterator<Item = String>) -> Result<Option<app::Options>, String> {
-    let Some(mut opts) = parse_args(args)? else {
+    options_with(args, Supplied::default())
+}
+
+/// [`options`], for a build that supplies mechanisms or a client of its own.
+///
+/// The mechanisms are registered in `supplied` **before** the arguments are read,
+/// because they decide what `--security` and the settings file accept: a
+/// registered mechanism is a word both take, it is in the automatic order at its
+/// place by strength, and [`usage`] lists it. `supplied` ends up in
+/// [`crate::Options::supplied`].
+pub fn options_with(
+    args: impl Iterator<Item = String>,
+    supplied: Supplied,
+) -> Result<Option<app::Options>, String> {
+    let Some(mut opts) = parse_args(args, &supplied.mechanisms)? else {
         return Ok(None);
     };
+    opts.supplied = supplied;
     apply_config(&mut opts)?;
     Ok(Some(opts))
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>, String> {
+fn parse_args(
+    args: impl Iterator<Item = String>,
+    mechanisms: &MechanismRegistry,
+) -> Result<Option<app::Options>, String> {
     let mut map = None;
     let mut server = None;
     let mut name = None;
@@ -351,10 +381,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             "--directory" => directories.push(value("--directory")?),
             "--zones" => open_zones = true,
             "--security" => {
-                security = Some(
-                    oss_session::security::SecurityMode::from_name(&value("--security")?)
-                        .ok_or("--security must be auto, opensec, vie or none")?,
-                )
+                let word = value("--security")?;
+                security = Some(SecurityMode::parse(&word, mechanisms).map_err(|_| {
+                    format!(
+                        "--security must be {}, not `{word}`",
+                        oss_session::security::words(mechanisms)
+                    )
+                })?)
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -394,11 +427,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
             palette: Default::default(),
             ui_scale: 0,
             directories: directories.clone(),
-            security: security.unwrap_or_default(),
+            security: security.clone().unwrap_or_default(),
             security_from_cli: security.is_some(),
-            // The command line cannot name a handshake or a client that is not
-            // in this repository; a build that has them sets this after
-            // `options` returns.
+            // Replaced by `options_with` with what was supplied.
             supplied: Default::default(),
             identity: true,
             open_zones,
@@ -434,7 +465,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
                 follow,
                 attach,
                 record,
-                security: security.unwrap_or_default(),
+                security: security.clone().unwrap_or_default(),
                 known_servers: None,
                 identities: None,
                 new_user,
@@ -471,11 +502,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<app::Options>
         palette: Default::default(),
         ui_scale: 0,
         directories,
-        security: security.unwrap_or_default(),
         security_from_cli: security.is_some(),
-        // The command line cannot name a handshake or a client that is not in
-        // this repository; a build that has them sets this after `options`
-        // returns.
+        security: security.unwrap_or_default(),
+        // Replaced by `options_with` with what was supplied.
         supplied: Default::default(),
         identity: true,
         open_zones,
@@ -515,7 +544,8 @@ fn apply_config(opts: &mut app::Options) -> Result<(), String> {
     };
     opts.login_file = path.parent().map(|dir| dir.join(game::login::FILE_NAME));
     opts.settings_path = Some(path.clone());
-    let (cfg, warnings) = config::Config::load(&path, opts.config.is_some())?;
+    let (cfg, warnings) =
+        config::Config::load(&path, opts.config.is_some(), &opts.supplied.mechanisms)?;
     for w in warnings {
         log::warn!("{}: {w}", path.display());
     }
@@ -538,9 +568,21 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
     opts.ui_scale = cfg.ui_scale;
     opts.pad = cfg.pad;
     opts.directories.extend(cfg.directories);
-    // The command line wins over the settings file.
+    // The command line wins over the settings file. The file's word is read
+    // against this build's mechanisms here, not when the file is parsed, so a
+    // word this build does not know is reported and left in the file as it is:
+    // `opts.saved` keeps it, and a Save writes it back untouched.
     if !opts.security_from_cli {
-        opts.security = cfg.security;
+        opts.security = match SecurityMode::parse(&cfg.security, &opts.supplied.mechanisms) {
+            Ok(mode) => mode,
+            Err(e) => {
+                log::warn!(
+                    "settings: [network] security: {e}; using auto for this run, and \
+                     leaving the setting as it is"
+                );
+                SecurityMode::Auto
+            }
+        };
     }
     opts.identity = cfg.identity;
     opts.player_name = cfg.name.clone();
@@ -563,7 +605,92 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<Option<app::Options>, String> {
-        parse_args(s.split_whitespace().map(String::from))
+        parse_args(
+            s.split_whitespace().map(String::from),
+            &MechanismRegistry::builtin(),
+        )
+    }
+
+    /// A mechanism registered in one line is a word `--security` takes, and the
+    /// help lists it with the built-ins; one this build does not have is refused
+    /// with the words it does take.
+    #[test]
+    fn a_registered_mechanism_is_selectable_and_in_the_help() {
+        use oss_session::security::{Era, SecurityMode};
+        use oss_session::test_zone::dummy_mechanism;
+
+        let mut supplied = Supplied::default();
+        supplied
+            .mechanisms
+            .register(dummy_mechanism(
+                "dummy@example.org",
+                "Dummy",
+                Era::Modern,
+                2000,
+            ))
+            .unwrap();
+
+        let o = parse_args(
+            ["--security", "dummy@example.org", "--sandbox"]
+                .into_iter()
+                .map(String::from),
+            &supplied.mechanisms,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(o.security.name(), "dummy@example.org");
+        assert!(o.security_from_cli);
+
+        let help = usage(&supplied.mechanisms);
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(
+                "--security <mode> auto (the default) tries the automatic order, \
+                 OpenSecurity, then Dummy, then Subspace,"
+            ),
+            "{help}"
+        );
+        assert!(
+            flat.contains("Or name one mechanism: none, vie, dummy@example.org or opensec."),
+            "{help}"
+        );
+        assert!(!help.contains("{security}"));
+        // The lines written for `--security` fit, each after the first indented
+        // under the option's description.
+        let security: Vec<&str> = help
+            .lines()
+            .skip_while(|l| !l.starts_with("  --security"))
+            .take_while(|l| !l.starts_with("  --config"))
+            .collect();
+        assert!(security.len() > 1, "{help}");
+        for line in &security {
+            assert!(line.len() <= 80, "{line:?}");
+        }
+        for line in &security[1..] {
+            assert!(line.starts_with(&" ".repeat(28)), "{line:?}");
+        }
+
+        // The built-in help says the built-ins, and nothing about the dummy.
+        let plain = usage(&MechanismRegistry::builtin());
+        assert!(!plain.contains("dummy"), "{plain}");
+        assert!(plain.contains("auto (the default)"), "{plain}");
+
+        // Without the registration the word is refused, with the list.
+        let Err(err) = parse("--security dummy@example.org --sandbox") else {
+            panic!("an unregistered mechanism is refused")
+        };
+        assert_eq!(
+            err,
+            "--security must be auto, none, vie or opensec, not `dummy@example.org`"
+        );
+        assert_eq!(
+            parse("--security VIE --sandbox").unwrap().unwrap().security,
+            SecurityMode::parse("vie", &MechanismRegistry::builtin()).unwrap()
+        );
+        assert_eq!(
+            parse("--sandbox").unwrap().unwrap().security,
+            SecurityMode::Auto
+        );
     }
 
     /// The start-up screen is a way into a zone like any other, so what the command

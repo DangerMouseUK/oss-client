@@ -2,9 +2,28 @@
 
 ## Which cipher is used
 
-Connections try **OpenSec** first and fall back to **VIE** for servers that do not speak it.
-`--security auto|opensec|vie|none`, or `[network] security` in the settings file, changes the
-policy: `opensec` refuses to fall back, `vie` never offers OpenSec, `none` is below.
+Every security mechanism the client can speak is described once, in a registry, and
+everything else is read from it: the start-up lines, the order the client tries them in, and
+the words `--security` and the settings file accept. A build of this repository logs, at start:
+
+```text
+Mechanisms supported: None, Subspace, OpenSecurity
+Automatic order: OpenSecurity, then Subspace
+```
+
+By default (`auto`) a connection tries the **automatic order**: every mechanism that may be
+tried on its own, strongest first, stepping down to the next when a server has not answered
+within 1.5 seconds. Here that is **OpenSec**, then **VIE** for servers that do not speak it.
+The order comes from the strength each mechanism declares, never from a list written out.
+
+`--security <name>`, or `[network] security = <name>` in the settings file, uses **one
+mechanism alone** instead: `opensec` refuses to fall back, `vie` never offers OpenSec, `none`
+is below. `--help`, and the comment the client writes above that setting, list exactly the
+words this build has. A word in the settings file that this build does not know is reported,
+`auto` is used for that run, and the word is left as it is: saving the settings writes it
+back unchanged.
+
+The `oss-bot` program negotiates exactly the same way, with `auto` as its default too.
 
 **VIE is the floor, and nothing automatic goes below it.** Each step down is triggered by an
 attempt that failed, and anyone able to disturb the traffic can make every stronger attempt
@@ -45,9 +64,11 @@ says what each one is; the two this client implements are below.
 ### Key pinning
 
 The first time a server proves an OpenSec key, the key is remembered in `known_servers.txt`
-beside the settings file. From then on that server must prove the same key over OpenSec, with
-no fallback to VIE. A server that changes its key, or an attacker trying to downgrade you,
-fails the connection rather than quietly continuing.
+beside the settings file. From then on `auto` uses OpenSec alone for that server, and it must
+prove the same key, with no fallback to VIE. A server that changes its key, or an attacker
+trying to downgrade you, fails the connection rather than quietly continuing. A mechanism
+named on purpose (`--security vie`, `--security none`) still wins over a remembered key: a
+person asking is a decision, and the remembered key is not.
 
 ## Identity keys
 
@@ -84,13 +105,13 @@ What that means in practice:
 - A client built from this repository cannot join a zone that requires Continuum encryption.
 - Zones that accept VIE — which is most zones that run ASSS, and the original server — are
   reachable, as are OpenSec zones.
-- The session layer's security path is a trait, so a build that supplies its own cipher can
-  register it through `oss_net::Acceptor` / `oss_net::Cipher` without changing
+- The session layer's security path is pluggable, so a build that supplies its own cipher can
+  plug it in through `oss_net::Acceptor` / `oss_net::Cipher` without changing
   anything here. That is how a real Continuum 0.40 client came to play on `oss-server`.
 - That seam reaches the graphical client as well as a headless one, and it is not specific
-  to Continuum: it is how *any* scheme outside this repository plugs in. See
-  [Supplying your own scheme](#supplying-your-own-scheme) below. Nothing here implements
-  either half, and nothing here knows what one returns.
+  to Continuum: it is how *any* scheme outside this repository plugs in, by registering a
+  mechanism. See [Supplying your own scheme](#supplying-your-own-scheme) below. Nothing here
+  implements one, and nothing here knows what one does.
 
 The *shape* of the Continuum handshake (`00 10`–`00 14`) is documented in
 [oss-core's docs/protocol/encryption.md](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/encryption.md),
@@ -99,33 +120,40 @@ be.**
 
 ## Supplying your own scheme
 
-`oss-client` is a library beside its binary, so a build outside this repository can give a
-session its own cipher and its own client identity without changing anything here. There is
-no plugin registry and no init hook: you fill in one field and call `run`.
+`oss-client` is a library beside its binary, so a build outside this repository can add its
+own mechanisms, and its own client identity, without changing anything here. It registers
+each mechanism in an `oss_client::Supplied`, one line each, and hands that to
+`options_with` **before the arguments are read**, because the mechanisms decide what
+`--security` and the settings file accept:
 
 ```rust
-let mut options = oss_client::options(std::env::args().skip(1))?.unwrap();
-options.supplied = Supplied { security: Some(profile.clone()), client: Some(profile) };
+let mut supplied = Supplied { client: Some(Arc::new(MyClient)), ..Supplied::default() };
+supplied.mechanisms.register(my_mechanism())?;
+let options = oss_client::options_with(std::env::args().skip(1), supplied)?.unwrap();
 oss_client::run(options)?;
 ```
 
-`Options::supplied` is an `oss_client::Supplied`, and its two fields take one trait each:
+That one line is all a mechanism needs. It is named in the start-up line, it takes its place
+in the automatic order by the strength it declares, it becomes a word `--security` and the
+settings file accept, and `oss_client::usage` lists it. **A mechanism is added, never swapped
+in**: the built-in ones stay, and `--security vie` still means VIE.
 
-| Field | Trait | What it decides |
+| Field | Type | What it decides |
 |---|---|---|
-| `security` | `oss_client::SecurityProfile` (from `oss_session::security`) | The handshake the connection opens with. It returns an `oss_net::Handshake`, which this repository neither inspects nor knows anything about |
+| `mechanisms` | `oss_client::MechanismRegistry` (from `oss_net`) | What the client can speak. Starts as the built-in mechanisms. Each `oss_net::Mechanism` has an identifier (`name@your-domain` for anyone outside this project), a display name, a strength, an era, and a client half that builds an `oss_net::Handshake` for each connection, which this repository neither inspects nor knows anything about |
 | `client` | `oss_client::ClientProfile` (from `oss_session`) | Which client the session presents itself as: the login form it sends, and how it answers a security challenge |
 
-A supplied profile is **always** the one used, whatever `--security` asked for, so no new
-mode name is needed and none has to be registered.
-
-### Both fields, always
+### The login form must match the era
 
 **This is the one that will cost you a day.** A zone picks which login form it expects from
-the *encryption in use*, not from the packet's type byte. So a session given a handshake
-without a matching client profile is **dropped at login in silence**: no error, no
-rejection, nothing on the wire. If a connection appears to come up and then simply stops,
-check both fields before looking anywhere else.
+the *encryption in use*, not from the packet's type byte. So a session whose login form does
+not match its encryption is **dropped at login in silence**: no error, no rejection, nothing
+on the wire.
 
-The cheapest way to make that mistake impossible is to implement both traits on one type and
-hand the same value to both fields. Supplying them separately is the shape of the mistake.
+Each mechanism declares its **era**: `SubSpace`, `Continuum` or `Modern` (what the zone should
+treat the connection as; OpenSec is `Modern`, and its hello is classified as a SubSpace
+client's). The session checks the login form against the era of the mechanism that won,
+whether it was reached by the automatic order or named, and logs
+`... the zone will drop this login` when they disagree. If a connection appears to come up and
+then simply stops, look for that line first. A client profile that serves more than one era
+has to know which mechanism won before it chooses the form.

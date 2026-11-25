@@ -38,7 +38,7 @@ takes every option below, and the list it prints is the one to trust. The main o
 | `--count <n>` | run *n* bots in one process; their names are numbered |
 | `--chat <text>` | say this once in the arena |
 | `--duration <secs>` | leave after this long, instead of running until Ctrl+C |
-| `--security <mode>` | which encryption to use: `vie`, `opensec`, `auto` or `none` |
+| `--security <mode>` | which encryption to use: `auto` (the default) negotiates exactly as the graphical client does, trying the automatic order and stepping down when a server does not answer; a mechanism's name (`vie`, `opensec`, `none`) uses that one alone. `--help` lists the names this build has |
 
 A swarm of three ships flying around a local zone:
 

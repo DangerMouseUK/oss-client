@@ -509,3 +509,91 @@ impl TestZone {
         }
     }
 }
+
+/// A security mechanism for tests, described the way anyone outside this
+/// repository would describe theirs: `id`, shown as `display_name`, declaring
+/// `era`, at `strength`, tried automatically.
+///
+/// **It secures nothing.** Its client sends a six-byte hello beginning `00 01`
+/// every 250 ms, for up to 10 s, which neither built-in acceptor takes; its
+/// acceptor answers that hello and nothing else; and its cipher, named
+/// `dummy`, flips every bit of every byte. Its cipher reports no
+/// [`oss_net::CipherKind`] of its own, as a cipher from outside oss-core would
+/// not, so only the era it declares says what it is.
+pub fn dummy_mechanism(
+    id: &str,
+    display_name: &str,
+    era: oss_net::Era,
+    strength: u16,
+) -> oss_net::Mechanism {
+    oss_net::Mechanism::new(
+        id,
+        display_name,
+        era,
+        strength,
+        oss_net::Selection::Automatic,
+    )
+    .expect("a valid test description")
+    .client(|_| Box::new(dummy::Client::default()))
+    .server(|| Box::new(dummy::Acceptor))
+}
+
+mod dummy {
+    use oss_net::{Accept, Cipher, Handshake, Step};
+
+    const HELLO: [u8; 6] = [0, 1, b'D', b'U', b'M', b'Y'];
+    const REPLY: [u8; 6] = [0, 2, b'Y', b'M', b'U', b'D'];
+
+    struct XorCipher;
+
+    impl Cipher for XorCipher {
+        fn encrypt(&mut self, datagram: &mut Vec<u8>) {
+            datagram.iter_mut().for_each(|b| *b ^= 0xFF);
+        }
+        fn decrypt(&mut self, datagram: &mut Vec<u8>) -> bool {
+            datagram.iter_mut().for_each(|b| *b ^= 0xFF);
+            true
+        }
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct Client {
+        started: Option<u64>,
+        last_sent: Option<u64>,
+    }
+
+    impl Handshake for Client {
+        fn on_datagram(&mut self, _now: u64, data: &[u8], _out: &mut Vec<Vec<u8>>) -> Step {
+            if data == REPLY {
+                Step::Established(Box::new(XorCipher))
+            } else {
+                Step::Pending
+            }
+        }
+        fn poll(&mut self, now: u64, out: &mut Vec<Vec<u8>>) -> Step {
+            let started = *self.started.get_or_insert(now);
+            if now.saturating_sub(started) >= 10_000 {
+                return Step::Failed("no answer to the test mechanism's hello");
+            }
+            if self.last_sent.is_none_or(|t| now.saturating_sub(t) >= 250) {
+                out.push(HELLO.to_vec());
+                self.last_sent = Some(now);
+            }
+            Step::Pending
+        }
+    }
+
+    pub(super) struct Acceptor;
+
+    impl oss_net::Acceptor for Acceptor {
+        fn accept(&self, _now: u64, first: &[u8], out: &mut Vec<Vec<u8>>) -> Option<Accept> {
+            (first == HELLO).then(|| {
+                out.push(REPLY.to_vec());
+                Accept::Established(Box::new(XorCipher))
+            })
+        }
+    }
+}

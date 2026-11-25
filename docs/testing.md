@@ -10,6 +10,8 @@ cargo run --release -p oss-bot -- --server 127.0.0.1:5000 --ship 1 --count 3 --f
 ```
 
 ```
+Mechanisms supported: None, Subspace, OpenSecurity
+Automatic order: OpenSecurity, then Subspace
 3 bot(s) connecting to 127.0.0.1:5000
 [oss-bot1] connected (vie)
 [oss-bot1] logged in
@@ -20,8 +22,10 @@ cargo run --release -p oss-bot -- --server 127.0.0.1:5000 --ship 1 --count 3 --f
 ```
 
 `--count n` runs *n* of them in one process for a load swarm (names are numbered),
-`--duration secs` makes them leave on their own, `--security opensec|vie|auto|none` picks the
-cipher (`none` sends the password in the clear and only reaches a zone whose
+`--duration secs` makes them leave on their own, `--security <mode>` picks the
+cipher (`auto`, the default, negotiates exactly as the graphical client does; a mechanism's
+name, such as `vie`, `opensec` or `none`, uses that one alone, and `--help` lists them;
+`none` sends the password in the clear and only reaches a zone whose
 `Security:AllowUnencrypted` is set, so it is for a zone you run yourself),
 `--new-user` says yes when a zone offers to create a name it does not know (without it a
 bot declines), and `--identity

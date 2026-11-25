@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 use oss_net::{
-    CipherKind, Config, Connection, DisconnectReason, Event as NetEvent, Handshake,
+    CipherKind, Config, Connection, DisconnectReason, Era, Event as NetEvent, Handshake,
     VieClientHandshake,
 };
 use oss_proto::c2s::{
@@ -639,6 +639,9 @@ pub struct Session {
     awaiting_new_user: bool,
     /// [`SessionEvent::RegistrationWanted`] is waiting for an answer.
     awaiting_registration: bool,
+    /// Which security mechanism the connection uses, when the session was
+    /// opened with [`Session::with_negotiation`].
+    mechanism: Option<security::MechanismInUse>,
 }
 
 impl Session {
@@ -670,7 +673,25 @@ impl Session {
         self.endpoint = (server_ip, bound_port);
     }
 
-    /// A session with any client handshake (e.g. unencrypted, or a private cipher).
+    /// A session opened with a handshake built from the mechanism registry
+    /// ([`security::client_handshake`]), which also says which mechanism the
+    /// connection uses. The login form is then checked against the era that
+    /// mechanism declares, so a mechanism from outside this repository is
+    /// checked like the built-in ones.
+    pub fn with_negotiation(
+        cfg: SessionConfig,
+        now_ms: u64,
+        negotiation: security::Negotiation,
+    ) -> Self {
+        let mut session = Self::with_handshake(cfg, now_ms, negotiation.handshake);
+        session.mechanism = Some(negotiation.mechanism);
+        session
+    }
+
+    /// A session with any client handshake (e.g. unencrypted). Nothing says
+    /// which mechanism it is, so the login form is checked against the kind of
+    /// cipher it ends with; [`Session::with_negotiation`] is the way to open one
+    /// from the mechanism registry.
     pub fn with_handshake(cfg: SessionConfig, now_ms: u64, handshake: Box<dyn Handshake>) -> Self {
         Self {
             conn: Connection::client(Config::client(), handshake, now_ms),
@@ -705,6 +726,7 @@ impl Session {
             new_user_sent: false,
             awaiting_new_user: false,
             awaiting_registration: false,
+            mechanism: None,
         }
     }
 
@@ -837,6 +859,12 @@ impl Session {
     /// The connection's encryption ("opensec", "vie", ...) once connected.
     pub fn cipher_name(&self) -> Option<&'static str> {
         self.conn.cipher_name()
+    }
+
+    /// Which security mechanism the connection uses, when the session was
+    /// opened with [`Session::with_negotiation`].
+    pub fn mechanism(&self) -> Option<&security::MechanismInUse> {
+        self.mechanism.as_ref()
     }
 
     /// The server's OpenSec key, when it sent one.
@@ -1021,18 +1049,19 @@ impl Session {
         // The profile and the cipher are chosen separately and have to agree: a zone
         // picks the login form it expects from the *encryption*, not from the packet's
         // type byte, and drops a mismatch with nothing on the wire to say why. This is
-        // the one place both are in hand. `Connection::establish` sets the cipher
-        // before it pushes `Connected`, and this runs from that arm, so the kind is
-        // already known here.
+        // the one place both are in hand. `Connection::establish` sets the cipher,
+        // and a ladder records which rung won, before `Connected` is pushed, and this
+        // runs from that arm, so both are already known here.
         //
-        // Logged, not asserted: with `SecurityMode::Auto` the cipher we end up with is
-        // partly the *server's* choice (OpenSec, falling back to VIE), so a remote peer
+        // Logged, not asserted: with the automatic order the mechanism we end up with
+        // is partly the *server's* choice (the strongest it answers), so a remote peer
         // can decide whether this fires — and in this repo network data never panics
         // the client. The send goes ahead; the zone's refusal is the real outcome and
         // this is the line that explains it.
-        if let Some(complaint) =
-            login_form_mismatch(self.conn.cipher_kind(), form.kind == c2s::kind::CONT_LOGIN)
-        {
+        if let Some(complaint) = login_form_mismatch(
+            login_era(self.mechanism.as_ref(), self.conn.cipher_kind()),
+            form.kind == c2s::kind::CONT_LOGIN,
+        ) {
             log::error!(
                 "{complaint} (cipher {}); the zone will drop this login",
                 self.conn.cipher_name().unwrap_or("?")
@@ -2359,9 +2388,38 @@ fn arena_target(arena: &str) -> (i16, FixedStr<16>) {
     }
 }
 
-/// Human-readable login failure.
-/// Whether a login form and the cipher it will be sent under disagree, and what to
-/// say about it.
+/// The era a login is sent under: the one the connection's mechanism declares,
+/// when the session knows its mechanism, and otherwise the one its cipher's kind
+/// implies.
+///
+/// The mechanism comes first because it is the one that knows: a cipher from
+/// outside oss-core reports [`CipherKind::Other`], which says nothing, while its
+/// mechanism declares an era like any other.
+pub(crate) fn login_era(
+    mechanism: Option<&security::MechanismInUse>,
+    cipher: Option<CipherKind>,
+) -> Option<Era> {
+    mechanism
+        .and_then(security::MechanismInUse::era)
+        .or_else(|| era_of_cipher(cipher))
+}
+
+/// The era a built-in cipher's kind implies, for a session that does not know
+/// its mechanism. `None` means "cannot tell": [`CipherKind`] is
+/// `#[non_exhaustive]` and [`CipherKind::Other`] is the `Cipher` trait's default.
+pub(crate) fn era_of_cipher(cipher: Option<CipherKind>) -> Option<Era> {
+    match cipher? {
+        // A VIE handshake that ended unencrypted is still the VIE module as far as
+        // the zone is concerned.
+        CipherKind::Vie | CipherKind::None => Some(Era::SubSpace),
+        CipherKind::OpenSec => Some(Era::Modern),
+        CipherKind::Continuum => Some(Era::Continuum),
+        _ => None,
+    }
+}
+
+/// Whether a login form and the era of the connection it will be sent under
+/// disagree, and what to say about it.
 ///
 /// A zone picks the login form it expects from the **encryption**, not from the
 /// packet's type byte — ASSS `core.c`'s `PLogin` is registered for both `0x09` and
@@ -2370,21 +2428,17 @@ fn arena_target(arena: &str) -> (i16, FixedStr<16>) {
 /// from the conn-init byte and `modules/core.rs` then holds a VIE client to
 /// [`Login::VIE_LEN`] and a Continuum one to `Login::CONT_LEN`.
 ///
-/// `None` means "cannot tell", which is not the same as agreement:
-/// [`CipherKind`] is `#[non_exhaustive]` and [`CipherKind::Other`] is the `Cipher`
-/// trait's default, so an external cipher that does not override `kind()` turns this
-/// check off rather than failing it.
-fn login_form_mismatch(cipher: Option<CipherKind>, continuum_form: bool) -> Option<&'static str> {
-    match (cipher?, continuum_form) {
-        // A VIE handshake that ended unencrypted is still the VIE module as far as the
-        // zone is concerned, and an OpenSec client hello is a `00 01` packet, which
-        // oss-server classifies as a VIE client. All three want the SubSpace form.
-        (CipherKind::Vie | CipherKind::None | CipherKind::OpenSec, true) => {
+/// `None` for the era means "cannot tell", which is not the same as agreement: the
+/// check is then off rather than failing. A mechanism that declares its era
+/// ([`Session::with_negotiation`]) is never in that position.
+pub(crate) fn login_form_mismatch(era: Option<Era>, continuum_form: bool) -> Option<&'static str> {
+    match (era?, continuum_form) {
+        // An OpenSec client hello is a `00 01` packet, which oss-server classifies as
+        // a VIE client, so the modern era wants the SubSpace form too.
+        (Era::SubSpace | Era::Modern, true) => {
             Some("Continuum login form on a connection that is not Continuum-encrypted")
         }
-        (CipherKind::Continuum, false) => {
-            Some("SubSpace login form on a Continuum-encrypted connection")
-        }
+        (Era::Continuum, false) => Some("SubSpace login form on a Continuum-encrypted connection"),
         _ => None,
     }
 }
@@ -2913,34 +2967,39 @@ mod tests {
     fn a_login_form_must_match_the_cipher_it_is_sent_under() {
         use CipherKind::*;
 
+        // A session that does not know its mechanism goes by its cipher's kind.
+        let check = |k: Option<CipherKind>, continuum_form| {
+            login_form_mismatch(login_era(Option::None, k), continuum_form)
+        };
+
         // The three that mean "the zone expects the SubSpace form".
         for k in [Vie, None, OpenSec] {
             assert!(
-                login_form_mismatch(Some(k), true).is_some(),
+                check(Some(k), true).is_some(),
                 "{k:?} + Continuum form is a mismatch"
             );
             assert_eq!(
-                login_form_mismatch(Some(k), false),
+                check(Some(k), false),
                 Option::None,
                 "{k:?} + SubSpace form is right"
             );
         }
 
-        assert!(login_form_mismatch(Some(Continuum), false).is_some());
-        assert_eq!(login_form_mismatch(Some(Continuum), true), Option::None);
+        assert!(check(Some(Continuum), false).is_some());
+        assert_eq!(check(Some(Continuum), true), Option::None);
 
         // `Other` is the `Cipher` trait's default, so an external cipher that does not
         // override `kind()` lands here. It must read as "cannot tell" in **both**
         // directions -- never as a mismatch, which would cry wolf at every private
         // implementation, and never as agreement either.
-        assert_eq!(login_form_mismatch(Some(Other), true), Option::None);
-        assert_eq!(login_form_mismatch(Some(Other), false), Option::None);
+        assert_eq!(check(Some(Other), true), Option::None);
+        assert_eq!(check(Some(Other), false), Option::None);
 
         // Before the cipher is known there is nothing to compare. In practice this
         // cannot happen -- `Connection::establish` sets the cipher before it pushes
         // `Connected`, and `send_login` runs from that arm -- but the signature allows
         // it and silence is the only safe answer.
-        assert_eq!(login_form_mismatch(Option::None, true), Option::None);
-        assert_eq!(login_form_mismatch(Option::None, false), Option::None);
+        assert_eq!(check(Option::None, true), Option::None);
+        assert_eq!(check(Option::None, false), Option::None);
     }
 }

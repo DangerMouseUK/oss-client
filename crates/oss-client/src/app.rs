@@ -200,14 +200,15 @@ pub struct Options {
     pub macros: Vec<(crate::game::input::Binding, String)>,
     /// Directory servers for the zone browser.
     pub directories: Vec<String>,
-    /// Connection encryption.
+    /// Connection encryption: the automatic order, or one mechanism by name.
     pub security: oss_session::security::SecurityMode,
-    /// What a build outside this repository supplies for the connection: the
-    /// handshake, and the client the session presents itself as. The default is
-    /// neither, which is this repository's own client — the modes
-    /// [`Options::security`] names, and [`oss_session::VieClient`].
+    /// The mechanisms the client can speak, and the client the session presents
+    /// itself as. The default is this repository's own: the built-in mechanisms,
+    /// and [`oss_session::VieClient`].
     ///
-    /// Set between [`crate::options`] and [`run`]; see [`Supplied`] and the crate
+    /// A build outside this repository registers its mechanisms in a
+    /// [`Supplied`] and hands it to [`crate::options_with`], so that
+    /// `--security` and the settings file know them; see the crate
     /// documentation.
     pub supplied: Supplied,
     /// `--security` was given (it wins over the settings file).
@@ -347,6 +348,9 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         .map(|r| r.display().to_string())
         .collect();
     log::info!("assets: {}", shown.join(", "));
+    for line in startup_lines(&options) {
+        log::info!("{line}");
+    }
     let level = match &options.mode {
         Mode::Sandbox { map: Some(map), .. } => {
             oss_assets::locate::read_file(map).map_err(|e| e.to_string())?
@@ -1281,6 +1285,13 @@ fn draw_settings(
     ui.draw(&c, r, cursor);
 }
 
+/// The lines the client logs at start about its security: the mechanisms it
+/// supports, weakest first, and the order `auto` tries them in. Both are read
+/// from [`Options::supplied`]'s mechanisms.
+pub fn startup_lines(options: &Options) -> [String; 2] {
+    oss_session::security::startup_lines(&options.supplied.mechanisms)
+}
+
 /// What the settings window opens on: the settings file's own values, never the
 /// command line's (see [`Options::saved`]).
 fn current_config(o: &Options) -> crate::config::Config {
@@ -1296,7 +1307,7 @@ impl App {
         self.options.saved = cfg.clone();
         let path = self.options.settings_path.clone();
         ui.status = Some(match &path {
-            Some(p) => match std::fs::write(p, cfg.to_text()) {
+            Some(p) => match std::fs::write(p, cfg.to_text(&self.options.supplied.mechanisms)) {
                 Ok(()) => {
                     ui.mark_saved();
                     format!("Saved to {}", p.display())
@@ -1787,7 +1798,7 @@ fn ship_title(ship: u8) -> &'static str {
 /// command line or the form. Both ways into a zone go through here, so neither can
 /// be given a different set by accident.
 fn apply_settings(o: &Options, opts: &mut ServerOptions) {
-    opts.security = o.security;
+    opts.security = o.security.clone();
     opts.known_servers = known_servers_path(o);
     opts.identities = identities_path(o);
 }
@@ -1851,11 +1862,103 @@ scale = 3
         assert_eq!(o.scale, Some(1));
         assert!(o.mute);
         // What a Save would write is the file's own, untouched.
-        let saved = current_config(&o).to_text();
+        let saved = current_config(&o).to_text(&o.supplied.mechanisms);
         assert!(!saved.contains("127.0.0.1"), "{saved}");
         assert!(saved.contains("servers = dir.example:4990"), "{saved}");
         assert!(saved.contains("scale = 3"), "{saved}");
         assert!(saved.contains("mute = false"), "{saved}");
+    }
+
+    /// A settings file naming a mechanism this build does not have keeps the
+    /// word across a Save. It used to be read against a fixed list, dropped as
+    /// unknown, and written back as `auto`, so saving any setting -- the
+    /// volume, say -- quietly undid the player's choice. A build that does have
+    /// the mechanism reads the same file and uses it.
+    #[test]
+    fn a_mechanism_named_in_the_settings_file_survives_a_save() {
+        use oss_session::security::{Era, SecurityMode};
+
+        let dir = std::env::temp_dir().join(format!("oss-client-keepword-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp folder");
+        let file = dir.join("settings.ini");
+        std::fs::write(
+            &file,
+            "[network]\nsecurity = dummy@example.org\n[audio]\nvolume = 40\n",
+        )
+        .expect("written");
+        let args = || ["--config", file.to_str().expect("a path")].map(String::from);
+
+        // A build without it: auto for this run, and the word kept.
+        let o = crate::cli::options(args().into_iter())
+            .expect("parsed")
+            .expect("not --help");
+        assert_eq!(o.security, SecurityMode::Auto);
+        let mut cfg = current_config(&o);
+        cfg.volume = 70;
+        let saved = cfg.to_text(&o.supplied.mechanisms);
+        assert!(saved.contains("security = dummy@example.org"), "{saved}");
+        assert!(saved.contains("volume = 70"), "{saved}");
+        std::fs::write(&file, &saved).expect("saved");
+
+        // A build that registers it, reading the saved file: it is used.
+        let mut supplied = Supplied::default();
+        supplied
+            .mechanisms
+            .register(oss_session::test_zone::dummy_mechanism(
+                "dummy@example.org",
+                "Dummy",
+                Era::Modern,
+                2000,
+            ))
+            .unwrap();
+        let o = crate::cli::options_with(args().into_iter(), supplied)
+            .expect("parsed")
+            .expect("not --help");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(o.security.name(), "dummy@example.org");
+        let saved = current_config(&o).to_text(&o.supplied.mechanisms);
+        assert!(saved.contains("security = dummy@example.org"), "{saved}");
+        assert!(
+            saved.contains("; Or name one to use it alone: none, vie, dummy@example.org, opensec."),
+            "{saved}"
+        );
+    }
+
+    /// The client's start-up lines, exactly, for this repository's own build,
+    /// and for one that registers a mechanism of middle strength.
+    #[test]
+    fn the_start_up_lines_are_exact() {
+        let o = crate::cli::options(["--sandbox"].map(String::from).into_iter())
+            .expect("parsed")
+            .expect("not --help");
+        assert_eq!(
+            startup_lines(&o),
+            [
+                "Mechanisms supported: None, Subspace, OpenSecurity",
+                "Automatic order: OpenSecurity, then Subspace",
+            ]
+        );
+
+        let mut supplied = Supplied::default();
+        supplied
+            .mechanisms
+            .register(oss_session::test_zone::dummy_mechanism(
+                "dummy@example.org",
+                "Dummy",
+                oss_session::security::Era::Modern,
+                2000,
+            ))
+            .unwrap();
+        let o = crate::cli::options_with(["--sandbox"].map(String::from).into_iter(), supplied)
+            .expect("parsed")
+            .expect("not --help");
+        assert_eq!(
+            startup_lines(&o),
+            [
+                "Mechanisms supported: None, Subspace, Dummy, OpenSecurity",
+                "Automatic order: OpenSecurity, then Dummy, then Subspace",
+            ]
+        );
     }
 
     /// "The scale number doesn't seem to stick or even take effect" -- the

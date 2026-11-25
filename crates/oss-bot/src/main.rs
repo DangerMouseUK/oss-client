@@ -1,10 +1,14 @@
 //! `oss-bot`: a headless SubSpace client for tests and load swarms.
 //!
-//! Connects (VIE), logs in, enters an arena, takes the settings and map (cached),
-//! answers security checks, and either sits in spectator mode or flies a simulated ship
-//! around, sending positions (and optionally firing). Many bots can run in one process.
+//! Connects (negotiating its encryption exactly as the graphical client does: the
+//! automatic order, read from the mechanism registry by strength), logs in, enters
+//! an arena, takes the settings and map (cached), answers security checks, and
+//! either sits in spectator mode or flies a simulated ship around, sending
+//! positions (and optionally firing). Many bots can run in one process.
 
-use oss_session::security::{Identities, SecurityMode, client_handshake, fingerprint};
+use oss_session::security::{
+    Identities, MechanismRegistry, SecurityMode, client_handshake, context, fingerprint,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -15,6 +19,21 @@ use oss_session::{SPECTATOR, Session, SessionConfig, SessionEvent, State, chat_t
 use oss_sim::fixed::Rng;
 use oss_sim::{ShipInput, World};
 
+/// The `--help` text for the mechanisms in `mechanisms`: the words `--security`
+/// accepts, and the order `auto` tries, are read from them.
+fn usage(mechanisms: &MechanismRegistry) -> String {
+    let security =
+        oss_session::security::usage(mechanisms, "Bots do not remember server keys.", 25, 80);
+    USAGE.replace("{security}", &security)
+}
+
+/// The lines the bot logs at start about its security, read from its
+/// mechanisms: what it supports, weakest first, and the order `auto` tries.
+fn startup_lines(mechanisms: &MechanismRegistry) -> [String; 2] {
+    oss_session::security::startup_lines(mechanisms)
+}
+
+/// The `--help` text, with `{security}` for the part read from the mechanisms.
 const USAGE: &str = "\
 Usage: oss-bot --server <host:port> [options]
 
@@ -34,10 +53,7 @@ Options:
                          bot needs this against a zone that has just come up
   --duration <secs>      Disconnect after this long (default: run until Ctrl+C)
   --map-cache <dir>      Where downloaded maps are kept
-  --security <mode>      vie (default), opensec, auto (OpenSec, falling back
-                         to VIE), or none; bots don't pin server keys. The none
-                         mode sends the password in the clear and only works
-                         against a server set to allow it
+  --security <mode>      {security}
   --identity <file>      Offer an OpenSec identity key, one per bot number and
                          zone, kept in <file> (made if missing); a renamed bot
                          keeps its key
@@ -61,7 +77,10 @@ struct Options {
     new_user: bool,
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>, String> {
+fn parse_args(
+    mut args: impl Iterator<Item = String>,
+    mechanisms: &MechanismRegistry,
+) -> Result<Option<Options>, String> {
     let mut o = Options {
         server: String::new(),
         name: "oss-bot".into(),
@@ -74,7 +93,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
         duration: None,
         map_cache: None,
         verbose: false,
-        security: SecurityMode::Vie,
+        security: SecurityMode::Auto,
         identity: None,
         new_user: false,
     };
@@ -108,8 +127,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Options>,
             }
             "--fly" => o.fly = true,
             "--security" => {
-                o.security = SecurityMode::from_name(&value("--security")?)
-                    .ok_or("--security must be vie, opensec, auto or none")?
+                let word = value("--security")?;
+                o.security = SecurityMode::parse(&word, mechanisms).map_err(|_| {
+                    format!(
+                        "--security must be {}, not `{word}`",
+                        oss_session::security::words(mechanisms)
+                    )
+                })?
             }
             "--identity" => o.identity = Some(value("--identity")?.into()),
             "--chat" => o.chat = Some(value("--chat")?),
@@ -323,17 +347,25 @@ impl Bot {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let opts = match parse_args(std::env::args().skip(1)) {
+    let mechanisms = MechanismRegistry::builtin();
+    let opts = match parse_args(std::env::args().skip(1), &mechanisms) {
         Ok(Some(o)) => o,
         Ok(None) => {
-            println!("oss-bot {}\n\n{USAGE}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "oss-bot {}\n\n{}",
+                env!("CARGO_PKG_VERSION"),
+                usage(&mechanisms)
+            );
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}\n\n{USAGE}");
+            eprintln!("error: {e}\n\n{}", usage(&mechanisms));
             std::process::exit(2);
         }
     };
+    for line in startup_lines(&mechanisms) {
+        log::info!("{line}");
+    }
     let cache = MapCache::new(
         opts.map_cache
             .clone()
@@ -381,8 +413,16 @@ fn main() {
             }
             id
         });
-        let handshake = client_handshake(opts.security, None, identity, seed);
-        let session = Session::with_handshake(cfg, driver.now_ms(), handshake);
+        // Bots remember no server keys, so nothing is pinned.
+        let negotiation =
+            match client_handshake(&mechanisms, &opts.security, &context(seed, None, identity)) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("error: --security {}: {e}", opts.security);
+                    std::process::exit(2);
+                }
+            };
+        let session = Session::with_negotiation(cfg, driver.now_ms(), negotiation);
         bots.push(Bot {
             label: name,
             session,
@@ -471,8 +511,131 @@ fn private_chat(text: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
+    use oss_session::security::{Era, MechanismInUse};
+    use oss_session::test_zone::dummy_mechanism;
+
     fn parse(s: &str) -> Result<Option<Options>, String> {
-        parse_args(s.split_whitespace().map(String::from))
+        parse_args(
+            s.split_whitespace().map(String::from),
+            &MechanismRegistry::builtin(),
+        )
+    }
+
+    /// The bot negotiates exactly as the client does: `auto` unless told
+    /// otherwise, the order read from its mechanisms by strength, so a
+    /// mechanism of middle strength lands between OpenSecurity and Subspace.
+    /// Naming one mechanism still works.
+    #[test]
+    fn the_default_is_the_automatic_order_as_in_the_client() {
+        let o = parse("--server x:1").unwrap().unwrap();
+        assert_eq!(o.security, SecurityMode::Auto);
+
+        let mut mechanisms = MechanismRegistry::builtin();
+        mechanisms
+            .register(dummy_mechanism(
+                "middle@example.org",
+                "Middle",
+                Era::Modern,
+                2000,
+            ))
+            .unwrap();
+        let o = parse_args(
+            ["--server", "x:1"].into_iter().map(String::from),
+            &mechanisms,
+        )
+        .unwrap()
+        .unwrap();
+        let negotiation =
+            client_handshake(&mechanisms, &o.security, &context(1, None, None)).unwrap();
+        let MechanismInUse::Automatic(progress) = negotiation.mechanism else {
+            panic!("the automatic order")
+        };
+        let rungs: Vec<&str> = progress.rungs().map(|id| id.as_str()).collect();
+        assert_eq!(rungs, ["opensec", "middle@example.org", "vie"]);
+        assert_eq!(
+            startup_lines(&mechanisms)[1],
+            "Automatic order: OpenSecurity, then Middle, then Subspace"
+        );
+
+        // By name, the old default among them.
+        for word in ["vie", "middle@example.org", "none", "OPENSEC"] {
+            let o = parse_args(
+                ["--server", "x:1", "--security", word]
+                    .into_iter()
+                    .map(String::from),
+                &mechanisms,
+            )
+            .unwrap()
+            .unwrap();
+            let negotiation =
+                client_handshake(&mechanisms, &o.security, &context(1, None, None)).unwrap();
+            assert_eq!(
+                negotiation.mechanism.id().map(|id| id.as_str()),
+                Some(word.to_ascii_lowercase().as_str())
+            );
+        }
+        assert_eq!(
+            parse("--server x:1 --security middle@example.org").err(),
+            Some(
+                "--security must be auto, none, vie or opensec, not `middle@example.org`"
+                    .to_owned()
+            )
+        );
+    }
+
+    /// The start-up lines, exactly, and the help read from the same mechanisms.
+    #[test]
+    fn the_start_up_lines_and_help_come_from_the_mechanisms() {
+        let builtin = MechanismRegistry::builtin();
+        assert_eq!(
+            startup_lines(&builtin),
+            [
+                "Mechanisms supported: None, Subspace, OpenSecurity",
+                "Automatic order: OpenSecurity, then Subspace",
+            ]
+        );
+        let help = usage(&builtin);
+        let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(
+                "--security <mode> auto (the default) tries the automatic order, \
+                 OpenSecurity, then Subspace,"
+            ),
+            "{help}"
+        );
+        assert!(
+            flat.contains("Or name one mechanism: none, vie or opensec."),
+            "{help}"
+        );
+        assert!(!help.contains("{security}"));
+        // The lines written for `--security` fit, each after the first indented
+        // under the option's description.
+        let security: Vec<&str> = help
+            .lines()
+            .skip_while(|l| !l.starts_with("  --security"))
+            .take_while(|l| !l.starts_with("  --identity"))
+            .collect();
+        assert!(security.len() > 1, "{help}");
+        for line in &security {
+            assert!(line.len() <= 80, "{line:?}");
+        }
+        for line in &security[1..] {
+            assert!(line.starts_with(&" ".repeat(25)), "{line:?}");
+        }
+
+        let mut more = MechanismRegistry::builtin();
+        more.register(dummy_mechanism(
+            "middle@example.org",
+            "Middle",
+            Era::Modern,
+            2000,
+        ))
+        .unwrap();
+        assert_eq!(
+            startup_lines(&more)[0],
+            "Mechanisms supported: None, Subspace, Middle, OpenSecurity"
+        );
+        assert!(usage(&more).contains("middle@example.org"));
     }
 
     #[test]
