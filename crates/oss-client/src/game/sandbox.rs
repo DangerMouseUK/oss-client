@@ -242,6 +242,12 @@ impl Sandbox {
     }
 
     /// Online: the arena `net` has finished entering.
+    /// The address of the zone this game is connected to, if it is online.
+    /// A redirect changes it.
+    pub fn zone_address(&self) -> Option<&str> {
+        self.net.as_ref().map(|n| n.connection().0)
+    }
+
     pub fn new_online(
         renderer: &mut Renderer,
         dir: &AssetDirs,

@@ -321,6 +321,30 @@ struct App {
     clicked: bool,
     /// This machine's password store, if it has one, for "Remember password".
     vault: crate::game::remember::Vault,
+    /// The zone list as it stood when the player last pressed Play, as
+    /// (address, name): where the window title finds a zone's name, for the
+    /// zone played and for any zone a redirect sends the connection on to.
+    zone_names: Vec<(String, String)>,
+    /// The zone address the window title names now, so the title changes only
+    /// when the connection moves to another zone.
+    titled: Option<String>,
+}
+
+/// The window's title while connected: the zone's name from the zone list when
+/// its address is listed there, then the address.
+///
+/// An address typed by hand or given with `--server` has no name unless it is
+/// one the list holds, and after a redirect the new address is looked up afresh:
+/// the name of the zone that did the redirecting is never carried over to
+/// another address.
+fn window_title(server: &str, names: &[(String, String)]) -> String {
+    match names
+        .iter()
+        .find(|(address, name)| address == server && !name.trim().is_empty())
+    {
+        Some((_, name)) => format!("Open SubSpace — {} — {server}", name.trim()),
+        None => format!("Open SubSpace — {server}"),
+    }
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -394,6 +418,8 @@ Put the game graphics in assets/classic beside the program, or point --assets-di
         clicked: false,
         cursor: None,
         vault: crate::game::remember::Vault::probe(),
+        zone_names: Vec::new(),
+        titled: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
@@ -469,6 +495,7 @@ impl App {
             held_for_command_line: false,
         }));
         run.window.set_title("Open SubSpace");
+        self.titled = None;
         self.settings = None;
         self.input.clear();
         run.window.request_redraw();
@@ -491,7 +518,7 @@ impl ApplicationHandler for App {
         }
         let title = match &self.options.mode {
             Mode::Sandbox { .. } => "Open SubSpace — sandbox".to_string(),
-            Mode::Zone(z) => format!("Open SubSpace — {}", z.server),
+            Mode::Zone(z) => window_title(&z.server, &[]),
             Mode::Login(_) => "Open SubSpace".to_string(),
             Mode::Replay(p) => format!("Open SubSpace — replay {}", p.display()),
         };
@@ -1041,8 +1068,12 @@ impl App {
                     );
                     match Online::connect(&opts, res, &self.options.supplied) {
                         Ok(net) => {
-                            run.window
-                                .set_title(&format!("Open SubSpace — {}", opts.server));
+                            self.zone_names = ls
+                                .browser
+                                .zones
+                                .iter()
+                                .map(|z| (z.address.clone(), z.name.clone()))
+                                .collect();
                             let Screen::Login(ls) =
                                 std::mem::replace(&mut run.screen, Screen::Empty)
                             else {
@@ -1199,6 +1230,28 @@ impl App {
                     run.screen = Screen::Game(Box::new(s));
                 }
                 Err(e) => return self.fail(event_loop, e),
+            }
+        }
+
+        // The title follows the connection: set when it starts, again whenever
+        // a redirect moves it to another zone, and back to the bare name when a
+        // failed connection returns to the form.
+        let zone = match &run.screen {
+            Screen::Connecting(conn) => Some(conn.net.connection().0),
+            Screen::Game(game) => game.zone_address(),
+            _ => None,
+        };
+        if !matches!(self.options.mode, Mode::Replay(_)) {
+            match zone {
+                Some(zone) if self.titled.as_deref() != Some(zone) => {
+                    run.window.set_title(&window_title(zone, &self.zone_names));
+                    self.titled = Some(zone.to_owned());
+                }
+                None if self.titled.is_some() && matches!(run.screen, Screen::Login(_)) => {
+                    run.window.set_title("Open SubSpace");
+                    self.titled = None;
+                }
+                _ => {}
             }
         }
 
@@ -2030,6 +2083,36 @@ scale = 3
         assert_eq!(wanted_scale(Some(3), 1.0), 3);
         assert_eq!(wanted_scale(Some(99), 1.0), 8);
         assert_eq!(wanted_scale(Some(0), 2.0), 1, "0 as a value, not as None");
+    }
+
+    /// The zone's name between "Open SubSpace" and the address when the zone
+    /// list has it; the address alone when it does not; and after a redirect,
+    /// the new address looked up afresh.
+    #[test]
+    fn the_title_names_the_zone_when_the_list_does() {
+        let names = vec![
+            ("127.0.0.1:5000".to_string(), "Home Zone".to_string()),
+            ("127.0.0.1:6000".to_string(), " ".to_string()),
+        ];
+        assert_eq!(
+            window_title("127.0.0.1:5000", &names),
+            "Open SubSpace — Home Zone — 127.0.0.1:5000"
+        );
+        assert_eq!(
+            window_title("10.0.0.9:5000", &names),
+            "Open SubSpace — 10.0.0.9:5000",
+            "typed by hand, or a redirect to an address the list does not hold"
+        );
+        assert_eq!(
+            window_title("127.0.0.1:6000", &names),
+            "Open SubSpace — 127.0.0.1:6000",
+            "a blank name is no name"
+        );
+        assert_eq!(
+            window_title("127.0.0.1:5000", &[]),
+            "Open SubSpace — 127.0.0.1:5000",
+            "straight in with --server: no list"
+        );
     }
 
     #[test]
