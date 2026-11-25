@@ -43,10 +43,14 @@ cargo run --release
 ```
 
 That opens the login screen: zone, name, password, arena, ship. **F3** there is the zone
-browser, **F5** the offline sandbox. Or skip it and go straight in:
+browser, **F5** the offline sandbox. Or name the zone on the command line. If a password is
+saved for that name and zone (tick **Remember** on the login screen once), `--server` goes
+straight in with it; with none saved, it opens the login screen filled in, for you to type
+the password. A zone that wants no password, like a local test zone, takes `--password ""`
+and goes straight in:
 
 ```sh
-cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --ship 1
+cargo run --release -p oss-client -- --server 127.0.0.1:5000 --name YourName --password "" --ship 1
 ```
 
 The keys are Continuum's, so a returning player already has them in their hands. **F1**
@@ -98,7 +102,7 @@ can act as a zone and check whatever connects to it. Run it, then point this cli
 
 ```sh
 cargo run --release -p oss-conformance -- client --bind 127.0.0.1:5621   # in oss-core
-cargo run --release -p oss-client -- --server 127.0.0.1:5621 --name ConfTest --ship 1
+cargo run --release -p oss-client -- --server 127.0.0.1:5621 --name ConfTest --password "" --ship 1
 ```
 
 ```
