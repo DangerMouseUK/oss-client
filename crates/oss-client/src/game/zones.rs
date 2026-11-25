@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use super::input::Stroke;
+use super::login::Login;
 use oss_session::directory::{DirectoryClient, ZoneInfo, ZonePinger};
 use winit::keyboard::KeyCode;
 
@@ -285,6 +286,34 @@ impl ZoneBrowser {
         }
     }
 
+    /// One frame of keys while the list has the focus on the start-up screen,
+    /// and the Zone field following the row they settle on.
+    ///
+    /// **Only the keys that walk the list, or Enter picking a row, move the
+    /// Zone field.** Any key at all used to -- the Tab or Shift that leaves the
+    /// list included -- so tabbing through the form copied the highlighted row,
+    /// usually the busiest zone rather than the one in the field, over the
+    /// player's zone. That changed the account the form named, which takes
+    /// out a saved password filled in for the old one: the password vanished
+    /// from the screen while the player was only pressing Tab.
+    pub fn form_keys(&mut self, login: &mut Login, strokes: &[Stroke]) {
+        let walked = strokes.iter().any(|s| {
+            matches!(
+                s.key,
+                Some(KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::PageUp | KeyCode::PageDown)
+            )
+        });
+        let follow = match self.input(strokes) {
+            Some(BrowserChoice::Pick(address)) => Some(address),
+            _ if walked => self.zones.get(self.selected).map(|z| z.address.clone()),
+            _ => None,
+        };
+        if let Some(address) = follow {
+            login.server = address;
+            login.error = None;
+        }
+    }
+
     /// Keys: Up/Down choose, Enter picks, Esc goes back.
     ///
     /// The keys that walk the list take the OS repeats, so holding Down runs
@@ -370,6 +399,60 @@ mod tests {
         assert_eq!(names(&b), ["Busy", "Quiet", "Middling"]);
         // ... and the highlight followed the zone, not the row number.
         assert_eq!(b.zones[b.selected].name, "Quiet");
+    }
+
+    /// What the lead saw: a saved password filled in for the zone in the field,
+    /// then Tab round the form, through the list and off it -- and the password
+    /// gone. The Tab leaving the list wrote the list's top row over the Zone
+    /// field, the account changed, and the filled-in password went with it.
+    #[test]
+    fn tabbing_through_the_list_keeps_the_zone_and_its_saved_password() {
+        use super::super::login::Field;
+        use super::super::remember::Recall;
+        use oss_credstore::{MemoryStore, PasswordStore, account};
+        use std::sync::Arc;
+
+        let mut b = ZoneBrowser::open(&[]);
+        b.add(vec![
+            zone("Busy", "127.0.0.1:6000", 40),
+            zone("Mine", "127.0.0.1:5000", 3),
+        ]);
+        let mem = Arc::new(MemoryStore::default());
+        mem.save(&account("Pilot", "127.0.0.1:5000"), "saved-for-tests")
+            .expect("saved");
+        let store: Arc<dyn PasswordStore> = mem;
+        let mut l = Login::default();
+        l.name = "Pilot".into();
+        l.server = "127.0.0.1:5000".into();
+        l.set_vault(true);
+        let mut recall = Recall::default();
+        let start = Instant::now();
+        let mut now = start;
+        while l.password.is_empty() && start.elapsed() < Duration::from_secs(5) {
+            now += Duration::from_millis(500);
+            recall.tick(&mut l, &store, now);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(l.password, "saved-for-tests", "filled in");
+
+        // Tab once round the whole form, a frame per key, as the screen runs it.
+        for _ in 0..l.fields().len() {
+            let tab = keys(&[KeyCode::Tab]);
+            if l.focused() == Field::Zones {
+                b.form_keys(&mut l, &tab);
+            }
+            l.input(&tab, false);
+            now += Duration::from_millis(500);
+            recall.tick(&mut l, &store, now);
+        }
+        assert_eq!(l.server, "127.0.0.1:5000", "the zone is the player's still");
+        assert_eq!(l.password, "saved-for-tests", "and so is its password");
+        assert!(l.remember);
+
+        // Walking the list is choosing a zone, and does move the field.
+        l.focus_zones();
+        b.form_keys(&mut l, &keys(&[KeyCode::ArrowUp]));
+        assert_eq!(l.server, "127.0.0.1:6000");
     }
 
     /// Until the player picks a row the highlight means "top of the list", so it

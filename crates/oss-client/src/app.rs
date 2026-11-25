@@ -885,20 +885,11 @@ impl App {
             };
             self.input.take_edges();
             // The list owns Up/Down and the rest of its keys while it has the focus.
-            // Whichever row it settles on fills in the Zone field, so the highlighted
-            // row and the address can never disagree; Enter and Esc belong to the
-            // screen, and the form below answers them.
+            // Whichever row they walk to fills in the Zone field; a key that only
+            // passes through the list, Tab above all, leaves the field alone. Enter
+            // and Esc belong to the screen, and the form below answers them.
             if ls.login.focused() == crate::game::login::Field::Zones {
-                let picked = ls.browser.input(&strokes);
-                if let Some(crate::game::zones::BrowserChoice::Pick(address)) = picked {
-                    ls.login.server = address;
-                    ls.login.error = None;
-                } else if strokes.iter().any(|s| s.key.is_some())
-                    && let Some(z) = ls.browser.zones.get(ls.browser.selected)
-                {
-                    ls.login.server.clone_from(&z.address);
-                    ls.login.error = None;
-                }
+                ls.browser.form_keys(&mut ls.login, &strokes);
             }
             // A click, against the regions the last frame drew. The keyboard is
             // untouched by this: clicking a field focuses it exactly as tabbing
