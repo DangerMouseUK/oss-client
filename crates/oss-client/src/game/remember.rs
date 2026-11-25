@@ -197,8 +197,7 @@ impl Recall {
     /// One frame's worth: notices a new name or zone, asks once it has stopped
     /// changing, and fills the box when the answer comes.
     pub fn tick(&mut self, login: &mut Login, store: &Arc<dyn PasswordStore>, now: Instant) {
-        let who = (!login.name.trim().is_empty() && login.server.contains(':'))
-            .then(|| account(&login.name, &login.server));
+        let who = account_of(login);
 
         // A password we filled in belongs to the account it was saved for.
         if let Some(filled) = &self.filled_for
@@ -259,6 +258,104 @@ impl Recall {
             let _ = tx.send(found);
         });
         self.pending = Some((who, rx));
+    }
+
+    /// What the store said about the account the form names now: `Some(true)`
+    /// when its saved password is in the box, `Some(false)` when it has none,
+    /// `None` while it has not been asked yet or is still answering.
+    pub fn answer_for(&self, login: &Login) -> Option<bool> {
+        let who = account_of(login)?;
+        if self.filled_for.as_ref() == Some(&who) {
+            return Some(true);
+        }
+        let answering = self.pending.as_ref().is_some_and(|(w, _)| *w == who);
+        (self.asked.as_ref() == Some(&who) && !answering).then_some(false)
+    }
+}
+
+/// The account the form's name and zone add up to, when they add up to one.
+fn account_of(login: &Login) -> Option<String> {
+    (!login.name.trim().is_empty() && login.server.contains(':'))
+        .then(|| account(&login.name, &login.server))
+}
+
+/// How long a Play waits for the store to look up a saved password before it
+/// goes ahead without one. Past the store's own deadline for saying whether it
+/// is there, plus the pause before a lookup and the lookup itself.
+pub const HOLD_LIMIT: Duration = Duration::from_secs(8);
+
+/// What to do with a Play once the store has said there is no saved password.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfNone {
+    /// Connect with the box as it is. The player pressed Play themself, so an
+    /// empty password is what they asked for.
+    Play,
+    /// Stay on the form with the password box waiting. Nobody pressed anything:
+    /// the command line named a zone and no password, and sending an empty one
+    /// unasked is a wrong try that can count towards a zone's lock-out.
+    Stay,
+}
+
+/// A Play held back until the saved password has been looked up.
+///
+/// Without it, Play pressed in the moment between the form appearing and the
+/// store answering -- the store is asked off the drawing thread, after the name
+/// and zone have stood still for a moment -- connected with an empty password
+/// although one was saved for that very name and zone, and the zone refused it.
+#[derive(Debug, Clone, Copy)]
+pub struct Hold {
+    pub until: Instant,
+    pub if_none: IfNone,
+}
+
+/// What a held Play does this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Wait,
+    Play,
+    Stay,
+}
+
+impl Hold {
+    pub fn new(now: Instant, if_none: IfNone) -> Self {
+        Self {
+            until: now + HOLD_LIMIT,
+            if_none,
+        }
+    }
+
+    /// Whether a Play with this form would be held back at all: only with the
+    /// password box empty, a name and zone to look up, and a store that is
+    /// there or still saying whether it is.
+    pub fn needed(login: &Login, recall: &Recall, vault: &Vault) -> bool {
+        login.password.is_empty()
+            && account_of(login).is_some()
+            && !matches!(vault, Vault::None)
+            && recall.answer_for(login).is_none()
+    }
+
+    /// Decides, from the store and the form as they are now.
+    pub fn verdict(&self, login: &Login, recall: &Recall, vault: &Vault, now: Instant) -> Verdict {
+        let none = match self.if_none {
+            IfNone::Play => Verdict::Play,
+            IfNone::Stay => Verdict::Stay,
+        };
+        // A password in the box, recalled or typed, is what Play wanted.
+        if !login.password.is_empty() {
+            return Verdict::Play;
+        }
+        // Nothing to look up, or nowhere to look it up: there is no saved one.
+        if account_of(login).is_none() || matches!(vault, Vault::None) {
+            return none;
+        }
+        match recall.answer_for(login) {
+            Some(_) => none,
+            None if now >= self.until => {
+                log::info!("the password store did not answer in time");
+                none
+            }
+            None => Verdict::Wait,
+        }
     }
 }
 
@@ -375,6 +472,101 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(l.password, "typed");
+    }
+
+    /// Play pressed before the store has answered waited for nothing and sent
+    /// an empty password, although one was saved for that very name and zone.
+    /// It now waits for the saved one and plays with it.
+    #[test]
+    fn play_waits_for_the_saved_password() {
+        let mem = Arc::new(MemoryStore::default());
+        let store: Arc<dyn PasswordStore> = mem.clone();
+        mem.save(&account("Pilot", "zone.example:5000"), SECRET)
+            .expect("saved");
+        let vault = Vault::Ready(Arc::clone(&store));
+        let mut l = form(true);
+        let mut recall = Recall::default();
+        let start = Instant::now();
+
+        assert!(
+            Hold::needed(&l, &recall, &vault),
+            "Play with an empty box before the store has answered is held"
+        );
+        for if_none in [IfNone::Play, IfNone::Stay] {
+            let hold = Hold::new(start, if_none);
+            assert_eq!(hold.verdict(&l, &recall, &vault, start), Verdict::Wait);
+        }
+        let hold = Hold::new(start, IfNone::Stay);
+        tick_until(&mut recall, &mut l, &store, |l| !l.password.is_empty());
+        assert_eq!(hold.verdict(&l, &recall, &vault, start), Verdict::Play);
+        assert_eq!(l.password, SECRET, "and plays with the saved password");
+        assert!(!Hold::needed(&l, &recall, &vault));
+    }
+
+    /// Nothing saved: a Play the player pressed goes ahead with the box as it
+    /// is, and the command line's waits on the form for a password to be typed.
+    #[test]
+    fn with_nothing_saved_the_player_plays_and_the_command_line_stays() {
+        let mem = Arc::new(MemoryStore::default());
+        let store: Arc<dyn PasswordStore> = mem.clone();
+        let vault = Vault::Ready(Arc::clone(&store));
+        let mut l = form(true);
+        let mut recall = Recall::default();
+        let start = Instant::now();
+        let mut now = start;
+        while recall.answer_for(&l).is_none() && start.elapsed() < Duration::from_secs(5) {
+            now += SETTLE;
+            recall.tick(&mut l, &store, now);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            recall.answer_for(&l),
+            Some(false),
+            "asked, and nothing saved"
+        );
+        assert!(
+            !Hold::needed(&l, &recall, &vault),
+            "nothing left to wait for"
+        );
+        let play = Hold::new(start, IfNone::Play);
+        let stay = Hold::new(start, IfNone::Stay);
+        assert_eq!(play.verdict(&l, &recall, &vault, start), Verdict::Play);
+        assert_eq!(stay.verdict(&l, &recall, &vault, start), Verdict::Stay);
+    }
+
+    /// No store on this machine: nothing is held, and the command line's Play
+    /// stays on the form rather than sending an empty password.
+    #[test]
+    fn with_no_store_nothing_is_held() {
+        let l = form(false);
+        let recall = Recall::default();
+        let now = Instant::now();
+        assert!(!Hold::needed(&l, &recall, &Vault::None));
+        assert_eq!(
+            Hold::new(now, IfNone::Stay).verdict(&l, &recall, &Vault::None, now),
+            Verdict::Stay
+        );
+        assert_eq!(
+            Hold::new(now, IfNone::Play).verdict(&l, &recall, &Vault::None, now),
+            Verdict::Play
+        );
+    }
+
+    /// A store that never answers holds Play for [`HOLD_LIMIT`] and no longer.
+    #[test]
+    fn a_store_that_never_answers_is_waited_for_only_so_long() {
+        let (_still_asking, rx) = mpsc::channel();
+        let vault = Vault::Asking(rx, Instant::now());
+        let l = form(false);
+        let recall = Recall::default();
+        let start = Instant::now();
+        assert!(Hold::needed(&l, &recall, &vault));
+        let hold = Hold::new(start, IfNone::Play);
+        assert_eq!(hold.verdict(&l, &recall, &vault, start), Verdict::Wait);
+        assert_eq!(
+            hold.verdict(&l, &recall, &vault, start + HOLD_LIMIT),
+            Verdict::Play
+        );
     }
 
     /// No store, no line: the form is the six lines it always was, and Tab never

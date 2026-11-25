@@ -90,6 +90,12 @@ with the tools you already have. Next time, the same name and zone fill the pass
 you. Untick the line to delete the saved password straight away. The password is never written
 to the settings file, `login.ini` or any file of the client's own, and never to a log.
 
+Play pressed before the saved password has been looked up waits for it, for a second or so,
+rather than sending an empty one. A zone named with `--server` and no `--password` uses the
+saved password for that name and zone; with none saved, the start-up screen opens filled in
+and waits for you to type it. `--password ""` goes straight in with no password, for a zone
+that wants none.
+
 **On Linux** the password goes to your desktop's own keyring through the Secret Service (GNOME
 Keyring, or KWallet), encrypted on its way there. A system with no such keyring, such as a
 server or a minimal desktop, has nowhere safe to keep it, so the password is not stored at

@@ -590,6 +590,32 @@ mod tests {
         assert_eq!(l.name, "", "a held Backspace clears the field");
     }
 
+    /// An Enter still down from answering something in another window --
+    /// whatever was answered to bring this one up -- is reported by the window,
+    /// as it gains the focus, as a press it made up. Taken as a keystroke it
+    /// pressed Play the moment the form appeared, before a saved password could
+    /// be filled in. Held, it presses nothing; pressed again here, it plays.
+    #[test]
+    fn an_enter_held_from_another_window_does_not_press_play() {
+        use super::super::input::InputState;
+        let mut l = Login::load(None, Some("Pilot"), Box::new(Login::default().into_base()));
+        let mut input = InputState::default();
+
+        input.window_key(Some(KeyCode::Enter), "\r", true, false, true);
+        assert_eq!(l.input(&input.take_strokes(), false), None, "no Play");
+        assert!(input.held(KeyCode::Enter), "but it is down");
+
+        input.window_key(Some(KeyCode::Enter), "", false, false, false);
+        input.window_key(Some(KeyCode::Enter), "\r", true, false, false);
+        assert!(
+            matches!(
+                l.input(&input.take_strokes(), false),
+                Some(Choice::Connect(_))
+            ),
+            "pressed in this window, Enter plays"
+        );
+    }
+
     /// The other half of one keystroke being one thing: a Backspace lands where
     /// it was typed rather than after everything else in the frame.
     #[test]

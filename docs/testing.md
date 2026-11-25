@@ -77,9 +77,12 @@ For screenshots, soak tests and CI:
 | `--record` / `--replay` | See [playing.md](playing.md#replays) |
 
 ```sh
-oss-client --server 127.0.0.1:5000 --name Pilot --ship 1 \
+oss-client --server 127.0.0.1:5000 --name Pilot --password "" --ship 1 \
   --autopilot --screenshot shot.png --screenshot-at 30
 ```
+
+A scripted run names its password, even an empty one: with no `--password`, the client looks
+for the one saved for that name and zone, and stops on the start-up screen when there is none.
 
 The screenshots in [the README](../README.md) were taken this way, against the zone that
 ships in [oss-server](https://github.com/DangerMouseUK/oss-server).

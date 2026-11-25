@@ -826,6 +826,58 @@ impl InputState {
         self.strokes.push(stroke);
     }
 
+    /// A key event as the window reports it: the key, the text it typed, whether
+    /// it went down or came up, the OS repeat flag, and whether the window made
+    /// it up.
+    ///
+    /// The key and the character it typed are one keystroke, with the OS repeat
+    /// flag on it. The repeat flag is the one that used to be dropped on the
+    /// floor, which is why a held Backspace cleared one character and stopped.
+    /// A key event can carry more than one character when a dead key finishes a
+    /// composition; the key belongs to the first of them.
+    ///
+    /// **A made-up press is held, never typed.** When the window gains the
+    /// focus it reports every key down at that moment as pressed, flagged as
+    /// made up. Such a key went down in some other window -- typically the
+    /// prompt that was answered to bring this one up -- so it counts as held,
+    /// which keeps a held thrust going across a switch back to the game, but it
+    /// is not a keystroke: no form, menu or one-shot action sees it. Taken as a
+    /// keystroke, an Enter still down from answering a prompt pressed Play on
+    /// the start-up screen the moment the window appeared.
+    pub fn window_key(
+        &mut self,
+        code: Option<KeyCode>,
+        text: &str,
+        down: bool,
+        repeat: bool,
+        made_up: bool,
+    ) {
+        if !down {
+            if let Some(code) = code {
+                self.release(code);
+            }
+            return;
+        }
+        if made_up {
+            if let Some(code) = code {
+                self.held.insert(code);
+            }
+            return;
+        }
+        let mut chars = text.chars();
+        let first = chars.next();
+        if code.is_some() || first.is_some() {
+            self.press(Stroke {
+                key: code,
+                text: first,
+                repeat,
+            });
+        }
+        for c in chars {
+            self.press(Stroke::text(c).repeated(repeat));
+        }
+    }
+
     /// A key coming back up.
     pub fn release(&mut self, code: KeyCode) {
         self.held.remove(&code);

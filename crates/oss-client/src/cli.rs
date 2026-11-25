@@ -35,7 +35,10 @@ Usage: oss-client [options]                (login screen)
 Play online:
   --server <host:port>      Zone to join
   --name <name>             Player name (default: from the settings file)
-  --password <pw>           Password (default empty)
+  --password <pw>           Password. Without it, the password saved for this
+                            name and zone is used; with none saved, the start-up
+                            screen opens filled in for you to type it. An empty
+                            --password \"\" goes straight in with no password
   --arena <name>            Arena to enter (default: any public arena)
   --new-user                When the zone offers to create a name it does not
                             know, say yes without asking: for scripted runs.
@@ -154,7 +157,7 @@ fn parse_args(
     let mut map = None;
     let mut server = None;
     let mut name = None;
-    let mut password = String::new();
+    let mut password: Option<String> = None;
     let mut arena = None;
     let mut new_user = false;
     let mut ship: Option<u8> = None;
@@ -198,7 +201,7 @@ fn parse_args(
             "--assets-dir" => assets_dir = Some(PathBuf::from(value("--assets-dir")?)),
             "--server" => server = Some(value("--server")?),
             "--name" => name = Some(value("--name")?),
-            "--password" => password = value("--password")?,
+            "--password" => password = Some(value("--password")?),
             "--arena" => arena = Some(value("--arena")?),
             "--new-user" => new_user = true,
             "--freq" => {
@@ -438,8 +441,10 @@ fn parse_args(
             player_name: None,
             login_file: None,
             saved: Default::default(),
+            form_plays_itself: false,
         }));
     }
+    let mut form_plays_itself = false;
     let mode = match (sandbox, server) {
         (true, Some(_)) => return Err("use either --sandbox or --server, not both".into()),
         (true, None) => {
@@ -458,7 +463,7 @@ fn parse_args(
                 server: server.unwrap_or_default(),
                 // Filled from the settings file if not given; checked in `apply_config`.
                 name: name.unwrap_or_default(),
-                password,
+                password: password.clone().unwrap_or_default(),
                 arena,
                 ship: ship.unwrap_or(oss_session::SPECTATOR),
                 freq,
@@ -470,7 +475,17 @@ fn parse_args(
                 identities: None,
                 new_user,
             });
+            // A zone named with no password goes by way of the start-up screen,
+            // filled in, which plays by itself once the password store has
+            // looked up the one saved for that name and zone -- and stays put
+            // for it to be typed when there is none. Straight in, it sent an
+            // empty password unasked: a refusal at best, and a wrong try towards
+            // the zone's lock-out at worst. `--password ""` still goes straight
+            // in, for a zone that wants none.
             if opts.server.is_empty() {
+                app::Mode::Login(opts)
+            } else if password.is_none() {
+                form_plays_itself = true;
                 app::Mode::Login(opts)
             } else {
                 app::Mode::Zone(opts)
@@ -513,6 +528,7 @@ fn parse_args(
         player_name: None,
         login_file: None,
         saved: Default::default(),
+        form_plays_itself,
     }))
 }
 
@@ -832,10 +848,11 @@ mod tests {
         assert_eq!((o.scale, o.vsync), (Some(2), true));
         let o = parse("--sandbox --ship 2").unwrap().unwrap();
         assert!(matches!(&o.mode, app::Mode::Sandbox { map: None, ship: 1 }));
-        let o = parse("--server 127.0.0.1:5000 --name Bob --ship 4")
+        let o = parse("--server 127.0.0.1:5000 --name Bob --ship 4 --password pw")
             .unwrap()
             .unwrap();
         assert!(matches!(&o.mode, app::Mode::Zone(z) if z.name == "Bob" && z.ship == 3));
+        assert!(!o.form_plays_itself);
         let mut o = parse("--server x:1").unwrap().unwrap();
         finish_options(&mut o, config::Config::default()).unwrap();
         assert!(
@@ -848,7 +865,9 @@ mod tests {
             vsync: true,
             ..Default::default()
         };
-        let mut o = parse("--server x:1 --scale 2").unwrap().unwrap();
+        let mut o = parse("--server x:1 --scale 2 --password pw")
+            .unwrap()
+            .unwrap();
         finish_options(&mut o, cfg).unwrap();
         assert!(matches!(&o.mode, app::Mode::Zone(z) if z.name == "Ace"));
         assert_eq!((o.scale, o.vsync), (Some(2), true), "flags win");
@@ -859,5 +878,44 @@ mod tests {
             app::Mode::Login(z) if z.server.is_empty()
         ));
         assert!(parse("--help").unwrap().is_none());
+    }
+
+    /// A zone named with no password went straight in and sent an empty one,
+    /// unasked: a refusal, and a wrong try towards the zone's lock-out. Now it
+    /// goes by way of the start-up screen, filled in, which plays by itself
+    /// once the saved password is found. `--password ""` still goes straight
+    /// in, for a zone that wants none.
+    #[test]
+    fn a_zone_with_no_password_goes_by_way_of_the_form() {
+        let mut o = parse("--server x:1 --name Bob --ship 2").unwrap().unwrap();
+        finish_options(&mut o, config::Config::default()).unwrap();
+        assert!(
+            matches!(&o.mode, app::Mode::Login(z) if z.server == "x:1" && z.name == "Bob" && z.ship == 1),
+            "the form, filled in with what the command line named"
+        );
+        assert!(o.form_plays_itself, "and it plays by itself");
+
+        let mut o = parse("--server x:1 --name Bob --password pw")
+            .unwrap()
+            .unwrap();
+        finish_options(&mut o, config::Config::default()).unwrap();
+        assert!(matches!(&o.mode, app::Mode::Zone(z) if z.password == "pw"));
+        assert!(!o.form_plays_itself);
+
+        let o = parse_args(
+            ["--server", "x:1", "--name", "Bob", "--password", ""]
+                .into_iter()
+                .map(String::from),
+            &MechanismRegistry::builtin(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(&o.mode, app::Mode::Zone(z) if z.password.is_empty()),
+            "an empty password asked for in so many words goes straight in"
+        );
+
+        let o = parse("").unwrap().unwrap();
+        assert!(!o.form_plays_itself, "no zone named: the form, as ever");
     }
 }

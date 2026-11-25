@@ -18,6 +18,7 @@ use crate::game::art::{self, Art};
 use crate::game::input::{InputState, Stroke, char_for, shifted_char};
 use crate::game::login::{Choice, Login};
 use crate::game::online::{Online, ServerOptions, Supplied};
+use crate::game::remember;
 use crate::game::sandbox::Sandbox;
 use crate::game::settings_ui::{SettingsUi, UiAction};
 use crate::game::start_spots::{Rect, Spot, Spots};
@@ -238,6 +239,10 @@ pub struct Options {
     /// the lead's own settings, twice over, leaving the next ordinary start
     /// with a local directory and no zone list.
     pub saved: crate::config::Config,
+    /// `--server` with no `--password`: the start-up screen opens filled in and
+    /// plays by itself once the password store has looked up the password saved
+    /// for that name and zone, or waits for one to be typed when there is none.
+    pub form_plays_itself: bool,
 }
 
 /// Waiting for the zone: shows progress until the arena is ready.
@@ -264,6 +269,11 @@ struct LoginScreen {
     spots: Spots,
     /// Fills in a saved password when the name and zone have one.
     recall: crate::game::remember::Recall,
+    /// A Play waiting for the store to look up the saved password.
+    hold: Option<crate::game::remember::Hold>,
+    /// The held Play was the command line's rather than the player's: the
+    /// form is not saved as the player's last choice when it goes through.
+    held_for_command_line: bool,
 }
 
 enum Screen {
@@ -455,6 +465,8 @@ impl App {
             browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
             spots: Spots::default(),
             recall: Default::default(),
+            hold: None,
+            held_for_command_line: false,
         }));
         run.window.set_title("Open SubSpace");
         self.settings = None;
@@ -579,6 +591,17 @@ impl ApplicationHandler for App {
                 if self.options.open_zones {
                     login.focus_zones();
                 }
+                // A zone named on the command line with no password: play as
+                // soon as the saved one is found, and wait for one to be typed
+                // when there is none. The ship is the command line's too, as it
+                // would have been straight in.
+                let hold = self.options.form_plays_itself.then(|| {
+                    login.ship = z.ship;
+                    crate::game::remember::Hold::new(
+                        std::time::Instant::now(),
+                        crate::game::remember::IfNone::Stay,
+                    )
+                });
                 Screen::Login(Box::new(LoginScreen {
                     login,
                     art,
@@ -586,6 +609,8 @@ impl ApplicationHandler for App {
                     browser: crate::game::zones::ZoneBrowser::open(&self.options.directories),
                     spots: Spots::default(),
                     recall: Default::default(),
+                    hold,
+                    held_for_command_line: hold.is_some(),
                 }))
             }
         };
@@ -641,35 +666,22 @@ impl ApplicationHandler for App {
             // included: it reads the keystrokes from there in `frame`, which is
             // what lets a scripted `--press` reach it as it reaches every other
             // screen.
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
                 };
-                if event.state != ElementState::Pressed {
-                    if let Some(code) = code {
-                        self.input.release(code);
-                    }
-                    return;
-                }
-                // The key and the character it typed are one keystroke, with the
-                // OS repeat flag on it. `event.repeat` is the flag that used to
-                // be dropped on the floor, which is why a held Backspace cleared
-                // one character and stopped.
-                let mut chars = event.text.iter().flat_map(|t| t.chars());
-                let first = chars.next();
-                if code.is_some() || first.is_some() {
-                    self.input.press(Stroke {
-                        key: code,
-                        text: first,
-                        repeat: event.repeat,
-                    });
-                }
-                // A key event can carry more than one character when a dead key
-                // finishes a composition. The key belongs to the first of them.
-                for c in chars {
-                    self.input.press(Stroke::text(c).repeated(event.repeat));
-                }
+                self.input.window_key(
+                    code,
+                    event.text.as_deref().unwrap_or(""),
+                    event.state == ElementState::Pressed,
+                    event.repeat,
+                    is_synthetic,
+                );
             }
             // The pointer, which the start-up screen is built around: Continuum's
             // own is a set of named hot spots, so a keyboard-only version of it
@@ -933,7 +945,7 @@ impl App {
                     | None => {}
                 }
             }
-            let choice = match pointed {
+            let mut choice = match pointed {
                 // The four that are choices rather than changes go through the
                 // same door the keys do, so neither can do something the other
                 // cannot.
@@ -944,6 +956,52 @@ impl App {
                 Some(Spot::RefreshZones) => Some(Choice::RefreshZones),
                 _ => ls.login.input(&strokes, self.input.shift()),
             };
+            // The command line's Play gives way to the player's first key or
+            // click: the form is theirs from then on.
+            if ls.held_for_command_line && (clicked || !strokes.is_empty()) {
+                ls.hold = None;
+                ls.held_for_command_line = false;
+            }
+            // Play with the password box empty while the store may still be
+            // looking up a saved password for this name and zone: wait for it.
+            let now = std::time::Instant::now();
+            if matches!(choice, Some(Choice::Connect(_)))
+                && remember::Hold::needed(&ls.login, &ls.recall, &self.vault)
+            {
+                log::info!("Play waits for the password store to look up a saved password");
+                ls.hold = Some(remember::Hold::new(now, remember::IfNone::Play));
+                ls.held_for_command_line = false;
+                ls.login.error = Some("Looking for a saved password...".into());
+                choice = None;
+            }
+            let mut from_command_line = false;
+            if choice.is_none()
+                && let Some(hold) = ls.hold
+            {
+                match hold.verdict(&ls.login, &ls.recall, &self.vault, now) {
+                    remember::Verdict::Wait => {}
+                    remember::Verdict::Play => {
+                        ls.hold = None;
+                        from_command_line = std::mem::take(&mut ls.held_for_command_line);
+                        choice = ls.login.play();
+                    }
+                    remember::Verdict::Stay => {
+                        ls.hold = None;
+                        ls.held_for_command_line = false;
+                        // A missing name or a zone with no port says so, as
+                        // Play would; otherwise the password box is waiting.
+                        if ls.login.play().is_some() {
+                            log::info!(
+                                "no password saved for this name and zone: waiting for one \
+                                 to be typed"
+                            );
+                            ls.login.focus_on(crate::game::login::Field::Password);
+                            ls.login.error =
+                                Some("Type the zone's password, then press Enter".into());
+                        }
+                    }
+                }
+            }
             match choice {
                 Some(Choice::Options) => {
                     self.settings = Some(SettingsUi::new(current_config(&self.options)));
@@ -978,7 +1036,11 @@ impl App {
                 }
                 Some(Choice::Connect(mut opts)) => {
                     apply_settings(&self.options, &mut opts);
-                    if let Some(path) = &self.options.login_file {
+                    // The command line is for this run: what it named is not
+                    // kept as the player's last zone and name.
+                    if let Some(path) = &self.options.login_file
+                        && !from_command_line
+                    {
                         ls.login.save(path);
                     }
                     let size = run.window.inner_size();
@@ -1090,6 +1152,8 @@ impl App {
                             ),
                             spots: Spots::default(),
                             recall: Default::default(),
+                            hold: None,
+                            held_for_command_line: false,
                         }));
                     }
                     (None, Some(err)) => return self.fail(event_loop, err),
