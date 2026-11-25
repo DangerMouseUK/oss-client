@@ -2026,12 +2026,29 @@ impl Session {
             timestamp: s.timestamp,
         });
         if s.key == 0 {
+            log::debug!("seeds only: no security challenge");
             return;
         }
         if self.check_must_wait() {
+            log::info!(
+                "{}",
+                challenge_line(s.key, Challenge::Waiting(self.waiting_for()))
+            );
             self.pending_security = Some(s.key);
         } else {
             self.answer_security(now_ms, s.key);
+        }
+    }
+
+    /// What a held security check is waiting for, in the order
+    /// [`Session::check_must_wait`] tests it.
+    fn waiting_for(&self) -> &'static str {
+        if self.settings_raw.is_empty() {
+            "the arena's settings"
+        } else if self.map.is_some() {
+            "the map"
+        } else {
+            "the end of the arena entry"
         }
     }
 
@@ -2131,6 +2148,21 @@ impl Session {
             key,
             map_crc32: tiles.map(|t| checksum::map_crc32(t)),
         });
+        // One line for every challenge, whichever profile answers it, so that a
+        // live run says what the zone asked. A profile that answers in the
+        // Continuum form names itself in a line of its own, so the session's
+        // goes to the debug log there rather than saying it twice.
+        let line = challenge_line(
+            key,
+            Challenge::Answered {
+                continuum_form: answer.continuum.is_some(),
+            },
+        );
+        if answer.continuum.is_some() {
+            log::debug!("{line}");
+        } else {
+            log::info!("{line}");
+        }
         let ping = (self.conn.rtt_ms() / 10).min(u16::MAX as u64) as u16;
         let stats = self.conn.stats();
         let resp = SecurityResponse {
@@ -2570,9 +2602,174 @@ mod redaction_tests {
     }
 }
 
+/// Where a security challenge has got to, for its log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Challenge {
+    /// Held until the session has what every answer checksums.
+    Waiting(&'static str),
+    /// Answered, in the SubSpace form or the longer Continuum one.
+    Answered { continuum_form: bool },
+}
+
+/// The log line for a security challenge: its key, and what was done about it.
+///
+/// It names the checksums an answer carries and never their values. The key
+/// is the zone's, sent in the challenge, and is what ties this line to the
+/// zone's own record of the check.
+fn challenge_line(key: u32, state: Challenge) -> String {
+    match state {
+        Challenge::Waiting(what) => {
+            format!("security challenge {key:08x}: waiting for {what} before answering")
+        }
+        Challenge::Answered {
+            continuum_form: false,
+        } => format!(
+            "security challenge {key:08x}: answered as subspace (settings, map and executable checksums)"
+        ),
+        Challenge::Answered {
+            continuum_form: true,
+        } => format!(
+            "security challenge {key:08x}: answered in the continuum form (settings, map and executable checksums, and the continuum fields)"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This thread's log lines while `f` runs, for the tests that check what is
+    /// logged. Other threads' lines are dropped, so tests running alongside do
+    /// not show up in each other's captures.
+    fn logged<T>(f: impl FnOnce() -> T) -> (T, Vec<(log::Level, String)>) {
+        use std::cell::RefCell;
+        thread_local! {
+            static LINES: RefCell<Option<Vec<(log::Level, String)>>> = const { RefCell::new(None) };
+        }
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, r: &log::Record) {
+                LINES.with(|l| {
+                    if let Some(v) = l.borrow_mut().as_mut() {
+                        v.push((r.level(), r.args().to_string()));
+                    }
+                });
+            }
+            fn flush(&self) {}
+        }
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            if log::set_logger(&Capture).is_ok() {
+                log::set_max_level(log::LevelFilter::Trace);
+            }
+        });
+        LINES.with(|l| *l.borrow_mut() = Some(Vec::new()));
+        let out = f();
+        (
+            out,
+            LINES.with(|l| l.borrow_mut().take().unwrap_or_default()),
+        )
+    }
+
+    fn info(lines: &[(log::Level, String)]) -> Vec<&str> {
+        lines
+            .iter()
+            .filter(|(level, _)| *level == log::Level::Info)
+            .map(|(_, line)| line.as_str())
+            .collect()
+    }
+
+    fn challenge(key: u32) -> s2c::Security {
+        s2c::Security {
+            green_seed: 1,
+            door_seed: 2,
+            timestamp: 3,
+            key,
+        }
+    }
+
+    /// A challenge answered on a SubSpace connection left no line in the log,
+    /// so "no challenge" could not be told from "answered quietly". Every one
+    /// now says its key and what became of it -- held, then answered -- and
+    /// never what the answer was.
+    #[test]
+    fn every_security_challenge_is_logged_without_its_answer() {
+        let mut s = Session::new(SessionConfig::default(), 0, 1);
+        let (_, lines) = logged(|| s.on_security(0, &challenge(0)));
+        assert_eq!(info(&lines), Vec::<&str>::new(), "seeds only: no challenge");
+
+        let (_, lines) = logged(|| s.on_security(0, &challenge(0x1234_5678)));
+        assert_eq!(
+            info(&lines),
+            ["security challenge 12345678: waiting for the arena's settings before answering"]
+        );
+
+        // The settings arrive and the arena entry ends with no map: answered.
+        s.settings_raw = vec![7; 1428];
+        s.entering_done = true;
+        let (_, lines) = logged(|| s.answer_held_check());
+        assert_eq!(
+            info(&lines),
+            [
+                "security challenge 12345678: answered as subspace (settings, map and executable checksums)"
+            ]
+        );
+
+        let key = 0x0bad_cafe;
+        let (_, lines) = logged(|| s.on_security(10, &challenge(key)));
+        assert_eq!(
+            info(&lines),
+            [
+                "security challenge 0badcafe: answered as subspace (settings, map and executable checksums)"
+            ]
+        );
+        // The settings checksum is the answer value to look for. The map one is
+        // not, here: with no map it is the key itself, which the line does name.
+        let settings = format!("{:08x}", checksum::settings_checksum(key, &s.settings_raw));
+        assert_ne!(settings, format!("{key:08x}"));
+        for line in info(&lines) {
+            assert!(!line.contains(&settings), "no answer value at INFO: {line}");
+        }
+    }
+
+    /// A profile that answers in the Continuum form names itself in a line of
+    /// its own, so the session does not say it a second time at INFO.
+    #[test]
+    fn a_continuum_form_answer_is_not_logged_twice() {
+        #[derive(Debug)]
+        struct LongForm;
+        impl ClientProfile for LongForm {
+            fn login(&self) -> LoginForm {
+                LoginForm::vie()
+            }
+            fn security(&self, _: SecurityChallenge) -> SecurityAnswer {
+                SecurityAnswer {
+                    exe_checksum: 0,
+                    continuum: Some((0, None)),
+                }
+            }
+        }
+        let mut s = Session::new(
+            SessionConfig {
+                client: std::sync::Arc::new(LongForm),
+                ..SessionConfig::default()
+            },
+            0,
+            1,
+        );
+        s.settings_raw = vec![7; 1428];
+        s.entering_done = true;
+        let (_, lines) = logged(|| s.on_security(0, &challenge(0x0000_0042)));
+        assert_eq!(info(&lines), Vec::<&str>::new());
+        assert!(
+            lines.iter().any(|(_, l)| l
+                .starts_with("security challenge 00000042: answered in the continuum form")),
+            "at debug: {lines:?}"
+        );
+    }
 
     #[test]
     fn tracks_server_silence() {
