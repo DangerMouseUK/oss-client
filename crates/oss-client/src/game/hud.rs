@@ -60,7 +60,33 @@ fn icons_top(c: &Canvas) -> f32 {
 
 /// Side of the small radar.
 pub(super) fn radar_dim(c: &Canvas) -> f32 {
-    ((((c.view_w as u32 / 6) / 4) * 8) / 2) as f32
+    small_radar_dim(c.view_w)
+}
+
+fn small_radar_dim(view_w: f32) -> f32 {
+    ((((view_w as u32 / 6) / 4) * 8) / 2) as f32
+}
+
+/// Where the radar goes on a screen this size: its side, and its top-left
+/// corner.
+///
+/// Both radars hang from the same bottom-right corner, as in both original
+/// clients: holding Alt grows the small radar up and to the left into the
+/// whole-zone map, rather than opening a second map in the middle of the
+/// screen. The whole-zone map keeps its size rule -- the whole map, as large as
+/// the shorter side of the screen allows -- and only its place changed: it was
+/// centred.
+fn radar_place(view_w: f32, view_h: f32, big: bool) -> (f32, f32, f32) {
+    let dim = if big {
+        (view_w.min(view_h) - 40.0).floor().max(64.0)
+    } else {
+        small_radar_dim(view_w)
+    };
+    (
+        dim,
+        view_w - dim - RADAR_MARGIN,
+        view_h - dim - RADAR_MARGIN,
+    )
 }
 
 /// The map square a pixel position falls in, as Continuum names it: the map is 20
@@ -522,19 +548,12 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
     let full = radar.full_dim as f32;
     let me = s.me();
     let to_radar = |px: f32| px * full / 16384.0;
-    let (dim, min_x, min_y, x0, y0) = if s.big_radar {
-        // Whole map, as large as fits, centred.
-        let dim = (c.view_w.min(c.view_h) - 40.0).floor().max(64.0);
-        (
-            dim,
-            0.0,
-            0.0,
-            ((c.view_w - dim) / 2.0).floor(),
-            ((c.view_h - dim) / 2.0).floor(),
-        )
+    // The whole map while Alt is held; otherwise about a sixth of the screen
+    // width, as in Continuum. Both from the bottom-right corner.
+    let (dim, x0, y0) = radar_place(c.view_w, c.view_h, s.big_radar);
+    let (min_x, min_y) = if s.big_radar {
+        (0.0, 0.0)
     } else {
-        // About a sixth of the screen width, centred on you, as in Continuum.
-        let dim = radar_dim(c);
         // Centred on the camera (your ship, or the spectator view).
         let p = oss_sim::Vec2::new(c.cam.0 as i32, c.cam.1 as i32);
         let min_x = (to_radar(p.x as f32) - dim / 2.0)
@@ -543,13 +562,7 @@ fn draw_radar(s: &mut Sandbox, c: &Canvas, r: &mut Renderer) {
         let min_y = (to_radar(p.y as f32) - dim / 2.0)
             .floor()
             .clamp(0.0, (full - dim).max(0.0));
-        (
-            dim,
-            min_x,
-            min_y,
-            c.view_w - dim - RADAR_MARGIN,
-            c.view_h - dim - RADAR_MARGIN,
-        )
+        (min_x, min_y)
     };
     if dim < 8.0 {
         return;
@@ -973,6 +986,30 @@ mod tests {
         let squeezed = gauge(640.0, full);
         assert_eq!(squeezed.bar_half, None);
         assert!(!squeezed.frame);
+    }
+
+    /// Holding Alt drew the whole-zone map in the middle of the screen. Both
+    /// original clients grow it out of the small radar instead, so its
+    /// bottom-right corner is the small radar's, on every screen size.
+    #[test]
+    fn the_whole_zone_map_grows_from_the_small_radars_corner() {
+        for (w, h) in [
+            (640.0, 480.0),
+            (1024.0, 768.0),
+            (1280.0, 800.0),
+            (1920.0, 1080.0),
+        ] {
+            let (small, sx, sy) = radar_place(w, h, false);
+            let (big, bx, by) = radar_place(w, h, true);
+            assert_eq!((bx + big, by + big), (sx + small, sy + small), "{w}x{h}");
+            assert!(big > small, "{w}x{h}: it grows");
+            assert!(bx >= 0.0 && by >= 0.0, "{w}x{h}: and stays on the screen");
+            assert_eq!(
+                big,
+                (w.min(h) - 40.0).floor(),
+                "{w}x{h}: the same size as before"
+            );
+        }
     }
 
     #[test]
