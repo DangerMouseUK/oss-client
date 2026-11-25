@@ -867,6 +867,16 @@ impl Session {
         self.mechanism.as_ref()
     }
 
+    /// What is wrong with sending `form` on this connection, if anything: the
+    /// login form checked against the era of the connection's mechanism, or of
+    /// its cipher's kind when the session does not know its mechanism.
+    fn login_complaint(&self, form: &LoginForm) -> Option<&'static str> {
+        login_form_mismatch(
+            login_era(self.mechanism.as_ref(), self.conn.cipher_kind()),
+            form.kind == c2s::kind::CONT_LOGIN,
+        )
+    }
+
     /// The server's OpenSec key, when it sent one.
     pub fn server_key(&self) -> Option<[u8; 32]> {
         self.conn.peer_key()
@@ -1058,10 +1068,7 @@ impl Session {
         // can decide whether this fires — and in this repo network data never panics
         // the client. The send goes ahead; the zone's refusal is the real outcome and
         // this is the line that explains it.
-        if let Some(complaint) = login_form_mismatch(
-            login_era(self.mechanism.as_ref(), self.conn.cipher_kind()),
-            form.kind == c2s::kind::CONT_LOGIN,
-        ) {
+        if let Some(complaint) = self.login_complaint(&form) {
             log::error!(
                 "{complaint} (cipher {}); the zone will drop this login",
                 self.conn.cipher_name().unwrap_or("?")
@@ -2958,6 +2965,42 @@ mod tests {
         assert_eq!((t, n.to_str()), (c2s::arena_type::NAMED, Some("duel")));
         // A number too large for the field is clamped, not wrapped negative.
         assert_eq!(arena_target("65535").0, i16::MAX);
+    }
+
+    /// The check as the session that sends the login makes it: opened by name
+    /// with a mechanism of each era, it knows which form the zone will expect
+    /// before it has connected, though the mechanism's cipher reports no kind.
+    #[test]
+    fn a_session_checks_its_login_against_its_mechanisms_era() {
+        use crate::security::{MechanismRegistry, SecurityMode, client_handshake, context};
+        use crate::test_zone::dummy_mechanism;
+
+        let subspace_form = LoginForm::vie();
+        let continuum_form = LoginForm::continuum(0, [0; 64]);
+        for era in [Era::Continuum, Era::SubSpace, Era::Modern] {
+            let mut registry = MechanismRegistry::builtin();
+            registry
+                .register(dummy_mechanism("dummy@example.org", "Dummy", era, 2000))
+                .unwrap();
+            let named = SecurityMode::parse("dummy@example.org", &registry).unwrap();
+            let negotiation = client_handshake(&registry, &named, &context(1, None, None)).unwrap();
+            let session = Session::with_negotiation(SessionConfig::default(), 0, negotiation);
+            let continuum = era == Era::Continuum;
+            assert_eq!(
+                session.login_complaint(&continuum_form).is_none(),
+                continuum,
+                "{era:?}, Continuum form"
+            );
+            assert_eq!(
+                session.login_complaint(&subspace_form).is_none(),
+                !continuum,
+                "{era:?}, SubSpace form"
+            );
+        }
+        // Without a mechanism, and before any cipher, there is nothing to go on.
+        let plain = Session::new(SessionConfig::default(), 0, 1);
+        assert_eq!(plain.login_complaint(&continuum_form), Option::None);
+        assert_eq!(plain.login_complaint(&subspace_form), Option::None);
     }
 
     /// The pairing the session cannot otherwise catch: the profile picks the login
