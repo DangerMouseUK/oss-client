@@ -6,7 +6,7 @@ take and a team to take them from. When the publisher walked away, the players k
 running themselves — and they still are, on a client called Continuum and on zones that have
 been up for twenty years.
 
-**`oss-client` is a new client for that game**, written from scratch in Rust. It speaks the
+**`oss-client` is the Open SubSpace client, a new client for that game**, written from scratch in Rust. It speaks the
 protocol the existing zones speak — it has played on a zone running **subgame**, the original
 server software, and it plays on
 [oss-server](https://github.com/DangerMouseUK/oss-server). It is cross-platform, it runs at
@@ -216,6 +216,8 @@ Never commit `Continuum.exe` or its DLLs, third-party zone downloads, or capture
 
 ## Licence
 
+Copyright (c) 2026 The Open SubSpace contributors.
+
 GPL-2.0-or-later (see [`LICENSE`](LICENSE)). The `oss-assets` crate is MIT so that bots and
 tools can reuse it. The split across the three repositories is deliberate:
 [oss-core](https://github.com/DangerMouseUK/oss-core) is MIT so that anyone's bot, tool or
@@ -234,5 +236,5 @@ claimed — [assets/classic/README.md](assets/classic/README.md) says so in full
 convenience rather than a dependency: point the client at a Continuum install or at your own
 asset folder and it needs nothing from that directory.
 
-SubSpace and Continuum are the names of the original games; this project is an independent,
+SubSpace and Continuum are the names of the original games; Open SubSpace is an independent,
 compatible implementation and is not affiliated with their authors.
