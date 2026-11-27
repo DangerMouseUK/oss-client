@@ -200,7 +200,7 @@ fn parse_args(
             }
             "--assets-dir" => assets_dir = Some(PathBuf::from(value("--assets-dir")?)),
             "--server" => server = Some(value("--server")?),
-            "--name" => name = Some(value("--name")?),
+            "--name" => name = Some(name_fits(value("--name")?, "--name")?),
             "--password" => password = Some(value("--password")?),
             "--arena" => arena = Some(value("--arena")?),
             "--new-user" => new_user = true,
@@ -569,6 +569,19 @@ fn apply_config(opts: &mut app::Options) -> Result<(), String> {
     finish_options(opts, cfg)
 }
 
+/// `name`, if it is one a zone can be sent: no longer than SubSpace 1.34's
+/// name box allows. A longer one is refused rather than cut, because the cut
+/// name would log in as a different account.
+fn name_fits(name: String, what: &str) -> Result<String, String> {
+    if name.chars().count() > oss_session::MAX_NAME {
+        return Err(format!(
+            "{what} is longer than {} characters",
+            oss_session::MAX_NAME
+        ));
+    }
+    Ok(name)
+}
+
 fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), String> {
     // Kept as read, for the settings screen to start from: what follows lays
     // the command line over these values for this run only.
@@ -606,7 +619,7 @@ fn finish_options(opts: &mut app::Options, cfg: config::Config) -> Result<(), St
         && z.name.is_empty()
     {
         match cfg.name {
-            Some(name) => z.name = name,
+            Some(name) => z.name = name_fits(name, "the settings file's name")?,
             // No name anywhere: ask on the start-up screen, carrying everything
             // else the command line asked for rather than starting again from
             // nothing.
@@ -637,6 +650,21 @@ mod tests {
             s.split_whitespace().map(String::from),
             &MechanismRegistry::builtin(),
         )
+    }
+
+    /// `--name` takes what SubSpace 1.34's name box takes, 23 characters, and
+    /// refuses a longer name rather than cutting it into someone else's.
+    #[test]
+    fn a_name_longer_than_23_characters_is_refused() {
+        let o = parse("--server x:1 --name Abcdefghijklmnopqrs1234 --password pw")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&o.mode, app::Mode::Zone(z) if z.name == "Abcdefghijklmnopqrs1234"),
+            "straight in, with the whole name"
+        );
+        let e = parse("--server x:1 --name Abcdefghijklmnopqrs12345 --password pw").err();
+        assert_eq!(e.as_deref(), Some("--name is longer than 23 characters"));
     }
 
     /// A mechanism registered in one line is a word `--security` takes, and the

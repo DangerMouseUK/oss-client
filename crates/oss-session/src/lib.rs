@@ -42,6 +42,13 @@ pub use oss_proto::s2c::BallPosition;
 /// Spectator "ship".
 pub const SPECTATOR: u8 = 8;
 
+/// The longest player name, in characters.
+///
+/// SubSpace 1.34's name box stops at 23, and the biller's login reply has
+/// room for 23 and a terminator. Anything that takes a name refuses a longer
+/// one rather than cutting it: a cut name is a different account.
+pub const MAX_NAME: usize = 23;
+
 /// Which of the form's two round buttons for sex the player chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sex {

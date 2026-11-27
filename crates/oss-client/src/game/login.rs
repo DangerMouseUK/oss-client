@@ -25,7 +25,7 @@ use winit::keyboard::KeyCode;
 
 use super::input::Stroke;
 use super::online::ServerOptions;
-use oss_session::SPECTATOR;
+use oss_session::{MAX_NAME, SPECTATOR};
 
 pub const FILE_NAME: &str = "login.ini";
 const MAX_FIELD: usize = 64;
@@ -452,10 +452,16 @@ impl Login {
             // zones instead of moving on to the next field. Read per stroke:
             // the stroke before this one may have moved the focus.
             let on_list = self.focused() == Field::Zones;
+            // The name box stops where SubSpace 1.34's does.
+            let max = if self.focused() == Field::Name {
+                MAX_NAME
+            } else {
+                MAX_FIELD
+            };
             if let Some(c) = stroke.text
                 && let Some(t) = self.text_mut()
                 && !c.is_control()
-                && t.chars().count() < MAX_FIELD
+                && t.chars().count() < max
             {
                 t.push(c);
             }
@@ -545,6 +551,14 @@ impl Login {
         }
         if self.name.trim().is_empty() {
             self.error = Some("Enter a name".into());
+            self.focus_on(Field::Name);
+            return None;
+        }
+        // Typing stops at the limit, but a name can arrive longer from
+        // `login.ini` or the settings file. It is shown whole and refused
+        // here, not cut short, because a shorter name is someone else's.
+        if self.name.trim().chars().count() > MAX_NAME {
+            self.error = Some(format!("A name is at most {MAX_NAME} characters"));
             self.focus_on(Field::Name);
             return None;
         }
@@ -1049,6 +1063,37 @@ mod tests {
         assert_eq!(Login::load(Some(&ini), None, base()).ship, SPECTATOR);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SubSpace 1.34's name box stops at 23 characters, and so does this one.
+    /// The password box does not, because it is not a name. A longer name that
+    /// arrives from the settings is shown whole and refused at Enter, not cut
+    /// short into somebody else's.
+    #[test]
+    fn the_name_box_stops_at_23_characters() {
+        let mut l = Login::load(None, None, Box::new(Login::default().into_base()));
+        assert_eq!(l.focused(), Field::Name);
+        l.input(&strokes(&[], "Abcdefghijklmnopqrs1234567890"), false);
+        assert_eq!(l.name, "Abcdefghijklmnopqrs1234");
+        l.input(&strokes(&[KeyCode::Tab], ""), false);
+        assert_eq!(l.focused(), Field::Password);
+        l.input(&strokes(&[], "a password of thirty letters.."), false);
+        assert_eq!(l.password.chars().count(), 30);
+
+        let mut l = Login::load(
+            None,
+            Some("Abcdefghijklmnopqrs12345"),
+            Box::new(Login::default().into_base()),
+        );
+        assert_eq!(l.name.chars().count(), 24, "shown whole");
+        assert_eq!(l.input(&strokes(&[KeyCode::Enter], ""), false), None);
+        assert_eq!(l.error.as_deref(), Some("A name is at most 23 characters"));
+        assert_eq!(l.focused(), Field::Name);
+        l.input(&strokes(&[KeyCode::Backspace], ""), false);
+        assert!(matches!(
+            l.input(&strokes(&[KeyCode::Enter], ""), false),
+            Some(Choice::Connect(_))
+        ));
     }
 
     #[test]

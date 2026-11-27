@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use oss_session::map::{MapCache, default_cache_dir};
 use oss_session::sim::{arena_world, own_position, weapon_for};
 use oss_session::udp::UdpDriver;
-use oss_session::{SPECTATOR, Session, SessionConfig, SessionEvent, State, chat_type};
+use oss_session::{MAX_NAME, SPECTATOR, Session, SessionConfig, SessionEvent, State, chat_type};
 use oss_sim::fixed::Rng;
 use oss_sim::{ShipInput, World};
 
@@ -150,6 +150,19 @@ fn parse_args(
     }
     if o.server.is_empty() {
         return Err("--server is required".into());
+    }
+    // The client's name box stops at MAX_NAME, and a zone is never sent a
+    // longer name. The numbered names are checked too: the number goes on the
+    // end, so the last bot's is the longest.
+    let longest = if o.count > 1 {
+        format!("{}{}", o.name, o.count)
+    } else {
+        o.name.clone()
+    };
+    if longest.chars().count() > MAX_NAME {
+        return Err(format!(
+            "the name {longest:?} is longer than {MAX_NAME} characters"
+        ));
     }
     Ok(Some(o))
 }
@@ -519,6 +532,29 @@ mod tests {
             s.split_whitespace().map(String::from),
             &MechanismRegistry::builtin(),
         )
+    }
+
+    /// A bot's name is held to the client's 23 characters, numbered names
+    /// included: the number goes on the end, so ten bots of a 22-character
+    /// name would end with a 24-character one.
+    #[test]
+    fn a_name_longer_than_23_characters_is_refused() {
+        let o = parse("--server x:1 --name Abcdefghijklmnopqrs1234")
+            .unwrap()
+            .unwrap();
+        assert_eq!(o.name, "Abcdefghijklmnopqrs1234");
+        assert!(parse("--server x:1 --name Abcdefghijklmnopqrs12345").is_err());
+        assert!(
+            parse("--server x:1 --name Abcdefghijklmnopqrs123 --count 9")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            parse("--server x:1 --name Abcdefghijklmnopqrs123 --count 10")
+                .err()
+                .as_deref(),
+            Some("the name \"Abcdefghijklmnopqrs12310\" is longer than 23 characters")
+        );
     }
 
     /// The bot negotiates exactly as the client does: `auto` unless told
