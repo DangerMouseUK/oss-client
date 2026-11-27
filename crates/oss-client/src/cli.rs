@@ -570,14 +570,17 @@ fn apply_config(opts: &mut app::Options) -> Result<(), String> {
 }
 
 /// `name`, if it is one a zone can be sent: no longer than SubSpace 1.34's
-/// name box allows. A longer one is refused rather than cut, because the cut
-/// name would log in as a different account.
+/// name box allows, and nothing that box refuses. A longer one is refused
+/// rather than cut, because the cut name would log in as a different account.
 fn name_fits(name: String, what: &str) -> Result<String, String> {
     if name.chars().count() > oss_session::MAX_NAME {
         return Err(format!(
             "{what} is longer than {} characters",
             oss_session::MAX_NAME
         ));
+    }
+    if let Some(why) = oss_session::name_refusal(&name) {
+        return Err(format!("{what}: {why}"));
     }
     Ok(name)
 }
@@ -665,6 +668,11 @@ mod tests {
         );
         let e = parse("--server x:1 --name Abcdefghijklmnopqrs12345 --password pw").err();
         assert_eq!(e.as_deref(), Some("--name is longer than 23 characters"));
+        let e = parse("--server x:1 --name _ab --password pw").err();
+        assert_eq!(
+            e.as_deref(),
+            Some("--name: Player name cannot start with a symbol.")
+        );
     }
 
     /// A mechanism registered in one line is a word `--security` takes, and the

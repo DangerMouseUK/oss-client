@@ -49,6 +49,27 @@ pub const SPECTATOR: u8 = 8;
 /// one rather than cutting it: a cut name is a different account.
 pub const MAX_NAME: usize = 23;
 
+/// Why SubSpace 1.34's own name box refuses `name`, in its words, or `None`
+/// if it does not.
+///
+/// It refuses a name that starts with a symbol, and a name with a colon
+/// anywhere in it: `:name:` is how a remote private message is addressed,
+/// so a name with a colon could not be sent one. The length is
+/// [`MAX_NAME`]'s to check.
+pub fn name_refusal(name: &str) -> Option<&'static str> {
+    if name
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_ascii_alphanumeric())
+    {
+        return Some("Player name cannot start with a symbol.");
+    }
+    if name.contains(':') {
+        return Some("Player name cannot contain a colon.");
+    }
+    None
+}
+
 /// Which of the form's two round buttons for sex the player chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sex {

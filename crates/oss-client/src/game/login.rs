@@ -25,7 +25,7 @@ use winit::keyboard::KeyCode;
 
 use super::input::Stroke;
 use super::online::ServerOptions;
-use oss_session::{MAX_NAME, SPECTATOR};
+use oss_session::{MAX_NAME, SPECTATOR, name_refusal};
 
 pub const FILE_NAME: &str = "login.ini";
 const MAX_FIELD: usize = 64;
@@ -562,6 +562,12 @@ impl Login {
             self.focus_on(Field::Name);
             return None;
         }
+        // What SubSpace 1.34's own form refuses, in its words.
+        if let Some(why) = name_refusal(self.name.trim()) {
+            self.error = Some(why.into());
+            self.focus_on(Field::Name);
+            return None;
+        }
         self.error = None;
         // The five fields this form owns, over everything else the command line
         // asked for. The `..` is what stops the next option being dropped.
@@ -1094,6 +1100,23 @@ mod tests {
             l.input(&strokes(&[KeyCode::Enter], ""), false),
             Some(Choice::Connect(_))
         ));
+    }
+
+    /// SubSpace 1.34's own form refuses a name with a colon in it, and one
+    /// that starts with a symbol, in these words; so does this one. Anything
+    /// else that box takes goes through, `%` and `,` included.
+    #[test]
+    fn a_colon_or_a_leading_symbol_is_refused_as_subspace_134_does() {
+        for (name, why) in [
+            ("Ab:cd", Some("Player name cannot contain a colon.")),
+            ("_Abcd", Some("Player name cannot start with a symbol.")),
+            ("Mr,Ed%", None),
+        ] {
+            let mut l = Login::load(None, Some(name), Box::new(Login::default().into_base()));
+            let played = l.input(&strokes(&[KeyCode::Enter], ""), false);
+            assert_eq!(l.error.as_deref(), why, "{name:?}");
+            assert_eq!(played.is_some(), why.is_none(), "{name:?}");
+        }
     }
 
     #[test]

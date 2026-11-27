@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use oss_session::map::{MapCache, default_cache_dir};
 use oss_session::sim::{arena_world, own_position, weapon_for};
 use oss_session::udp::UdpDriver;
-use oss_session::{MAX_NAME, SPECTATOR, Session, SessionConfig, SessionEvent, State, chat_type};
+use oss_session::{
+    MAX_NAME, SPECTATOR, Session, SessionConfig, SessionEvent, State, chat_type, name_refusal,
+};
 use oss_sim::fixed::Rng;
 use oss_sim::{ShipInput, World};
 
@@ -163,6 +165,9 @@ fn parse_args(
         return Err(format!(
             "the name {longest:?} is longer than {MAX_NAME} characters"
         ));
+    }
+    if let Some(why) = name_refusal(&o.name) {
+        return Err(format!("--name: {why}"));
     }
     Ok(Some(o))
 }
@@ -548,6 +553,10 @@ mod tests {
             parse("--server x:1 --name Abcdefghijklmnopqrs123 --count 9")
                 .unwrap()
                 .is_some()
+        );
+        assert_eq!(
+            parse("--server x:1 --name a:b").err().as_deref(),
+            Some("--name: Player name cannot contain a colon.")
         );
         assert_eq!(
             parse("--server x:1 --name Abcdefghijklmnopqrs123 --count 10")
