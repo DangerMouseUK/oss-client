@@ -467,7 +467,7 @@ jobs:
           # The download-artifact step above runs from the workspace root.
           cp "../notices-download/${platform}/oss-bot.txt" "dist/${bot}/THIRD-PARTY-NOTICES.txt"
           {
-            echo "OSS Bot ${version} -- open flavour."
+            echo "Open SubSpace bot ${version} -- open flavour."
             echo
             echo "Speaks SubSpace (VIE) and OpenSec. Fully open source under"
             echo "GPL-2.0-or-later (LICENSE). Source: ${source}"
@@ -484,7 +484,7 @@ jobs:
           cp README.md "dist/${name}/"
           cp "../notices-download/${platform}/oss-client.txt" "dist/${name}/THIRD-PARTY-NOTICES.txt"
           {
-            echo "OSS Client ${version} -- open flavour."
+            echo "Open SubSpace client ${version} -- open flavour."
             echo
             echo "Speaks SubSpace (VIE) and OpenSec. Fully open source under"
             echo "GPL-2.0-or-later (LICENSE). Source: ${source}"
